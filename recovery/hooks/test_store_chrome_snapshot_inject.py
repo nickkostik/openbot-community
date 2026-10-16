@@ -30,6 +30,17 @@ function make(snapshotNow){const s=service(snapshotNow);s.deps.owner=s;return s;
         self.assertEqual(patched.replace(m.HELPER,'').replace(m.NEW,m.OLD),source)
         self.assertIn('includeStoreDbs:true',patched)
 
+    def test_reviewed_legacy_binding_uses_the_same_coalescer(self):
+        source=self.fixture().replace(m.OLD,m.OLD_VARIANTS[1]);patched=m.patch(source)
+        self.assertEqual(m.patch(patched),patched)
+        self.assertEqual(patched.replace(m.HELPER,'').replace(m.NEW,m.OLD_VARIANTS[1]),source)
+        self.assertEqual(patched,m.patch(self.fixture()))
+
+    def test_unreviewed_or_mismatched_catch_bindings_remain_unsupported(self):
+        for old in [m.OLD.replace('error64','unknownError'),
+                    m.OLD.replace('catch((error64)', 'catch((error42)')]:
+            with self.assertRaises(RuntimeError):m.patch(self.fixture().replace(m.OLD,old))
+
     def test_unknown_partial_duplicate_and_outside_class_contracts_refuse(self):
         source=self.fixture();patched=m.patch(source)
         for bad in [source+source,source.replace(m.OLD,'unknown'),patched+m.MARKER,

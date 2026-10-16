@@ -6,6 +6,8 @@ OLD = '''      onSessionChange: () => {
           this.deps.log(`chrome-session snapshot rejected: ${errorMessage(error64)}`);
         });
       },'''
+# The retained local engine differs only in this lexical catch binding.
+OLD_VARIANTS = (OLD, OLD.replace('error64', 'error42'))
 NEW = '''      onSessionChange: () => {
         openbotQueueChromeSessionSnapshot(this);
       },'''
@@ -62,13 +64,13 @@ def patch(source):
         if source.count(MARKER) != 1 or source.count(HELPER + CLASS) != 1 or \
                 source.count('openbotQueueChromeSessionSnapshot') != 2 or \
                 source.count('openbotChromeSnapshotQueues') != 3 or \
-                region.count(NEW) != 1 or OLD in region:
+                region.count(NEW) != 1 or any(old in region for old in OLD_VARIANTS):
             raise RuntimeError('Native Chrome backup queue patch is incomplete')
         return source
     if 'openbotQueueChromeSessionSnapshot' in source or 'openbotChromeSnapshotQueues' in source or \
-            region.count(OLD) != 1:
+            sum(region.count(old) for old in OLD_VARIANTS) != 1:
         raise RuntimeError('Native Chrome backup callback contract changed')
-    source = source[:start] + region.replace(OLD, NEW, 1) + source[end:]
+    source = source[:start] + region.replace(next(old for old in OLD_VARIANTS if old in region), NEW, 1) + source[end:]
     source = source.replace(CLASS, HELPER + CLASS, 1)
     if patch(source) != source:
         raise RuntimeError('Native Chrome backup queue patch is not a fixed point')

@@ -553,13 +553,79 @@ class RemintTests(unittest.TestCase):
             c.execute('INSERT INTO transcript_entries VALUES(2,?,?)',('message-2',json.dumps({'id':'message-2'})));c.commit()
         with self.assertRaisesRegex(RuntimeError,'published history'):self.r.refresh_peer_roster({OLD:NEW})
         self.assertEqual(peer.read_bytes(),before)
-        self.server_transcripts[NEW]=[{'seq':str(seq),'body':base64.b64encode(json.dumps({'id':aid}).encode()).decode()}
-                                     for seq,aid in [(1,'message-2'),(2,'message-1')]]
+        with contextlib.closing(sqlite3.connect(self.root/'agents'/NEW/'store.db')) as db:
+            actual=[json.loads(row[0]) for row in db.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
+        self.server_transcripts[NEW]=[{'seq':str(seq),'body':base64.b64encode(json.dumps(entry).encode()).decode()}
+                                     for seq,entry in enumerate(actual,1)]
         result=self.r.refresh_peer_roster({OLD:NEW})
         self.assertEqual(json.loads(peer.read_text())[0]['id'],NEW)
         proof=result['existingCopyProofs'][0]
         self.assertTrue(proof['sourceIdsRetained']);self.assertTrue(proof['destinationPublicationVerified'])
+        self.assertTrue(proof['sourcePayloadsRetained']);self.assertTrue(proof['destinationPayloadsPublished'])
         self.assertFalse(proof['sourceOrderPreserved'])
+
+    def test_existing_peer_retained_ids_do_not_cover_changed_source_payload(self):
+        self.r.stage(OLD); self.r.register(OLD); self.r.activate(OLD)
+        journal=self.r.read(); journal['entries']=[]; self.r.save(journal)
+        peer=self.root/'openbot-recovery'/'roster.json'; self.write(peer,[{'id':OLD}]); before=peer.read_bytes()
+        with contextlib.closing(sqlite3.connect(self.source/'store.db')) as db:
+            original=json.loads(db.execute('SELECT entry FROM transcript_entries').fetchone()[0])
+            db.execute('UPDATE transcript_entries SET entry=?', (json.dumps({**original,
+                'content':'Retain this quoted identity: '+OLD,'toolResult':{'agentId':OLD}}),)); db.commit()
+        with self.assertRaisesRegex(RuntimeError,'source history payload'):
+            self.r.refresh_peer_roster({OLD:NEW})
+        self.assertEqual(peer.read_bytes(),before)
+
+    def test_existing_peer_published_ids_do_not_cover_changed_tool_payload(self):
+        self.r.stage(OLD); self.r.register(OLD); self.r.activate(OLD)
+        journal=self.r.read(); journal['entries']=[]; self.r.save(journal)
+        peer=self.root/'openbot-recovery'/'roster.json'; self.write(peer,[{'id':OLD}]); before=peer.read_bytes()
+        changed={'id':'message-1','timestampMs':1,'agentId':NEW,
+                 'toolResult':{'status':'changed'}}
+        self.server_transcripts[NEW]=[{'seq':'1','body':base64.b64encode(json.dumps(changed).encode()).decode()}]
+        with self.assertRaisesRegex(RuntimeError,'published history payload'):
+            self.r.refresh_peer_roster({OLD:NEW})
+        self.assertEqual(peer.read_bytes(),before)
+
+    def test_existing_peer_preserves_literal_quoted_ids_with_owner_only_normalization(self):
+        original={'id':'message-1','timestampMs':1,'agentId':OLD,
+                  'content':'Quoted identity: '+OLD,'toolResult':{'agentId':OLD}}
+        with contextlib.closing(sqlite3.connect(self.source/'store.db')) as db:
+            db.execute('UPDATE transcript_entries SET entry=?',(json.dumps(original),)); db.commit()
+        self.r.stage(OLD)
+        target=self.root/'agents'/NEW/'store.db'
+        with contextlib.closing(sqlite3.connect(target)) as db:
+            copied=json.loads(db.execute('SELECT entry FROM transcript_entries').fetchone()[0])
+        self.assertEqual(copied,{**original,'agentId':NEW})
+        self.server_transcripts[NEW]=[{'seq':'1','body':base64.b64encode(json.dumps(copied).encode()).decode()}]
+        self.r.register(OLD); self.r.activate(OLD)
+        journal=self.r.read(); journal['entries']=[]; self.r.save(journal)
+        peer=self.root/'openbot-recovery'/'roster.json'; self.write(peer,[{'id':OLD}])
+        proof=self.r.refresh_peer_roster({OLD:NEW})['existingCopyProofs'][0]
+        self.assertTrue(proof['sourcePayloadsRetained'])
+        self.assertTrue(proof['destinationPayloadsPublished'])
+        self.assertEqual(json.loads(peer.read_text())[0]['id'],NEW)
+
+    def test_existing_peer_refuses_mixed_publication_generations_before_roster_write(self):
+        self.r.stage(OLD); self.r.register(OLD); self.r.activate(OLD)
+        journal=self.r.read(); journal['entries']=[]; self.r.save(journal)
+        peer=self.root/'openbot-recovery'/'roster.json'; self.write(peer,[{'id':OLD}]); before=peer.read_bytes()
+        extra={'id':'message-2','content':'Later message'}
+        with contextlib.closing(sqlite3.connect(self.root/'agents'/NEW/'store.db')) as db:
+            first=json.loads(db.execute('SELECT entry FROM transcript_entries').fetchone()[0])
+            db.execute('INSERT INTO transcript_entries VALUES(2,?,?)',('message-2',json.dumps(extra))); db.commit()
+        original_rpc=self.r.m.rpc; requests=[]
+        def changing_generation(method,body):
+            if method!='ListGrokBotTranscriptEntries':return original_rpc(method,body)
+            requests.append(dict(body)); sequence=2 if len(requests)==1 else 1
+            payload=extra if sequence==2 else first
+            return {'generation':len(requests),'entries':[{'seq':str(sequence),
+                    'body':base64.b64encode(json.dumps(payload).encode()).decode()}]}
+        self.r.m.rpc=changing_generation
+        with self.assertRaisesRegex(RuntimeError,'generation changed'):
+            self.r.refresh_peer_roster({OLD:NEW})
+        self.assertEqual(requests[1]['generation'],1)
+        self.assertEqual(peer.read_bytes(),before)
 
     def test_publication_requests_idle_supervision_without_claiming_delivery(self):
         self.r.stage(OLD);self.r.register(OLD)

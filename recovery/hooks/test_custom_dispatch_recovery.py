@@ -141,6 +141,27 @@ class DispatchTests(fleet.RemintTests):
         with self.assertRaisesRegex(RuntimeError,'uncopied history'):self.recovery().run()
         self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
 
+    def test_quoted_identity_changes_are_not_reselection_coverage(self):
+        self.official_round_trip()
+        original = {'id':'message-1', 'timestampMs':1, 'agentId':fleet.OLD,
+                    'content':'Keep this quoted identity: '+fleet.OLD,
+                    'toolResult':{'agentId':fleet.OLD}}
+        rewritten = {**original, 'agentId':fleet.NEW,
+                     'content':'Keep this quoted identity: '+fleet.NEW,
+                     'toolResult':{'agentId':fleet.NEW}}
+        with fleet.contextlib.closing(fleet.sqlite3.connect(self.source/'store.db')) as db:
+            db.execute('UPDATE transcript_entries SET entry=?', (json.dumps(original),)); db.commit()
+        with fleet.contextlib.closing(fleet.sqlite3.connect(self.root/'agents'/fleet.NEW/'store.db')) as db:
+            db.execute('UPDATE transcript_entries SET entry=?', (json.dumps(rewritten),)); db.commit()
+        self.server_transcripts[fleet.NEW] = [{'seq':'1','body':base64.b64encode(json.dumps(rewritten).encode()).decode()}]
+        peer_settings = self.root/'agents'/fleet.NEW/'settings.json'
+        protected = {path:path.read_bytes() for path in (self.root/'openbot-box-remint.json',
+                     self.source/'settings.json', peer_settings)}
+        with self.assertRaisesRegex(RuntimeError, 'uncopied history'):
+            self.recovery().run()
+        self.assertEqual({path:path.read_bytes() for path in protected}, protected)
+        self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
+
     def test_mode_change_during_existing_copy_visibility_stops_the_remaining_handoff(self):
         self.official_round_trip();original = self.rpc
         def switching(method,body):

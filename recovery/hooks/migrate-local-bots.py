@@ -246,6 +246,9 @@ def fetch_transcript(old, backup):
 
 
 def copy_agent(old, new, mapping, journal):
+    spec = importlib.util.spec_from_file_location('fleet_state_merge',
+        pathlib.Path(__file__).with_name('fleet-state-merge.py'))
+    merger = importlib.util.module_from_spec(spec); spec.loader.exec_module(merger)
     src, dst = SD / 'agents' / old, SD / 'agents' / new
     temp = SD / ('local-copy-' + new)
     if temp.exists():
@@ -265,6 +268,10 @@ def copy_agent(old, new, mapping, journal):
         # Transform only TEXT columns; encrypted or binary blob data stays intact.
         tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         for (table,) in tables:
+            # These records are merged below with owner-only normalization.
+            # SQL replace() on their serialized JSON would rewrite history.
+            if table == 'transcript_entries':
+                continue
             qt = '"' + table.replace('"', '""') + '"'
             columns = conn.execute('PRAGMA table_info(' + qt + ')').fetchall()
             for column in columns:
@@ -292,10 +299,13 @@ def copy_agent(old, new, mapping, journal):
     for file in temp.rglob('*'):
         if file.is_symlink() or not file.is_file() or file.suffix not in ('.json', '.jsonl', '.md', '.txt', '.yaml', '.yml'):
             continue
-        original = file.read_text()
-        updated = remap_text(original, mapping)
+        with file.open('r', newline='') as handle:
+            original = handle.read()
+        updated = merger.remap_transcript_jsonl(original, mapping) if file.suffix == '.jsonl' \
+            else remap_text(original, mapping)
         if updated != original:
-            file.write_text(updated)
+            with file.open('w', newline='') as handle:
+                handle.write(updated)
     profile = read(temp / 'profile.json')
     profile.pop('serverId', None)
     profile['harness'] = 'box'
@@ -311,9 +321,6 @@ def copy_agent(old, new, mapping, journal):
         write(file, automation)
     remote = fetch_transcript(old, journal['backup'])
     conn = sqlite3.connect(temp / 'store.db')
-    spec = importlib.util.spec_from_file_location('fleet_state_merge',
-        pathlib.Path(__file__).with_name('fleet-state-merge.py'))
-    merger = importlib.util.module_from_spec(spec); spec.loader.exec_module(merger)
     local = [json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
     cloud = [json.loads(base64.b64decode(row['body'], validate=True)) for row in remote]
     merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping)
@@ -339,7 +346,12 @@ def copy_agent(old, new, mapping, journal):
         shutil.copytree(transcript_src, transcript_dst)
         for file in list(transcript_dst.rglob('*')):
             if file.is_file() and file.suffix == '.jsonl':
-                file.write_text(remap_text(file.read_text(), mapping))
+                with file.open('r', newline='') as handle:
+                    original = handle.read()
+                updated = merger.remap_transcript_jsonl(original, mapping)
+                if updated != original:
+                    with file.open('w', newline='') as handle:
+                        handle.write(updated)
                 if old in file.name:
                     file.rename(file.with_name(file.name.replace(old, new)))
     return {'transcriptEntries': len(ordered), 'cloudEntries': len(remote),

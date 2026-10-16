@@ -94,6 +94,18 @@ This loop recovers a daemon inside a running Computer. A pod/image replacement k
 
 ## Verification required for each installation
 
+Transcript identity normalization changes only the record's top-level owner
+`agentId`. Quoted IDs in messages, rich text and historical tool payloads remain
+part of the original evidence. Different message bodies remain distinct branches;
+unclassified or partial journal lines are retained. This prevents new copy-time
+rewrites and does not repair an already rewritten history or merge SDK contexts.
+
+Verify the actual context as well as its metadata. A native `latestRootBlobId`
+may identify a fixed slot shared by different copies; compare the real root in
+`conversation-blobs.db`, its referenced blobs, and turn/message coverage. Matching
+pointer values or transcript counts alone do not prove complete context. Retain
+divergent roots until their recovery and the intended client's delivery are proven.
+
 - Open the panel and check its active model against the next real bot turn.
 - Confirm the turn attaches locally and completes its stream; HTTP 200 alone is insufficient.
 - Verify a tool call returns its result, including a live voice call before hangup.

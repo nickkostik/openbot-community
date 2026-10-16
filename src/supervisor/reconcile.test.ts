@@ -411,6 +411,97 @@ test("official with logging on installs a tap wrap and keeps the plan", async ()
   assert.equal(ctx.procs.termed.length, 1);
 });
 
+test("Official service repair starts controls on an unsupported host without changing logging or host state", async () => {
+  const unsupported = "function createProtoSession2(client) { return {}; }\n";
+  const ctx = setup(unsupported, { guardRunning: true });
+  const protectedFiles = {
+    [ctx.paths.mode]: "official\n",
+    [ctx.paths.logsSettings]: JSON.stringify({ loggingEnabled: true, logBodies: true }),
+    [ctx.paths.plan]: "retained catalog",
+    [ctx.paths.secrets]: "retained credentials",
+    [ctx.paths.knownBackup]: "retained backup",
+    [ctx.paths.hostMain]: unsupported,
+  };
+  for (const [path, value] of Object.entries(protectedFiles)) ctx.fs.files[path] = value;
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps, { serviceOnly: true });
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.equal(result.wrapBytesChanged, false);
+    assert.equal(result.hostBounce, "none");
+    assert.equal(result.snapshot.wrap.kind, "ambiguous-factory");
+  }
+  for (const [path, value] of Object.entries(protectedFiles)) assert.equal(ctx.fs.files[path], value);
+  assert.ok(ctx.procs.started.some(row => row.includes("server.ts")));
+  assert.deepEqual(ctx.procs.termed, []);
+  assert.deepEqual(ctx.procs.checked, []);
+  assert.ok(ctx.procs.stopped.includes(77));
+});
+
+test("service-only repair cannot select Official or bypass Custom wrap verification", async () => {
+  const ctx = setup("function createProtoSession2(client) { return {}; }\n");
+  ctx.fs.files[ctx.paths.mode] = "custom\n";
+  const files = { ...ctx.fs.files };
+  for (const desired of [officialBox(ctx.paths), zhipu(ctx.paths)]) {
+    const result = await reconcile(desired, ctx.deps, { serviceOnly: true });
+    assert.deepEqual(result, { kind: "refused", error: { kind: "mode-changed" } });
+  }
+  assert.deepEqual(ctx.fs.files, files);
+  assert.deepEqual(ctx.procs.started, []);
+  assert.deepEqual(ctx.procs.stopped, []);
+});
+
+test("Official service repair preserves an owned listener and refuses a foreign listener", async () => {
+  for (const foreign of [false, true]) {
+    const ctx = setup(STOCK, { serviceOurs: !foreign, serviceForeign: foreign });
+    ctx.fs.files[ctx.paths.mode] = "official\n";
+    const result = await reconcile(officialBox(ctx.paths), ctx.deps, { serviceOnly: true, reloadService: true });
+    assert.equal(result.kind, foreign ? "refused" : "ok");
+    assert.deepEqual(ctx.procs.started, []);
+    assert.deepEqual(ctx.procs.stopped, []);
+    assert.deepEqual(ctx.procs.termed, []);
+  }
+});
+
+test("a changed mode during Official service observation cancels without starting controls", async () => {
+  const ctx = setup(STOCK);
+  ctx.fs.files[ctx.paths.mode] = "official\n";
+  const port = ctx.procs.port;
+  ctx.procs.port = async (host, value) => {
+    ctx.fs.files[ctx.paths.mode] = "custom\n";
+    return port(host, value);
+  };
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps, { serviceOnly: true });
+  assert.deepEqual(result, { kind: "refused", error: { kind: "mode-changed" } });
+  assert.equal(ctx.fs.files[ctx.paths.mode], "custom\n");
+  assert.deepEqual(ctx.procs.started, []);
+  assert.deepEqual(ctx.procs.termed, []);
+});
+
+test("a normal Official logging install still refuses an unsupported host", async () => {
+  const ctx = setup("function createProtoSession2(client) { return {}; }\n");
+  ctx.fs.files[ctx.paths.mode] = "official\n";
+  ctx.fs.files[ctx.paths.logsSettings] = JSON.stringify({ loggingEnabled: true });
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps);
+  assert.equal(result.kind, "refused");
+  if (result.kind === "refused") assert.equal(result.error.kind, "census-refused");
+  assert.deepEqual(ctx.procs.started, []);
+});
+
+test("a mode change during service startup preserves the newly selected Custom guard", async () => {
+  const ctx = setup(STOCK, { guardRunning: true });
+  ctx.fs.files[ctx.paths.mode] = "official\n";
+  const start = ctx.procs.start;
+  ctx.procs.start = (...args) => {
+    const pid = start(...args);
+    ctx.fs.files[ctx.paths.mode] = "custom\n";
+    return pid;
+  };
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps, { serviceOnly: true });
+  assert.deepEqual(result, { kind: "refused", error: { kind: "mode-changed" } });
+  assert.equal(ctx.fs.files[ctx.paths.mode], "custom\n");
+  assert.equal(ctx.procs.stopped.includes(77), false);
+});
+
 test("official with logging off still restores stock and does not wrap identity", async () => {
   const wrapped = wrapHostSource({ source: STOCK, runtimePath: "/tmp/runtime.cjs" });
   assert.equal(wrapped.kind, "wrapped");

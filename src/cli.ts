@@ -336,10 +336,15 @@ async function main(argv: string[]): Promise<number> {
     return result.kind === "ok" ? 0 : 1;
   }
 
-  const result = await reconcile(boxFromDisk(deps, expose), deps, {
+  const desired = boxFromDisk(deps, expose);
+  const result = await reconcile(desired, deps, {
     reloadService: !keepService,
     source: keepService ? "cli:ensure-service" : "cli:install",
     ...(keepService ? { keepGuard: true } : {}),
+    ...(keepService && desired.kind === "official" ? {
+      serviceOnly: true,
+      expectedMode: deps.fs.read(deps.paths.mode),
+    } : {}),
     ...(deferHostBounce ? { deferHostBounce: true } : {}),
   });
   printResult(result, parsed.json);

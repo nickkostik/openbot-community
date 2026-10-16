@@ -367,7 +367,7 @@ def ensure_openbot_service():
                     **({} if ready else {'reason': 'health-probe-unavailable'})}
     result = subprocess.run([str(node), '--experimental-strip-types', str(cli), 'install',
                              '--host-main', str(HOST), '--sand-data', str(SD),
-                             '--defer-host-bounce', '--json'], cwd=repo,
+                             '--defer-host-bounce', '--keep-service', '--json'], cwd=repo,
                             capture_output=True, timeout=40)
     try:
         outcome = json.loads(result.stdout)

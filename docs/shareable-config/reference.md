@@ -74,7 +74,24 @@ For configuration-only hot reload, all must hold: literal Custom, `openbot-stock
 
 Bot-mode upgrades use `openbot-pending-bounce.json`, `openbot-turn-lease.json` and `openbot-finalize.pid`. Deferred reload waits at least 120 seconds after arming, never during an in-flight request, and observes 90 seconds quiet after a completed answer or 300 seconds otherwise. Only recorded, still-owned native host PIDs started before arming may be signalled. Ordinary JSON edits need no bounce.
 
-CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status` and `openbot finalize-host`. Source install/repair uses CLI `install`; explicit new `--origin`/`--model` requires the private `OPENBOT_API_KEY`. `--dry-run` proves wrapping; `--census-only` is observation. `install --keep-service` is owned service repair, not a source upgrade; preserve idle deferred reload rules.
+CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status` and `openbot finalize-host`. Source install/repair uses `install`; explicit new `--origin`/`--model` requires private `OPENBOT_API_KEY`. `--dry-run` proves wrapping; `--census-only` is observation. `install --keep-service` is owned service repair, not a source upgrade: only explicitly saved Official selects the guarded [controls-only path](#official-controls-without-logging-rewrap), while Custom retains normal checked wrap/reload behavior and deferred-idle rules.
+
+### Official controls without logging rewrap
+
+For an already selected literal Official mode, the reviewed installed CLI can recover the owned panel independently of optional native logging compatibility:
+
+```bash
+node --experimental-strip-types /home/box/sand-data/openbot/src/cli.ts install \
+  --keep-service --defer-host-bounce --json
+```
+
+This is an existing `install` option, not a new save kind, source upgrade or mode switch. With Official explicitly saved, `--keep-service` passes internal `serviceOnly: true` and the observed raw `expectedMode` to reconcile. It validates the selected host/process/service authority, rejects a foreign listener and rejects observed mode changes before controls recovery. The service-only branch itself rejects Custom or any mode other than literal Official; a CLI repair whose desired mode is Custom instead uses the ordinary checked Custom pipeline. Never hand-edit mode to make this shortcut apply.
+
+Official controls-only recovery retains an existing owned unified listener or starts it when absent using the normal published-PID/listen checks. Unsupported or ambiguous optional logging-factory anchors do not prevent this branch from serving the panel. Native host bytes, saved logging settings, catalog, credentials and mode remain unchanged; there is no host wrap/reinstrumentation, native restart or inferred payload activation. A successful receipt has `wrapBytesChanged: false` and `hostBounce: "none"`. Existing Official finalization still stops a stale Custom guard with its self-PID protection and reconciles the saved exposure policy. This is not permission to adopt an unknown process, bypass a missing/foreign host, disable logging or erase settings.
+
+Normal source installs and UI saves retain the checked logging-wrap requirements when logging is enabled. Custom still needs its actual checked wrapper/provider path; `--keep-service` is not a universal escape from those checks. Preserving a listener also means it may still be running older service code, so use the normal deliberate update/reload path for source upgrades.
+
+The existing `computer-recovery.py` service fallback passes `--keep-service` with the selected host/data paths and deferred-bounce setting, preserving the Official selection rather than repeatedly failing optional logging instrumentation. Read the owned service PID and `/api/state` separately from logging compatibility and an intended-client stock send/reply. An available panel, retained logging preference or successful service-only receipt does not establish a loaded native tap, fresh captured traffic, repaired roster/message delivery, full mode/context reconciliation or billing. Mode checks describe observed authority, not an atomic transaction against all external writers.
 
 ### Explicit Official roster selection
 

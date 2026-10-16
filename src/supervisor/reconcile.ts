@@ -43,6 +43,8 @@ export type ReconcileResult =
   | { readonly kind: "refused"; readonly error: ReconcileError };
 
 export type ReconcileOpts = {
+  /** Recover Official controls without editing or instrumenting the native host. */
+  readonly serviceOnly?: boolean;
   /** Guard repairs must not overwrite a selection changed during async observation. */
   readonly expectedMode?: string | undefined;
   /** CLI install copies a new tree. Restart the owned loopback process so it loads that tree. */
@@ -906,6 +908,9 @@ export async function reconcile(
   deps: SupervisorDeps,
   opts: ReconcileOpts = {},
 ): Promise<ReconcileResult> {
+  if (opts.serviceOnly && (desired.kind !== "official" || deps.fs.read(deps.paths.mode)?.trim() !== "official")) {
+    return { kind: "refused", error: { kind: "mode-changed" } };
+  }
   if ("expectedMode" in opts && deps.fs.read(deps.paths.mode) !== opts.expectedMode) {
     return { kind: "refused", error: { kind: "mode-changed" } };
   }
@@ -941,6 +946,22 @@ export async function reconcile(
   }
   if (before.uiListen.kind === "foreign") {
     return { kind: "refused", error: { kind: desired.kind === "custom" ? "foreign-hop" : "foreign-ui" } };
+  }
+
+  if (opts.serviceOnly) {
+    // Official controls must survive upstream removing/renaming the optional
+    // logging factory. Do not rewrite the host, logging preference or mode to
+    // make service recovery pass. Explicit installs/saves still prove wraps.
+    if (deps.fs.read(deps.paths.mode)?.trim() !== "official") {
+      return { kind: "refused", error: { kind: "mode-changed" } };
+    }
+    const service = await ensureService(deps, before.uiListen.kind, { ...opts, reloadService: false });
+    if (service) return service;
+    if (deps.fs.read(deps.paths.mode)?.trim() !== "official" ||
+        ("expectedMode" in opts && deps.fs.read(deps.paths.mode) !== opts.expectedMode)) {
+      return { kind: "refused", error: { kind: "mode-changed" } };
+    }
+    return finishOk(deps, desired, false, opts, currentPayloadFingerprint(deps));
   }
 
   deps.fs.mkdirp(deps.paths.sandData);

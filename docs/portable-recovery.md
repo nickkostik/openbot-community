@@ -73,6 +73,8 @@ Local-engine recovery still requires the factory `/home/box/sand-data` root beca
 
 The external recovery relay/connector is optional and needs the owner's own deployment and credentials. Installing this repository does not install another user's PVE service, Cloudflare tunnel or exit node.
 
+Panel recovery uses `install --keep-service`. With an explicitly saved Official mode, this recovers the owned control service without editing the native host, logging preferences, catalog, credentials or mode. A new upstream host whose optional logging factory is unsupported can therefore still serve the controls. An existing owned listener is retained; a foreign listener or changed selection is refused. This does not prove logging instrumentation or bot delivery: normal logging installs/saves still require a compatible checked host wrap. Custom recovery keeps its existing wrap checks.
+
 ### Independent Tailscale recovery
 
 With an enabled `openbot-tailscale.json` and installed, checksum-verified Tailscale binaries/state, the owned bootstrap starts a separate network watcher on the Computer. It retries every 15 seconds regardless of BOX/Temporal or Official/Custom mode. A failed first network probe does not prevent that watcher from starting. Network opt-out stops its retry loop; it does not erase the login or stop an existing daemon.

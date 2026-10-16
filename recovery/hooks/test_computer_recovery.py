@@ -377,6 +377,7 @@ class ComputerRecoveryTests(unittest.TestCase):
             self.assertEqual(state,{'state':'reconciled','hostReloadDeferred':True})
             argv=run.call_args.args[0]
             self.assertIn('--defer-host-bounce',argv);self.assertIn('install',argv)
+            self.assertIn('--keep-service',argv)
             self.assertIn(str(sd/'openbot/src/cli.ts'),argv)
             self.assertNotIn('hop-server.cjs',' '.join(argv))
 

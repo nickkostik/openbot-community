@@ -19,6 +19,8 @@ Read this fork's AGENTS.md, docs/portable-installation.md, and docs/portable-rec
 
 If I already have a public tunnel configured, preserve it and explain that conflict before applying this no-public-tunnel choice. Do not tear it down implicitly.
 
+Run quickstart.sh --check first and inspect loopbackInstallAllowed separately from ready. The quickstart --install path refuses an existing public tunnel before installation; do not bypass that refusal by calling install.sh with OPENBOT_TUNNEL=off. Resolve the intended access first.
+
 When you are outside the host's bot turn, run the checked-out install.sh with OPENBOT_SRC pointing to the checkout and OPENBOT_TUNNEL=off.
 
 When you are running inside the host's bot turn, run the same ordinary installer with OPENBOT_DEFER_HOST_BOUNCE=1 as well. After successful installation, invoke that checked-out install.sh --bot-finalize once to start the owned idle finalizer. Do not wait for your own turn to end while keeping it open. Report the pending restart and continue verification on a fresh turn. Do not use --bot-mode here: it creates a public Cloudflare URL even if OPENBOT_TUNNEL=off is set.
@@ -131,7 +133,7 @@ Read --bot-status --brief after 30 to 60 seconds, at most twice. Report the inst
 
 Coordinate the native preserve-data Computer update and the matching compatible local engine using docs/updating.md. Capture one target vendor release and verify both runtime tracks, keeping the desired mode. Reconcile an admitted operation receipt after a timeout instead of starting another migration. Require fresh complete native backup evidence; never force an empty-store update. Do not spend Grok quota on an Official canary unless I authorized it. A new vendor version that removes BOX execution needs the reviewed compatibility flow. Latest version metadata does not prove all Temporal features have been ported.
 
-After the idle restart, verify a new local message, the selected provider/model, a harmless tool result, and preserved settings. Check the recovery heartbeat and intended clients separately. Do not enable disabled routines, replay old slots, remint identities, clear roster holds, or silently fall back to Temporal, N5, MetaKey, or another paid route.
+After the idle restart, verify the actual selected mode and preserved settings. In Custom, verify a new local message, the selected provider/model, and a harmless tool result. In Official, keep stock delivery selected and test a fresh stock reply only if I separately authorized the Grok quota; do not switch to Custom just to run a canary. Check the recovery heartbeat and intended clients separately. Do not enable disabled routines, replay old slots, remint identities, clear roster holds, or silently fall back to Temporal, N5, MetaKey, or another paid route.
 
 Report what actually activated and what is still pending or blocked. Keep the previous source and engine available until fresh turn verification passes.
 ```

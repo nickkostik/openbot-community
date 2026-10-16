@@ -80,7 +80,7 @@ def remap_preferences(settings, mapping):
 def transfer_preferences(settings, mapping):
     """Keep both identities in their position until visibility handoff finishes."""
     final = remap_preferences(settings, mapping)
-    reverse = {new:old for old,new in mapping.items()}
+    reverse = {new:old for old,new in mapping.items() if old != new}
     pair = lambda ids: [value for aid in ids for value in ([reverse[aid],aid] if aid in reverse else [aid])]
     return {'sidebarSections': {'sections': [{**section, 'agentIds': pair(section['agentIds'])}
             for section in final['sidebarSections']['sections']]},

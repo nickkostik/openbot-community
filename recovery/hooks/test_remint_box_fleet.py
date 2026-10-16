@@ -126,6 +126,16 @@ class RemintTests(unittest.TestCase):
         final=M.remap_preferences(self.server_settings,{OLD:NEW})
         self.assertEqual(M.transfer_preferences(final,{OLD:NEW}),paired)
 
+    def test_transitional_preferences_ignore_identity_mappings_without_losing_either_counterpart(self):
+        for mapping in ({OLD:NEW, NEW:NEW}, {OLD:OLD, NEW:OLD}):
+            with self.subTest(mapping=mapping):
+                paired = M.transfer_preferences(self.server_settings, mapping)
+                ids = paired['sidebarSections']['sections'][0]['agentIds']
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertEqual(set(ids), {OLD, NEW, OTHER})
+                self.assertEqual(set(paired['pinnedAgents']['agentIds']), {OLD, NEW})
+                self.assertEqual(M.remap_preferences(paired, mapping), M.remap_preferences(self.server_settings, mapping))
+
     def test_native_collapsed_sections_are_not_reset_by_the_platform_projection(self):
         self.host_settings['sidebarSections']=[{'id':'me','name':'Me','agentIds':[OLD,OTHER],'isCollapsed':True}]
         original_gateway=self.r.m.gateway

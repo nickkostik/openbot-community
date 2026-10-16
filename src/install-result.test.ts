@@ -18,14 +18,14 @@ function runGuard(guard: string, pidFile: string) {
 function runStatus(data: string) {
   return execFileSync("bash", [install, "--bot-status"], {
     encoding: "utf8",
-    env: { ...process.env, OPENBOT_SAND_DATA: data, OPENBOT_BOT_RESULT: path.join(data, "result.json") },
+    env: { ...process.env, OPENBOT_SAND_DATA: data, OPENBOT_BOT_RESULT: path.join(data, "result.json"), OPENBOT_BOT_LOG: path.join(data, "openbot-install.log") },
   });
 }
 
 function runStatusBrief(data: string) {
   return execFileSync("bash", [install, "--bot-status", "--brief"], {
     encoding: "utf8",
-    env: { ...process.env, OPENBOT_SAND_DATA: data, OPENBOT_BOT_RESULT: path.join(data, "result.json") },
+    env: { ...process.env, OPENBOT_SAND_DATA: data, OPENBOT_BOT_RESULT: path.join(data, "result.json"), OPENBOT_BOT_LOG: path.join(data, "openbot-install.log") },
   });
 }
 
@@ -142,6 +142,38 @@ test("Official logging capability survives the receipt and both status formats",
     write("");
     assert.equal(JSON.parse(readFileSync(result, "utf8")).officialLogging, undefined);
     assert.equal(runStatusBrief(data).includes("OPENBOT_OFFICIAL_LOGGING="), false);
+  } finally { rmSync(data, { recursive: true, force: true }); }
+});
+
+test("brief status drains a long saved error tail before the process exits", t => {
+  if (!requireBash(t) || skipOnWindows(t)) return;
+  const data = mkdtempSync(path.join(os.tmpdir(), "openbot-long-status-"));
+  try {
+    const tail = "diagnostic line ".repeat(32_000) + "TAIL_COMPLETE";
+    writeFileSync(path.join(data, "result.json"), JSON.stringify({
+      status: "running", startedAt: new Date(Date.now() - 240_000).toISOString(), logTail: tail,
+    }));
+    const output = runStatusBrief(data);
+    assert.ok(output.includes("OPENBOT_LOG_TAIL=" + tail));
+    assert.match(output, /OPENBOT_BOT_INSTRUCTION=Send the log tail to the user and stop polling\./);
+    assert.ok(output.endsWith("===== END OPENBOT BOT RESULT =====\n"));
+  } finally { rmSync(data, { recursive: true, force: true }); }
+});
+
+test("brief status drains a multibyte log-file tail without cutting the closing frame", t => {
+  if (!requireBash(t) || skipOnWindows(t)) return;
+  const data = mkdtempSync(path.join(os.tmpdir(), "openbot-unicode-status-"));
+  try {
+    const tail = Array.from({ length: 20 }, (_, i) => `${i}: ` + "状态🙂".repeat(2000)).join("\n");
+    writeFileSync(path.join(data, "openbot-install.log"), tail);
+    writeFileSync(path.join(data, "result.json"), JSON.stringify({
+      status: "running", startedAt: new Date(Date.now() - 240_000).toISOString(),
+    }));
+    const output = runStatusBrief(data);
+    assert.ok(output.includes("OPENBOT_LOG_TAIL=" + tail.replace(/\n/g, "\\n")));
+    assert.equal(output.includes("\uFFFD"), false);
+    assert.match(output, /OPENBOT_BOT_INSTRUCTION=Send the log tail to the user and stop polling\./);
+    assert.ok(output.endsWith("===== END OPENBOT BOT RESULT =====\n"));
   } finally { rmSync(data, { recursive: true, force: true }); }
 });
 

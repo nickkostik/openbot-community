@@ -1,5 +1,6 @@
 """A real copy/register/publication/cutover fixture for Custom recovery."""
 import importlib.util
+import base64
 import json
 import pathlib
 import unittest
@@ -72,6 +73,84 @@ class DispatchTests(fleet.RemintTests):
         with self.assertRaisesRegex(RuntimeError,'withdrawn'):self.recovery().run()
         self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(),before)
         self.assertEqual(self.calls,[])
+
+    def official_round_trip(self):
+        self.recovery().run()
+        # A fresh worker has fresh adapters; the prior Custom worker has exited.
+        self.r.m.rpc = self.rpc; self.r.m.gateway = self.gateway
+        spec = importlib.util.spec_from_file_location('roundtrip_official', pathlib.Path(__file__).with_name('official-dispatch-recovery.py'))
+        official = importlib.util.module_from_spec(spec); spec.loader.exec_module(official)
+        (self.root/'openbot-mode').write_text('official')
+        official.Recovery(self.root, self.r).run()
+        (self.root/'openbot-mode').write_text('custom')
+        self.calls.clear(); self.gateway_calls.clear()
+
+    def test_return_from_official_reuses_the_same_verified_copy_and_original_sections(self):
+        self.official_round_trip()
+        journal = self.r.read(); pair = [(e['oldId'], e['newId']) for e in journal['entries']]
+        protected = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file() and p.name in ('store.db','automation.json','openbot-bot-models.json')}
+        result = self.recovery().run()
+        self.assertEqual(result['phase'], 'bound-box')
+        self.assertFalse(any(name.startswith('Create') for name, _ in self.calls))
+        self.assertEqual([(e['oldId'], e['newId']) for e in self.r.read()['entries']], pair)
+        self.assertEqual(self.r.read().get('previousGenerations'), journal.get('previousGenerations'))
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+        self.assertEqual(self.server_settings['sidebarSections']['sections'][0]['agentIds'], [fleet.NEW, fleet.OTHER])
+        self.assertEqual(self.server_settings['pinnedAgents']['agentIds'], [fleet.NEW])
+        self.assertEqual(self.server_settings['mainAgentId'], fleet.NEW)
+        self.assertTrue(json.loads((self.source/'settings.json').read_text())['hiddenFromSidebar'])
+        self.assertFalse(json.loads((self.root/'agents'/fleet.NEW/'settings.json').read_text())['hiddenFromSidebar'])
+        self.assertFalse(any(name=='setAgentAutomationEnabled' for name,_ in self.gateway_calls))
+        self.assertFalse(result['nativeAppDeliveryVerified'])
+
+    def test_official_messages_absent_from_the_copy_refuse_without_minting_or_hiding(self):
+        self.official_round_trip()
+        journal = (self.root/'openbot-box-remint.json').read_bytes()
+        late = {'id':'official-late-message', 'agentId':fleet.OLD, 'timestampMs':2, 'kind':'message', 'content':'New source history'}
+        self.server_transcripts[fleet.OLD] = [{'seq':'1','body':base64.b64encode(json.dumps(late).encode()).decode()}]
+        with self.assertRaisesRegex(RuntimeError, 'uncopied history'): self.recovery().run()
+        self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(), journal)
+        self.assertFalse(any(name.startswith('Create') or name=='SetGrokBotAgentClientState' for name,_ in self.calls))
+        self.assertFalse(json.loads((self.source/'settings.json').read_text())['hiddenFromSidebar'])
+        self.assertTrue(json.loads((self.root/'agents'/fleet.NEW/'settings.json').read_text())['hiddenFromSidebar'])
+
+    def test_return_keeps_later_copy_routine_pauses_and_independent_reasoning_choices(self):
+        self.official_round_trip()
+        path = self.root/'agents'/fleet.NEW/'automations/routine/automation.json'
+        self.write(path, {**json.loads(path.read_text()), 'enabled':False})
+        models = self.root/'openbot-bot-models.json';value = json.loads(models.read_text());value['reasoning'][fleet.NEW]='max';self.write(models,value)
+        before = models.read_bytes()
+        self.assertEqual(self.recovery().run()['phase'], 'bound-box')
+        self.assertFalse(json.loads(path.read_text())['enabled'])
+        self.assertEqual(models.read_bytes(), before)
+
+    def test_changed_instructions_or_ownership_never_hide_an_unmerged_source(self):
+        self.official_round_trip()
+        path = self.source/'profile.json';self.write(path,{**json.loads(path.read_text()),'description':'New source instructions'})
+        with self.assertRaisesRegex(RuntimeError,'instructions differ'):self.recovery().run()
+        self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
+        self.r.m.rpc=self.rpc;self.r.m.gateway=self.gateway;self.calls.clear()
+        self.roster[0]['viewerIsOwner']=False
+        with self.assertRaisesRegex(RuntimeError,'Source ownership'):self.r.reselect_active()
+        self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
+
+    def test_same_id_with_different_message_content_is_not_reselection_coverage(self):
+        self.official_round_trip()
+        changed = {'id':'message-1','timestampMs':1,'agentId':fleet.OLD,'content':'Divergent same-ID body'}
+        self.server_transcripts[fleet.OLD] = [{'seq':'1','body':base64.b64encode(json.dumps(changed).encode()).decode()}]
+        with self.assertRaisesRegex(RuntimeError,'uncopied history'):self.recovery().run()
+        self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
+
+    def test_mode_change_during_existing_copy_visibility_stops_the_remaining_handoff(self):
+        self.official_round_trip();original = self.rpc
+        def switching(method,body):
+            result=original(method,body)
+            if method=='SetGrokBotAgentClientState':(self.root/'openbot-mode').write_text('official')
+            return result
+        self.r.m.rpc=switching
+        with self.assertRaisesRegex(RuntimeError,'Custom'):self.recovery().run()
+        self.assertEqual(sum(name=='SetGrokBotAgentClientState' for name,_ in self.calls),1)
+        self.assertFalse(any(name=='setAgentHiddenFromSidebar' for name,_ in self.gateway_calls))
 
     def test_mode_change_during_rate_backoff_stops_before_retry(self):
         recovery=self.recovery();calls=[]

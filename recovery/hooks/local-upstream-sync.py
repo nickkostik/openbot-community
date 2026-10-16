@@ -190,13 +190,34 @@ def fetch_text(url, maximum):
 
 
 def vendor_origin(source):
-    values = []
-    for key in ('SAND_HOST_BUNDLE_S3_BUCKET', 'SAND_HOST_BUNDLE_S3_REGION', 'SAND_HOST_BUNDLE_S3_PREFIX'):
-        matches = re.findall(r'\b' + key + r' = (["`])([^"`]+)\1', source)
-        if len(matches) != 1 or not re.fullmatch('[a-zA-Z0-9_-]+', matches[0][1]):
+    """Resolve only the two reviewed literal constant layouts; never evaluate JS."""
+    def assignment(key, expression):
+        lhs = r'\b' + re.escape(key) + r'\s*=(?!=)'
+        if len(re.findall(lhs, source)) != 1:
             raise RuntimeError('Vendor origin is not an unambiguous literal')
-        values.append(matches[0][1])
-    bucket, region, prefix = values
+        matches = re.findall(lhs + r'\s*' + expression + r'\s*;', source)
+        if len(matches) != 1:
+            raise RuntimeError('Vendor origin is not an unambiguous literal')
+        return matches[0]
+
+    def literal(key):
+        return assignment(key, r'(["`])([a-zA-Z0-9_-]+)\1')[1]
+
+    prefix = literal('SAND_HOST_BUNDLE_S3_PREFIX')
+    legacy = ('SAND_HOST_BUNDLE_S3_BUCKET', 'SAND_HOST_BUNDLE_S3_REGION')
+    if any(re.search(r'\b' + key + r'\b', source) for key in legacy):
+        # Mixed layouts could disagree about the actual fetch origin.
+        if re.search(r'\bSAND_HOST_BUNDLE_PUBLIC_ORIGIN\b', source):
+            raise RuntimeError('Vendor origin mixes reviewed layouts')
+        bucket, region = (literal(key) for key in legacy)
+    else:
+        bucket = literal('PUBLIC_VM_DAEMON_BUCKET')
+        region = literal('PUBLIC_VM_DAEMON_BUCKET_REGION')
+        assignment('PUBLIC_VM_DAEMON_BUCKET_ORIGIN', re.escape(
+            '`https://${PUBLIC_VM_DAEMON_BUCKET}.s3.${PUBLIC_VM_DAEMON_BUCKET_REGION}.amazonaws.com`'))
+        assignment('SAND_HOST_BUNDLE_PUBLIC_ORIGIN', r'PUBLIC_VM_DAEMON_BUCKET_ORIGIN')
+        assignment('SAND_HOST_BUNDLE_PUBLIC_BASE_URL', re.escape(
+            '`${SAND_HOST_BUNDLE_PUBLIC_ORIGIN}/${SAND_HOST_BUNDLE_S3_PREFIX}`'))
     return 'https://' + bucket + '.s3.' + region + '.amazonaws.com/' + prefix, prefix
 
 

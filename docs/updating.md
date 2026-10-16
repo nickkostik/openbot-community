@@ -35,7 +35,7 @@ If the saved mode is explicitly Official and an unmarked vendor host no longer s
 
 ## Capture one vendor release for both paths
 
-Inspect the actual stock native version and the selected local manifest. The checked follower captures an authenticated vendor release, verifies archive/source hashes and prepares a compatible local pair for that same upstream release. A version label alone is not sufficient: the selected manifest, captured vendor source and prepared pair need matching provenance.
+Inspect the actual stock native version and the selected local manifest. The checked follower captures an authenticated vendor release, verifies archive/source hashes and prepares a compatible local pair for that same upstream release. The download resolver accepts the reviewed legacy bucket/region layout and the newer shared public-bucket constant chain. It resolves only unique literal assignments and exact HTTPS/path references; unknown, duplicated, mixed or dynamic layouts stop the update without changing the running engine. No JavaScript is evaluated to discover an address. A version label alone is not sufficient: the selected manifest, captured vendor source and prepared pair need matching provenance.
 
 Fresh installations can use the reviewed `prepare-local-engine.py` and first-binding `initialize-local-engine.py` flow described in the [configuration reference](../skills/openbot-config/reference.md#prepare-a-reviewed-box-engine-from-public-vendor-source). An existing pin uses the checked upgrade/follower path. Do not delete an existing policy to force first binding. Keep vendor bundles and generated engine artifacts private, outside the repository export.
 

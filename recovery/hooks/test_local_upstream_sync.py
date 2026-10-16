@@ -545,6 +545,43 @@ class UpstreamSyncTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): M.vendor_origin(source)
         with self.assertRaises(RuntimeError): M.stage_vendor(self.root, '../elsewhere', 'https://invalid', 'host')
 
+    def test_shared_vendor_origin_layout_preserves_the_exact_bucket_path(self):
+        source = self.shared_vendor_origin()
+        self.assertEqual(M.vendor_origin(source),
+            ('https://public-bucket.s3.us-east-1.amazonaws.com/sand-host', 'sand-host'))
+        self.assertEqual(M.vendor_origin(source.replace(' = ', '=\n  ')),
+                         M.vendor_origin(source))
+
+    @staticmethod
+    def shared_vendor_origin():
+        return ('PUBLIC_VM_DAEMON_BUCKET = "public-bucket";\n'
+                'PUBLIC_VM_DAEMON_BUCKET_REGION = "us-east-1";\n'
+                'PUBLIC_VM_DAEMON_BUCKET_ORIGIN = `https://${PUBLIC_VM_DAEMON_BUCKET}.s3.${PUBLIC_VM_DAEMON_BUCKET_REGION}.amazonaws.com`;\n'
+                'SAND_HOST_BUNDLE_S3_PREFIX = "sand-host";\n'
+                'SAND_HOST_BUNDLE_PUBLIC_ORIGIN = PUBLIC_VM_DAEMON_BUCKET_ORIGIN;\n'
+                'SAND_HOST_BUNDLE_PUBLIC_BASE_URL = `${SAND_HOST_BUNDLE_PUBLIC_ORIGIN}/${SAND_HOST_BUNDLE_S3_PREFIX}`;\n')
+
+    def test_shared_vendor_origin_rejects_partial_dynamic_duplicated_or_mixed_chains(self):
+        valid = self.shared_vendor_origin()
+        changes = [
+            valid + valid,
+            valid + 'PUBLIC_VM_DAEMON_BUCKET = unknown;',
+            valid + 'SAND_HOST_BUNDLE_PUBLIC_ORIGIN = alternate;',
+            valid + 'SAND_HOST_BUNDLE_S3_BUCKET = "legacy";',
+            valid.replace('"public-bucket"', '`public/${token}`'),
+            valid.replace('"us-east-1"', 'getRegion()'),
+            valid.replace('https://', 'http://'),
+            valid.replace('.amazonaws.com`', '.amazonaws.com.evil.example`'),
+            valid.replace('SAND_HOST_BUNDLE_PUBLIC_ORIGIN = PUBLIC_VM_DAEMON_BUCKET_ORIGIN;', ''),
+            valid.replace('SAND_HOST_BUNDLE_PUBLIC_ORIGIN = PUBLIC_VM_DAEMON_BUCKET_ORIGIN;',
+                          'SAND_HOST_BUNDLE_PUBLIC_ORIGIN = "https://other.example";'),
+            valid.replace('${SAND_HOST_BUNDLE_PUBLIC_ORIGIN}/', '${other}/'),
+            valid.replace('"sand-host"', '"../elsewhere"'),
+        ]
+        for source in changes:
+            with self.subTest(source=source):
+                with self.assertRaises(RuntimeError): M.vendor_origin(source)
+
     def test_data_backports_cannot_claim_native_version_or_executable_feature_parity(self):
         body = 'function createProtoSessionProvider(a) {return a;}\n'
         retained = ('/* openbot-stock-wrap */\n/* openbot-payload 1234567890abcdef */\n'

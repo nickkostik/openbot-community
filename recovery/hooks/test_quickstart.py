@@ -117,6 +117,31 @@ PY
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls(), [{'args': ['--bot-mode'], 'tunnel': None, 'defer': None}])
 
+    def test_finalize_keeps_runtime_selection_with_installer_when_cache_is_stale(self):
+        self.write('openbot-expose', 'loopback\n')
+        self.write('openbot-mode', 'official\n')
+        system_bin = self.root / 'system-bin'
+        system_bin.mkdir(mode=0o755)
+        system_node = system_bin / 'node'
+        system_node.write_text('#!/bin/sh\nexit 0\n')
+        system_node.chmod(0o755)
+        cached_node = self.data / 'node22' / 'bin' / 'node'
+        cached_node.parent.mkdir(parents=True, mode=0o755)
+        cached_node.write_text('#!/bin/sh\nexit 89\n')
+        cached_node.chmod(0o755)
+        cache_before = cached_node.read_bytes()
+        self.env['PATH'] = str(system_bin) + ':' + self.env['PATH']
+        # Simulate an installer that accepts the selected system runtime. Both
+        # invocations must reach it; quickstart must not choose another binary
+        # between successful installation and deferred finalization.
+        install = self.source / 'install.sh'
+        install.write_text(install.read_text().replace('set -eu\n', 'set -eu\nnode\n', 1))
+        result = self.run_quickstart('--install')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call['args'] for call in self.calls()], [[], ['--bot-finalize']])
+        self.assertEqual(cached_node.read_bytes(), cache_before)
+        self.assertEqual((self.data / 'openbot-mode').read_text(), 'official\n')
+
     def test_invalid_saved_exposure_refuses_every_action_without_echoing_it(self):
         private_value = 'unknown-private-value'
         path = self.write('openbot-expose', private_value)

@@ -405,14 +405,31 @@ test("the real installer updates Official controls on an unsupported host and re
   for (const [name, bytes] of Object.entries(retained)) writeFileSync(path.join(sandData, name), bytes);
   const sentinel = path.join(box, "host-terminated");
   const hostPid = startFakeHost(sandHost, sentinel);
+  const fixturePids = new Set([hostPid]);
   const env = { ...process.env, OPENBOT_HOST_MAIN: hostMain, OPENBOT_SAND_DATA: sandData,
     OPENBOT_SRC: repoRoot, OPENBOT_DEST: path.join(sandData, "openbot"), OPENBOT_COMMIT: "cafed00d",
     OPENBOT_SKIP_NPM_INSTALL: "1", OPENBOT_TUNNEL: "off", OPENBOT_BOT_RESULT: path.join(sandData, "result.json"),
     OPENBOT_BOT_QR_PATH: path.join(box, "qr.png") };
-  t.after(() => {
-    killPidFiles([path.join(sandData, "openbot-ui.pid"), path.join(sandData, "openbot-hop.pid"),
-      path.join(sandData, "openbot-tunnel.pid"), path.join(sandData, "openbot-guard.pid")]);
+  t.after(async () => {
+    const files = [path.join(sandData, "openbot-ui.pid"), path.join(sandData, "openbot-hop.pid"),
+      path.join(sandData, "openbot-tunnel.pid"), path.join(sandData, "openbot-guard.pid")];
+    const pids = fixturePids;
+    for (const file of files) {
+      try { const pid = Number(readFileSync(file, "utf8").trim()); if (pid > 0) pids.add(pid); } catch { /* absent */ }
+    }
+    killPidFiles(files);
     try { process.kill(hostPid, "SIGTERM"); } catch { /* disposable host exited */ }
+    const running = (pid: number) => {
+      try {
+        // Detached children can briefly remain zombies under a container's
+        // init; they have exited and cannot recreate fixture files.
+        if (process.platform === "linux" && /\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) return false;
+        process.kill(pid, 0); return true;
+      } catch { return false; }
+    };
+    const deadline = Date.now() + 5000;
+    while ([...pids].some(running) && Date.now() < deadline) await sleep(25);
+    assert.equal([...pids].some(running), false, "fixture processes must exit before their files are removed");
     rmSync(box, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const foreground = await runInstall([], env);
@@ -420,6 +437,7 @@ test("the real installer updates Official controls on an unsupported host and re
   assert.match(foreground.stdout, /logging is unavailable/);
   assert.equal((await get(`${UI}/healthz`)).status, 200);
   const oldPid = readFileSync(path.join(sandData, "openbot-ui.pid"), "utf8");
+  fixturePids.add(Number(oldPid.trim()));
   writeFakeCloudflared(sandData, "https://official-controls-test.trycloudflare.com");
   const bot = await runInstall(["--bot-mode-worker"], env);
   assert.equal(bot.status, 0, bot.stderr || bot.stdout);

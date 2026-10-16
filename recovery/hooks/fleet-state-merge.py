@@ -57,6 +57,33 @@ def lineages(journal):
     return {target: sorted(members) for target, members in sorted(result.items())}
 
 
+def remap_transcript_owner(value, mapping):
+    """Normalize the record owner, preserving quoted identities and tool data."""
+    entry = json.loads(json.dumps(value, ensure_ascii=False))
+    if isinstance(entry, dict) and isinstance(entry.get('agentId'), str):
+        entry['agentId'] = mapping.get(entry['agentId'], entry['agentId'])
+    return entry
+
+
+def remap_transcript_jsonl(text, mapping):
+    """Keep journal payloads and unclassified/partial lines intact."""
+    result = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip('\r\n')
+        try:
+            value = json.loads(body)
+        except (ValueError, TypeError):
+            result.append(line)
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get('agentId'), str) or \
+                mapping.get(value['agentId'], value['agentId']) == value['agentId']:
+            result.append(line)
+            continue
+        result.append(json.dumps(remap_transcript_owner(value, mapping), ensure_ascii=False,
+                                 separators=(',', ':')) + line[len(body):])
+    return ''.join(result)
+
+
 def merge_entries(sources, mapping=None):
     """Retain differing same-ID payloads; deduplicate exact normalized records.
 
@@ -70,10 +97,10 @@ discarded; every original body is also retained in its branch snapshot.
         for value in entries:
             if not isinstance(value, dict) or not isinstance(value.get('id'), str):
                 raise ValueError('Transcript entry has no string identity')
-            raw = json.dumps(value, ensure_ascii=False)
-            for old, new in sorted(mapping.items()):
-                raw = raw.replace(old, new)
-            entry = json.loads(raw)
+            # Historical payloads are evidence, not configuration references.
+            # Replacing IDs throughout JSON changes quotes and tool results and
+            # can incorrectly coalesce two genuinely different user messages.
+            entry = remap_transcript_owner(value, mapping)
             key = digest(encoded(entry))
             group = groups.setdefault(entry['id'], {})
             record = group.setdefault(key, {'entry': entry, 'sources': []})

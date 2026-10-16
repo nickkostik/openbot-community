@@ -298,6 +298,18 @@ Use GET/PUT `/api/pause`, not direct file edits. Stored `openbot-pause.json` is 
 
 `openbot-pause-bots.json` is `{"pausedBotIds":["<bot-id>"]}`. GET/PUT `/api/pause-bots` uses `{botId,paused}` or full `{pausedBotIds}` replacement. Missing/corrupt ordinary state is empty. Native/hop checks apply on the next turn; no bounce. Hidden/deleted inventory entries stay distinct for historical log resolution, without changing native visibility or deleting data.
 
+### Transcript ownership versus quoted history
+
+`fleet-state-merge.py.remap_transcript_owner` normalizes only the top-level transcript record's string `agentId` through the journal identity mapping. Message prose, `richText`, nested agent identifiers, tool arguments/results and quoted IDs remain historical payloads, not configuration references. Distinct quoted IDs remain distinct payload variants even when owners normalize to one identity; exact normalized duplicates may collapse, while differing same-entry-ID variants retain deterministic aliases and provenance. Never use global string replacement to make history appear equal.
+
+For future authorized copies, `migrate-local-bots.py.copy_agent` excludes `transcript_entries` from global SQL TEXT replacement and uses the owner-only union. Agent-local and external `.jsonl` journals use `remap_transcript_jsonl`, which changes only a mapped top-level owner and retains unclassified/partial lines. Non-transcript configuration identity remapping is unchanged. These safeguards prevent future quoted-content rewriting; they do not repair already changed histories, prove existing copies equivalent, splice SDK roots or establish a completed live history merge. Retain originals and reviewed branch evidence before any separately authorized repair.
+
+### Native context blob coverage
+
+A matching `latestRootBlobId` in metadata may identify a reusable fixed slot across copied databases, not equal SDK context. Inspect the actual root payload in each branch's `conversation-blobs.db` and its reachable blob closure, including referenced prompt/state blobs, turn identities and execution-step coverage. Equal metadata IDs, direct-reference lists or visible user-turn IDs alone cannot establish complete context coverage; prompt references and steps can still diverge. Snapshot/hash inspection is evidence gathering, not a generic live-root repair.
+
+Keep divergent roots and their coherent branch databases/session journals separately. Do not automatically graft/splice opaque roots, overwrite one branch, advance cursors or replay pending tool/routine completions. Actual compatible closure and turn/state coverage must be verified before a separately reviewed live reconciliation; an archival transcript union, root-slot match or private snapshot never authorizes pruning, mode transition or a delivery-success claim.
+
 ## Routine policy
 
 ### Native local routine clock

@@ -326,6 +326,30 @@ class RemintTests(unittest.TestCase):
         self.assertFalse(request['kickstartRequested']);self.assertTrue(request['introductionSuppressed'])
         self.assertFalse(any('Send' in m or m=='sendPrompt' for m,b in self.calls+self.gateway_calls))
 
+    def test_stage_preserves_quoted_ids_in_database_and_journal_messages(self):
+        message = {'id':'message-1','timestampMs':1,'agentId':OLD,
+                   'content':'User quoted ' + OLD,
+                   'toolResult':{'agentId':OLD,'output':OLD}}
+        with contextlib.closing(sqlite3.connect(self.source/'store.db')) as db:
+            db.execute('UPDATE transcript_entries SET entry=?', (json.dumps(message),));db.commit()
+        journal_dir = self.root/'agent-transcripts'/OLD
+        journal_dir.mkdir(parents=True)
+        text = json.dumps(message) + '\r\n{partial\n\n'
+        (journal_dir/'session.jsonl').write_bytes(text.encode())
+        (self.source/'notes.jsonl').write_bytes(text.encode())
+        source_bytes = (self.source/'store.db').read_bytes()
+        self.r.stage(OLD)
+        destination = self.root/'agents'/NEW
+        with contextlib.closing(sqlite3.connect(destination/'store.db')) as db:
+            stored = json.loads(db.execute('SELECT entry FROM transcript_entries').fetchone()[0])
+        self.assertEqual(stored, {**message,'agentId':NEW})
+        for path in [destination/'notes.jsonl', self.root/'agent-transcripts'/NEW/'session.jsonl']:
+            first, rest = path.read_bytes().decode().split('\r\n', 1)
+            self.assertEqual(json.loads(first), {**message,'agentId':NEW})
+            self.assertEqual(rest, '{partial\n\n')
+        self.assertEqual((journal_dir/'session.jsonl').read_bytes(), text.encode())
+        self.assertEqual((self.source/'store.db').read_bytes(), source_bytes)
+
     def test_temporal_wrong_id_and_wrong_kind_do_not_bind_or_hide_source(self):
         self.r.stage(OLD);before=(self.root/'agents'/NEW/'profile.json').read_bytes()
         for bad in [{**self.created,'harness':'temporal'},{**self.created,'legacyAgentId':OTHER},

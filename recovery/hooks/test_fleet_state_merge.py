@@ -47,6 +47,35 @@ class MergeTests(unittest.TestCase):
         rows, _ = M.merge_entries({A: [a, b, {'id': alias, 'text': 'other', 'timestampMs': 2}]})
         self.assertEqual(len({r['entry']['id'] for r in rows}), 3)
 
+    def test_owner_normalization_keeps_message_text_and_historical_tool_payloads(self):
+        entry = {'id':'t1u', 'agentId':A, 'timestampMs':1,
+                 'content':'Quoted bot ID ' + A,
+                 'toolResult':{'agentId':A, 'output':A},
+                 'richText':json.dumps({'text':A})}
+        before = json.loads(json.dumps(entry))
+        rows, conflicts = M.merge_entries({A:[entry], C:[{**entry,'agentId':C}]}, {A:C})
+        self.assertEqual(conflicts, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['entry'], {**before, 'agentId':C})
+        self.assertEqual(entry, before)
+
+    def test_different_quoted_ids_are_not_deduplicated_as_owner_changes(self):
+        first = {'id':'t1u', 'agentId':A, 'timestampMs':1, 'text':A}
+        second = {**first, 'agentId':C, 'text':C}
+        rows, conflicts = M.merge_entries({A:[first], C:[second]}, {A:C})
+        self.assertEqual(conflicts, 1)
+        self.assertEqual({row['entry']['text'] for row in rows}, {A,C})
+
+    def test_jsonl_owner_remapping_preserves_payloads_and_unclassified_lines(self):
+        entry = {'id':'t1u', 'agentId':A, 'content':{'agentId':A, 'text':A}}
+        untouched = json.dumps({'text':A}) + '\n'
+        text = json.dumps(entry) + '\r\n' + untouched + '{partial\n\n'
+        remapped = M.remap_transcript_jsonl(text, {A:C})
+        first, rest = remapped.split('\r\n', 1)
+        self.assertEqual(json.loads(first), {**entry, 'agentId':C})
+        self.assertEqual(rest, untouched + '{partial\n\n')
+        self.assertEqual(M.remap_transcript_jsonl(remapped, {A:C}), remapped)
+
     def test_snapshot_preserves_database_sessions_instructions_and_disabled_routines(self):
         with tempfile.TemporaryDirectory() as tmp:
             sd = pathlib.Path(tmp)

@@ -87,7 +87,7 @@ The installer does not change phone certificates or network settings and does no
 
 ## Install from a terminal
 
-Run on the Computer as its normal data owner. You need Bash, Python 3, `flock`, and access to the native authenticated host. Node 22+ is required; the installer can cache Node without replacing system Node.
+Run on the Computer as its normal data owner. You need Bash, Python 3, `flock`, and access to the native authenticated host. Node 22.13+ (22.x) or 24+ is required; the installer can cache Node without replacing system Node.
 
 Clone the public project:
 

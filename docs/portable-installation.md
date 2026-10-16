@@ -6,7 +6,7 @@ Install on your own Grok Bot **Computer**, with its authenticated host already r
 
 ## Before running the installer
 
-Work as the normal Computer user who owns sand-data. Keep an encrypted consistent state backup before changing an existing engine or identity set. Check that Bash, Python 3, `flock`, and a source download/copy are available. The installer can cache Node 22+ locally; it does not replace system Node. Use a terminal with command execution, not a desktop-app patch.
+Work as the normal Computer user who owns sand-data. Keep an encrypted consistent state backup before changing an existing engine or identity set. Check that Bash, Python 3, `flock`, and a source download/copy are available. The installer can cache Node 22.13+ (22.x) or 24+ locally; it does not replace system Node. Use a terminal with command execution, not a desktop-app patch.
 
 Read [client compatibility](../README.md#which-clients-work) first. If your only client is the unchanged standalone Grok Bot mobile app, this fork cannot currently promise local delivery there. A host without BOX execution needs the separate reviewed engine flow below.
 
@@ -51,7 +51,7 @@ Open `http://127.0.0.1:19280` on that client while SSH remains connected. Keep h
 
 Quick Cloudflare URLs change and have no uptime guarantee or SSE support. They are convenient panel access, not a production inference-stream transport. A stable named tunnel with access control requires your own separate Cloudflare configuration. [Cloudflare Quick Tunnel limits](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/).
 
-If `openbot` is not on PATH, invoke the installed `src/cli.ts` with a Node 22+ executable and `--experimental-strip-types`, or use `npm start -- tunnel status` from the installed source with that runtime. The CLI command is not a second hop server.
+If `openbot` is not on PATH, invoke the installed `src/cli.ts` with a Node 22.13+ (22.x) or 24+ executable and `--experimental-strip-types`, or use `npm start -- tunnel status` from the installed source with that runtime. The CLI command is not a second hop server.
 
 ## With Tailscale
 

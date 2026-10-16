@@ -178,16 +178,22 @@ if ! flock -n 9; then
   exit 75
 fi
 
+# Match the runtime dependency engine range, including eslint-scope. A major-only
+# check accepts early Node 22 builds without the TypeScript runtime we execute.
+node_runtime_supported() {
+  local candidate="$1"
+  [[ "$("$candidate" -p '(() => { const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(process.versions.node); if (!match) return false; const [, major, minor] = match.map(Number); return (major === 22 && minor >= 13) || major >= 24; })()' 2>/dev/null || true)" == true ]] &&
+    "$candidate" --experimental-strip-types -e 'if (typeof fetch !== "function" || typeof WebSocket !== "function") process.exit(1)' >/dev/null 2>&1
+}
+
 ensure_node() {
   local dest="${DATA}/node22"
   if command -v node >/dev/null 2>&1; then
-    local major
-    major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
-    if [[ "${major}" -ge 22 ]]; then
+    if node_runtime_supported node; then
       return 0
     fi
   fi
-  if [[ -x "${dest}/bin/node" ]] && [[ "$("${dest}/bin/node" -p "Number(process.versions.node.split('.')[0]) >= 22" 2>/dev/null || true)" == true ]]; then
+  if [[ -x "${dest}/bin/node" ]] && node_runtime_supported "${dest}/bin/node"; then
     export PATH="${dest}/bin:${PATH}"
     return 0
   fi
@@ -200,7 +206,7 @@ ensure_node() {
     Darwin-arm64) file="darwin-arm64" ;;
     Darwin-x86_64) file="darwin-x64" ;;
     *)
-      echo "OpenBot needs Node 22+. This box has $(command -v node >/dev/null && node -v || echo none) on ${os} ${arch}." >&2
+      echo "OpenBot needs Node 22.13+ (22.x) or 24+. This box has $(command -v node >/dev/null && node -v || echo none) on ${os} ${arch}." >&2
       exit 1
       ;;
   esac
@@ -230,7 +236,7 @@ PY
   local node_stage node_previous="${DATA}/node22-previous"
   node_stage="$(mktemp -d "${DATA}/.openbot-node.XXXXXX")"
   if ! tar -xzf "${tar}" -C "$node_stage" --strip-components=1 ||
-    [[ "$("$node_stage/bin/node" -p "Number(process.versions.node.split('.')[0]) >= 22" 2>/dev/null || true)" != true ]]; then
+    ! node_runtime_supported "$node_stage/bin/node"; then
     rm -rf "$node_stage"
     rm -f "$tar"
     echo 'OpenBot: staged Node is invalid; existing Node preserved.' >&2
@@ -326,9 +332,8 @@ if ! command -v node >/dev/null; then
   exit 1
 fi
 
-NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
-if [[ "$NODE_MAJOR" -lt 22 ]]; then
-  echo "OpenBot needs Node 22+. This box has $(node -v)." >&2
+if ! node_runtime_supported node; then
+  echo "OpenBot needs Node 22.13+ (22.x) or 24+ with TypeScript stripping. This box has $(node -v)." >&2
   exit 1
 fi
 

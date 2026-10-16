@@ -55,7 +55,7 @@ fi
 # Existing source, mode, model, accounts, and native state remain installer authority.
 export OPENBOT_TUNNEL=off OPENBOT_DEFER_HOST_BOUNCE=1
 bash "$SOURCE_DIR/install.sh"
-TASK_DATA="${OPENBOT_SAND_DATA:-/home/box/sand-data}"
-if [[ -x "$TASK_DATA/node22/bin/node" ]]; then export PATH="$TASK_DATA/node22/bin:$PATH"; fi
+# Each installer invocation validates and selects its own compatible runtime.
+# Do not let a stale cache hide a working system Node before finalization.
 bash "$SOURCE_DIR/install.sh" --bot-finalize
 echo 'Panel: http://127.0.0.1:9280 (on the Computer). Any host restart waits for idle. Configure your own account and verify a real turn and tool result.'

@@ -19,12 +19,15 @@ Use a fresh owned checkout. For a private source:
 ```bash
 openbot_source="$(mktemp -d /tmp/openbot-source.XXXXXX)"
 gh repo clone nickkostik/openbot-community "$openbot_source"
-OPENBOT_SRC="$openbot_source" OPENBOT_TUNNEL=off bash "$openbot_source/install.sh"
+bash "$openbot_source/quickstart.sh" --check
+bash "$openbot_source/quickstart.sh" --install
 ```
 
 For a public source, use `git clone https://github.com/nickkostik/openbot-community.git "$openbot_source"` for the clone step. Stop on a clone failure; do not install whatever happens to be left in an old directory.
 
 Open `http://127.0.0.1:9280` in the Computer's browser. The installer preserves the selected mode, providers, keys, bot settings and routine definitions. On a fresh install it starts the panel in Official mode; add a provider and select a custom model to route through OpenBot. It does not remint bots or enable a routine.
+
+`bash quickstart.sh --check` is read-only. It reports `savedExposure` and `loopbackInstallAllowed` alongside Computer prerequisites. A ready Computer can still have `loopbackInstallAllowed: false` because public access is already configured. `quickstart.sh --install` refuses that conflict before invoking the installer, so it cannot silently disable an existing tunnel. Preserve the policy and resolve which access the owner wants; `--public-tunnel` explicitly selects the detached public installer. Unsafe or unknown saved exposure refuses every quickstart action without printing the saved contents. This guard belongs to quickstart: a direct installer invocation with `OPENBOT_TUNNEL=off` explicitly changes the saved exposure.
 
 For a bot-triggered install/update, run the same checked-out script with `--bot-mode`. It runs detached, records progress, obtains a Cloudflare URL and QR, and defers a changed host's restart until the active turn finishes. Inspect `--bot-status --brief` after 30–60 seconds, at most twice, then report the current stage or failure. A retained old release is not an upgrade, and a pending restart is not activation proof.
 

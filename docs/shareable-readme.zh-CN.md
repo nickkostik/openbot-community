@@ -11,10 +11,13 @@
 ```bash
 openbot_source="$(mktemp -d /tmp/openbot-source.XXXXXX)"
 git clone https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git "$openbot_source"
-OPENBOT_SRC="$openbot_source" OPENBOT_TUNNEL=off bash "$openbot_source/install.sh"
+bash "$openbot_source/quickstart.sh" --check
+bash "$openbot_source/quickstart.sh" --install
 ```
 
 随后用 Computer 的浏览器打开 `http://127.0.0.1:9280`。需要 Bash、Python 3、flock 和 Node 22+；安装脚本可以缓存 Node，不替换系统 Node。Tailscale 是可选项。
+
+`--check` 只读取状态。若已配置公网 Tunnel，`--install` 会在安装前停止，保留原设置；确认需要公网访问时再显式选择 `--public-tunnel`。Quickstart 会把必要的宿主重启延后到空闲时，不能把待重启当成已完成。
 
 [可直接复制的 Agent 指令](docs/agent-install.md) 说明安装、可选 Tunnel/Tailscale 和更新。Bot 模式会创建临时公网控制地址，即使设置了 OPENBOT_TUNNEL=off；不需要公网地址时使用其中的无公网 Tunnel 流程。密钥和 OAuth 文件只在自己的面板输入，不能贴到聊天或仓库。
 

@@ -33,6 +33,29 @@ Installation takes `openbot-install.lock`, stages source beside the destination,
 
 Detached files are `openbot-install-result.json`, `openbot-install.log`, `openbot-install.pid` and corresponding `openbot-uninstall-*` files. Result `status` is `running`, `success` or `failed`, with `startedAt`, terminal `finishedAt`, progress `{stage,summary,updatedAt}`, timings and optional source/commit/error/rollback/restart fields. Python-backed uninstall/status receipts survive removal of the cached Node runtime. Read the actual receipt after a client disconnect; do not restart a mutation blindly.
 
+### Quickstart exposure preflight
+
+From the reviewed source checkout, `bash quickstart.sh --check` (or no argument) checks prerequisites and reads saved exposure without invoking the installer or changing mode/network policy. Run as the authenticated Computer's normal non-root data owner; the script requires its documented commands and a recognized native host. It respects `OPENBOT_SAND_DATA` and explicit `OPENBOT_HOST_MAIN` for preflight selection. It accepts one action: `--check`, `--install` or `--public-tunnel`.
+
+```bash
+bash /tmp/openbot-source/quickstart.sh --check
+```
+
+Preflight JSON has `phase: "preflight"`, prerequisite `ready`/host/owner/command observations and the separate exposure fields:
+
+| Field | Meaning |
+|---|---|
+| `savedExposure` | Recognized `unset`, `loopback` or normalized `cloudflare-quick`; stored legacy `cloudflare` reports `cloudflare-quick`. Missing/empty saved policy reports `unset`. |
+| `exposureReadable` | Whether saved policy is absent or safely readable/recognized. False is refusal, not permission to infer loopback from a displayed `unset`. |
+| `loopbackInstallAllowed` | Safe recognized policy does not already select a public tunnel; evaluate this separately from prerequisites. |
+| `modeChanged`, `stateChanged` | False describes this preflight only, not later installer effects or successful native runtime verification. |
+
+`--check` can report `ready: true` alongside `loopbackInstallAllowed: false` for a safely read saved public tunnel. This is a successful inspection, not authorization to run the loopback installer. `--install` instead refuses an existing `cloudflare`/`cloudflare-quick` policy before any installer or tunnel change, preserving its bytes and existing access intent. Do not remove the policy or retry using another action just to pass the check. Resolve intended access from the user's existing explicit instructions; clarify only when that choice is missing. An authorized change away from an existing public route uses the normal exposure controls before a later loopback install, not an implicit policy reset.
+
+The final saved `openbot-expose` file must be current-user-owned, regular and nonsymlink, at most 4096 bytes, valid UTF-8 and one of the recognized trimmed tokens (case-normalized for this check). Unreadable, unowned, symlinked, oversized or unknown content makes every quickstart action refuse before install/tunnel work. The error never echoes raw saved contents. Preserve the original and resolve its authority/format through the reviewed configuration workflow; do not chmod/rewrite/delete it to manufacture readiness.
+
+Only separately authorized `--public-tunnel` selects the optional detached public-access install path; it is not fallback for a refused loopback install or evidence that an endpoint is publicly reachable. That path still uses the installer's saved/explicit exposure authority and normal status instructions. `--install` is the loopback path and deliberately supplies `OPENBOT_TUNNEL=off` only after its exposure guard permits it. Neither a ready preflight nor automated fixture checks prove a real native installation, retained access, mode/identity handoff, tool return, delivered reply or billing. Verify those requested outcomes separately and preserve any admitted operation receipt after disconnection.
+
 ### Fresh-source privacy boundary
 
 Use a fresh product export and new Git history, not a copy of a deployed Computer or a public push of a private recovery repository. Public export reads a committed revision, includes only allowlisted product documentation and selected product source, replaces private configuration guides with these generic templates, omits deployment-specific fleet instructions/incidents and runs a fail-closed public-content audit. Audit rejection aborts the export; do not disable it or replace private identities with guessed labels to continue. Public fixture UUIDs must be synthetic. Inspect the export receipt and own source destination before publication; source export alone does not provision or verify an installation.
@@ -66,7 +89,7 @@ With default data root, known host backups are adjacent `<host>.pre-openbot`; cu
 
 `openbot-mode` contains trimmed `official` or `custom`. Official selects stock server/Temporal/Grok quota, preserves catalog/secrets/engine artifacts and stops the Custom daemon, even with `keepGuard:true`, while retaining self-PID protection. Logging can retain a stock tap, not a hop. Custom selects the saved local route; no stock fallback is permitted.
 
-`openbot-expose` is the saved `cloudflare`/`off` exposure choice. Mode/wrap/tunnel changes go through `DesiredState` and reconcile. Binding objects have only conversation/model identity, never secrets. Explicit Official is the guard's successful no-op even with a retained catalog or stock host; its tick performs no Custom patrol or deferred-bounce fallback. Missing/corrupt mode plus a valid catalog can repair Custom. Guarded repairs compare raw `expectedMode` before writes and after asynchronous observation; mismatch refuses `mode-changed`, while newly explicit Official becomes the successful skip.
+`openbot-expose` stores `loopback` or `cloudflare-quick`; quickstart also recognizes legacy `cloudflare` as the latter. Installer `OPENBOT_TUNNEL=off|cloudflare` is a separate input, not authority to replace saved policy silently. Mode/wrap/tunnel changes use `DesiredState` and reconcile; binding objects contain model/conversation identity, never secrets. Explicit Official remains the guard's successful no-op with no Custom patrol/deferred-bounce fallback. Missing/corrupt mode with valid catalog can repair Custom, but raw `expectedMode` is checked before writes/after observation; changed explicit Official wins. [Read-only quickstart policy guards](#quickstart-exposure-preflight).
 
 The unified owned service handles UI, APIs and hop at `127.0.0.1:9280`. Only the child that successfully binds publishes `openbot-ui.pid`; a foreign listener is refused. Reconcile requires both an answering port and a live published PID. Inspect `openbot-ui.log`; never hand-write a PID or adopt a process merely because it holds the port.
 

@@ -100,9 +100,11 @@ bash "$openbot_source/quickstart.sh" --install
 
 Stop if cloning fails. The installer saves this source repository and keeps it on later updates.
 
+If public access is already configured, `--check` reports it and `--install` stops before changing that tunnel. Preserve the existing setup and resolve which access you want; `--public-tunnel` is a separate explicit choice.
+
 Open **http://127.0.0.1:9280 in the Computer's browser**. A fresh install starts in Official mode. Add your own account, fetch its models, select a custom route, and complete the [first real turn checks](docs/portable-installation.md#prove-the-first-turn). Existing installs keep their saved mode and settings.
 
-If the installer needs to restart the host, a terminal install can interrupt active turns. Use the agent prompt when installing from inside a bot turn.
+Quickstart defers any required host restart until the host is idle. A direct ordinary `install.sh` call can interrupt active turns unless deferred restart is requested. Use the agent prompt when installing from inside a bot turn.
 
 ## Set it up your way
 

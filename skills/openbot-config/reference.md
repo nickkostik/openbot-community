@@ -76,6 +76,24 @@ Bot-mode upgrades use `openbot-pending-bounce.json`, `openbot-turn-lease.json` a
 
 CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status` and `openbot finalize-host`. Source install/repair uses CLI `install`; explicit new `--origin`/`--model` requires the private `OPENBOT_API_KEY`. `--dry-run` proves wrapping; `--census-only` is observation. `install --keep-service` is owned service repair, not a source upgrade; preserve idle deferred reload rules.
 
+### Explicit Official roster selection
+
+`recovery/hooks/official-dispatch-recovery.py` is a manual roster-selection helper for a separately authorized recovery. It requires literal Official already selected and an existing all-active current remint journal; it does not switch inference mode, mint an identity or run automatically through the supervisor or a save. Inspect its read-only live-authority plan first. Only an explicit authorized invocation without `--plan` applies profile/visibility/preferences changes:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/official-dispatch-recovery.py --plan
+# Authorized roster mutation, preserving the already-selected Official mode:
+python3 /home/box/sand-data/openbot-hooks/official-dispatch-recovery.py
+```
+
+The plan reads the current journal/platform roster and selected target profile without applying visibility/profile/settings changes. Both source and destination server rows must retain their recorded UUID/legacy UUID, saved numeric server ID and owner authority. Duplicate platform UUID rows, overlapping journal pairs, changed bindings or missing/unowned counterparts refuse. The chosen target must be actual Temporal with a matching local profile binding and exactly the journal's recorded kind; changed kind refuses with `Stock counterpart kind changed`. The current destination is preferred only when its Temporal row has that kind; otherwise the original counterpart is considered and must pass the same final target-kind check. A destination converted to a plain AGENT cannot replace a typed ROOM by name, nor can a changed original type bypass validation. This selection is not proof that room delivery or histories are fully reconciled.
+
+`identityMapping` includes both counterpart IDs, each pointing at the selected stock target; it is not only a new-to-old inverse map. References to either counterpart in sidebar sections, pins or the main pointer therefore converge regardless of which identity was already visible. Temporary preference transfer pairs the distinct counterpart IDs at their existing position through visibility handoff. Identity mappings to themselves are excluded from reverse pairing, so an already-selected target does not produce a duplicate self-pair. Exactly the chosen counterpart is revealed and either source or destination that was not selected is hidden; no source data is deleted. Section labels/order, pins, native collapse state, notifications and main pointer are retained and checked with the existing readback guards.
+
+Application keeps the already-selected mode and rechecks Official before platform/native operations and selected profile commits. It privately retains routing/profile backups and writes `openbot-official-dispatch-state.json` after checked selection. These checks are not a global transaction against external writers; inspect partial progress if mode changes during the operation rather than claiming automatic rollback. Preserve all BOX databases, context/session roots, instructions/routine settings and model/reasoning overrides. This is neither a live SDK/history/routine union nor a way to bypass transcript writer fences, replay pending completions, delete duplicates or authorize future Custom reminting.
+
+The plan reports `phase: "planned"`, `mode: "official"`, target count, private identity mapping, `liveHistoryMerged: false` and `pruneAllowed: false`. A completed application reports `phase: "stock-roster-selected"` plus private backup metadata and `nativeAppDeliveryVerified: false`; live-history/prune flags remain false. Keep mappings/backups private and verify an actual intended-client send/reply separately. Roster convergence is not phone delivery, billing proof, full cross-mode context reconciliation or permission to prune retained counterparts.
+
 ## Accounts and credentials
 
 Use additive `add-provider`, not a name-derived legacy activation, for a new independent account:

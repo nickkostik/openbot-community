@@ -41,28 +41,48 @@ class Recovery:
 
     def targets(self, journal, rows):
         by_id = {row['agentId']: row for row in rows}
+        if len(by_id) != len(rows):
+            raise RuntimeError('Platform roster contains duplicate identities')
         mapping, selected = {}, []
         for entry in journal['entries']:
             if entry['phase'] != 'active':
                 raise RuntimeError('Incomplete remint must be reviewed before Official roster handoff')
             old, new = self.module.canonical(entry['oldId']), self.module.canonical(entry['newId'])
             current, previous = by_id.get(new), by_id.get(old)
-            target = current if current and current.get('harness') == 'temporal' else previous
+            # A migrated plain agent is not a replacement for a typed room.
+            target = current if current and current.get('harness') == 'temporal' and \
+                current.get('kind') == entry['kind'] else previous
             if not target or target.get('harness') != 'temporal' or target.get('viewerIsOwner') is not True:
                 raise RuntimeError('No verified owned stock counterpart exists')
+            if target.get('kind') != entry['kind']:
+                raise RuntimeError('Stock counterpart kind changed')
             aid = target['agentId']
             if target.get('legacyAgentId') != aid:
                 raise RuntimeError('Stock counterpart identity is ambiguous')
-            expected_sid = entry['sourceServerId'] if aid == old else json.loads(
-                (self.root / 'agents' / new / 'profile.json').read_text())['serverId']
+            expected_sid = entry['sourceServerId'] if aid == old else entry['serverId']
             if str(target.get('id')) != str(expected_sid):
                 raise RuntimeError('Stock counterpart binding changed')
             profile = self.module.owned_json(self.root / 'agents' / aid / 'profile.json')
             if str(profile.get('serverId')) != str(target['id']):
                 raise RuntimeError('Native stock counterpart binding differs')
-            mapping[new] = aid
+            for candidate, expected in ((old, entry['sourceServerId']), (new, entry['serverId'])):
+                row = by_id.get(candidate)
+                if not row or row.get('viewerIsOwner') is not True or row.get('legacyAgentId') != candidate or \
+                        str(row.get('id')) != str(expected):
+                    raise RuntimeError('Counterpart ownership or binding changed before visibility handoff')
+                if candidate in mapping:
+                    raise RuntimeError('Official handoff pairs overlap')
+                mapping[candidate] = aid
             selected.append((entry, aid))
         return mapping, selected
+
+    def plan(self):
+        """Inspect current authority without applying visibility or profile writes."""
+        self.require()
+        journal = self.r.read()
+        mapping, selected = self.targets(journal, self.rpc('ListGrokBotAgents', {}).get('agents', []))
+        return {'phase': 'planned', 'mode': 'official', 'agentCount': len(selected),
+                'identityMapping': mapping, 'liveHistoryMerged': False, 'pruneAllowed': False}
 
     def run(self):
         self.require()
@@ -87,9 +107,10 @@ class Recovery:
                                           expected=before, pre_commit=self.require)
                 self.rpc('SetGrokBotAgentClientState', {'agentId': aid, 'hiddenFromSidebar': False})
                 self.gateway('setAgentHiddenFromSidebar', {'id': aid, 'isHidden': False})
-                if entry['newId'] != aid:
-                    self.rpc('SetGrokBotAgentClientState', {'agentId': entry['newId'], 'hiddenFromSidebar': True})
-                    self.gateway('setAgentHiddenFromSidebar', {'id': entry['newId'], 'isHidden': True})
+                for counterpart in (entry['oldId'], entry['newId']):
+                    if counterpart != aid:
+                        self.rpc('SetGrokBotAgentClientState', {'agentId': counterpart, 'hiddenFromSidebar': True})
+                        self.gateway('setAgentHiddenFromSidebar', {'id': counterpart, 'isHidden': True})
                 # BOX DBs, contexts, routines and model overrides stay untouched.
             desired = self.module.remap_preferences(settings, mapping)
             self.rpc('UpdateGrokBotUserRuntimeSettings', desired)
@@ -114,8 +135,9 @@ class Recovery:
             for entry, aid in selected:
                 if self.module.owned_json(self.root/'agents'/aid/'settings.json').get('hiddenFromSidebar',False):
                     raise RuntimeError('Stock counterpart remains hidden')
-                if aid != entry['newId'] and not self.module.owned_json(self.root/'agents'/entry['newId']/'settings.json').get('hiddenFromSidebar',False):
-                    raise RuntimeError('BOX counterpart remains visible in Official')
+                for counterpart in (entry['oldId'], entry['newId']):
+                    if counterpart != aid and not self.module.owned_json(self.root/'agents'/counterpart/'settings.json').get('hiddenFromSidebar',False):
+                        raise RuntimeError('Unselected counterpart remains visible in Official')
             result = {'phase': 'stock-roster-selected', 'mode': 'official', 'agentCount': len(selected),
                       'identityMapping': mapping, 'backup': str(backup), 'liveHistoryMerged': False,
                       'nativeAppDeliveryVerified': False, 'pruneAllowed': False}
@@ -124,8 +146,11 @@ class Recovery:
 
 
 def main():
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    print(json.dumps(Recovery().run()))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--plan', action='store_true', help='Inspect the live roster without applying changes')
+    args = parser.parse_args()
+    recovery = Recovery()
+    print(json.dumps(recovery.plan() if args.plan else recovery.run()))
 
 
 if __name__ == '__main__':

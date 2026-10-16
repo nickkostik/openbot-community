@@ -30,7 +30,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 PATCHES = ('local-mode-inject.py', 'gate-inject.py', 'room-mirror-guard-inject.py',
            'local-routines-inject.py', 'transcript-text-inject.py', 'subagent-state-inject.py',
            'local-engine-inject.py', 'exec-timing-inject.py', 'window-readiness-inject.py',
-           'store-status-inject.py', 'store-request-compression-inject.py', 'store-byte-upload-inject.py',
+           'store-status-inject.py', 'store-request-compression-inject.py', 'store-byte-upload-inject.py', 'store-chrome-snapshot-inject.py',
            'local-publication-inject.py')
 PACK_DIR = pathlib.Path('/tmp/sand-box-store-pack')
 HIBERNATE_HOOK = pathlib.Path('/var/run/anyrun-hibernate-hook')
@@ -584,7 +584,8 @@ def repair_official_store_status(check, before_replace=lambda: None):
     before = engine.owned_bytes(HOST, engine.MAX_BYTES)
     source = load_patch('store-status-inject.py')(before.decode())
     source = load_patch('store-request-compression-inject.py')(source)
-    updated = load_patch('store-byte-upload-inject.py')(source).encode()
+    source = load_patch('store-byte-upload-inject.py')(source)
+    updated = load_patch('store-chrome-snapshot-inject.py')(source).encode()
     if updated == before:
         return False
     check(updated)

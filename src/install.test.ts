@@ -389,6 +389,74 @@ test("install.sh copies the tree, leaves the host stock, and starts the UI", asy
   }
 });
 
+test("the real installer updates Official controls on an unsupported host and reports the logging limitation", async t => {
+  if (skipOnWindows(t)) return;
+  const box = mkdtempSync(path.join(os.tmpdir(), "openbot-official-controls-"));
+  const sandData = path.join(box, "sand-data"), sandHost = path.join(box, "sand-host");
+  mkdirSync(sandData); mkdirSync(sandHost);
+  const hostMain = path.join(sandHost, "host-main.cjs");
+  const unsupported = "function createProtoSession2() { return {}; }\n";
+  writeFileSync(hostMain, unsupported);
+  const retained: Record<string, string> = {
+    "openbot-mode": "official\n", "openbot-plan.json": '{"version":1,"catalog":{"providers":[],"models":[],"bindings":[]}}\n',
+    "openbot-secrets.json": '{"version":1,"providers":{}}\n',
+    "openbot-logs.json": JSON.stringify({ loggingEnabled: true }),
+  };
+  for (const [name, bytes] of Object.entries(retained)) writeFileSync(path.join(sandData, name), bytes);
+  const sentinel = path.join(box, "host-terminated");
+  const hostPid = startFakeHost(sandHost, sentinel);
+  const fixturePids = new Set([hostPid]);
+  const env = { ...process.env, OPENBOT_HOST_MAIN: hostMain, OPENBOT_SAND_DATA: sandData,
+    OPENBOT_SRC: repoRoot, OPENBOT_DEST: path.join(sandData, "openbot"), OPENBOT_COMMIT: "cafed00d",
+    OPENBOT_SKIP_NPM_INSTALL: "1", OPENBOT_TUNNEL: "off", OPENBOT_BOT_RESULT: path.join(sandData, "result.json"),
+    OPENBOT_BOT_QR_PATH: path.join(box, "qr.png") };
+  t.after(async () => {
+    const files = [path.join(sandData, "openbot-ui.pid"), path.join(sandData, "openbot-hop.pid"),
+      path.join(sandData, "openbot-tunnel.pid"), path.join(sandData, "openbot-guard.pid")];
+    const pids = fixturePids;
+    for (const file of files) {
+      try { const pid = Number(readFileSync(file, "utf8").trim()); if (pid > 0) pids.add(pid); } catch { /* absent */ }
+    }
+    killPidFiles(files);
+    try { process.kill(hostPid, "SIGTERM"); } catch { /* disposable host exited */ }
+    const running = (pid: number) => {
+      try {
+        // Detached children can briefly remain zombies under a container's
+        // init; they have exited and cannot recreate fixture files.
+        if (process.platform === "linux" && /\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) return false;
+        process.kill(pid, 0); return true;
+      } catch { return false; }
+    };
+    const deadline = Date.now() + 5000;
+    while ([...pids].some(running) && Date.now() < deadline) await sleep(25);
+    assert.equal([...pids].some(running), false, "fixture processes must exit before their files are removed");
+    rmSync(box, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const foreground = await runInstall([], env);
+  assert.equal(foreground.status, 0, foreground.stderr || foreground.stdout);
+  assert.match(foreground.stdout, /logging is unavailable/);
+  assert.equal((await get(`${UI}/healthz`)).status, 200);
+  const oldPid = readFileSync(path.join(sandData, "openbot-ui.pid"), "utf8");
+  fixturePids.add(Number(oldPid.trim()));
+  writeFakeCloudflared(sandData, "https://official-controls-test.trycloudflare.com");
+  const bot = await runInstall(["--bot-mode-worker"], env);
+  assert.equal(bot.status, 0, bot.stderr || bot.stdout);
+  const receipt = JSON.parse(readFileSync(path.join(sandData, "result.json"), "utf8"));
+  assert.equal(receipt.status, "success");
+  assert.equal(receipt.officialLogging, "unavailable-host-hook");
+  assert.equal(receipt.hostBounce, "disabled");
+  assert.notEqual(readFileSync(path.join(sandData, "openbot-ui.pid"), "utf8"), oldPid);
+  assert.equal(readFileSync(hostMain, "utf8"), unsupported);
+  for (const [name, bytes] of Object.entries(retained)) assert.equal(readFileSync(path.join(sandData, name), "utf8"), bytes);
+  assert.equal((await get(`${UI}/healthz`)).status, 200);
+  const state = JSON.parse((await get(`${UI}/api/state`)).body);
+  assert.equal(state.snapshot.uiListen.kind, "ours");
+  assert.equal(state.snapshot.alignment.desired, "official");
+  assert.equal(state.logSettings.loggingEnabled, true);
+  assert.equal(existsSync(sentinel), false);
+  process.kill(hostPid, 0);
+});
+
 test("bot-mode defers the host bounce and ends the caller's turn only when idle", async (t) => {
   if (skipOnWindows(t)) return;
   const box = mkdtempSync(path.join(os.tmpdir(), "openbot-bounce-box-"));

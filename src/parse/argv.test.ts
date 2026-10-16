@@ -81,6 +81,18 @@ test("bare install is official plus UI, not a custom wrap", () => {
     assert.equal(parsed.command.custom, undefined);
     assert.equal(parsed.command.exposeSpecified, false);
     assert.equal(parsed.command.keepService, false);
+    assert.equal(parsed.command.officialControlsFallback, false);
+  }
+});
+
+test("installer explicitly enables the Official controls fallback without changing mode intent", () => {
+  const parsed = parseInstallCommand({ argv: ["install", "--official-controls-fallback"],
+    env: {}, repoRoot: "/tmp/openbot" });
+  assert.equal(parsed.command.kind, "install");
+  if (parsed.command.kind === "install") {
+    assert.equal(parsed.command.officialControlsFallback, true);
+    assert.equal(parsed.command.keepService, false);
+    assert.equal(parsed.command.custom, undefined);
   }
 });
 

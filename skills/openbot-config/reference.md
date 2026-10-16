@@ -31,7 +31,7 @@ Metadata is bounded owned regular nonsymlink JSON, maximum 16 KiB, atomically pu
 
 Installation takes `openbot-install.lock`, stages source beside the destination, excludes runtime/private artifacts, validates Node syntax and required parser dependencies, and retains `openbot-previous`. Concurrent install exits 75. Node must actually be 22+; downloaded fallback is SHA256 checked and executed before cutover. Missing required `acorn`/`eslint-scope` refuses activation. Preserve existing mode/accounts/models, bot reasoning, histories/instructions/routines, tool/ACP/MCP settings and private session state. Source rollback, installer success and panel health are separate from a real native send/tool-return/reply. The default installer neither remints identities nor deletes data/replays routines; a native image operation, mode identity handoff and live cross-mode context merge need their own explicit process and verification.
 
-Detached files are `openbot-install-result.json`, `openbot-install.log`, `openbot-install.pid` and corresponding `openbot-uninstall-*` files. Result `status` is `running`, `success` or `failed`, with `startedAt`, terminal `finishedAt`, progress `{stage,summary,updatedAt}`, timings and optional source/commit/error/rollback/restart fields. Python-backed uninstall/status receipts survive removal of the cached Node runtime. Read the actual receipt after a client disconnect; do not restart a mutation blindly.
+Detached files are `openbot-install-result.json`, `openbot-install.log`, `openbot-install.pid` and corresponding uninstall files. Result `status` is running/success/failed, with timestamps, progress/timings and optional source/commit/error/rollback/restart metadata. A successful installer controls fallback also retains `officialLogging: "unavailable-host-hook"`; status and Bot instructions must disclose optional Official logging unavailable rather than describe a fully verified install. Python-backed uninstall/status receipts survive removal of cached Node. Read the actual receipt after disconnect rather than repeating a mutation; capability disclosure and source success are not native chat validation.
 
 ### Quickstart exposure preflight
 
@@ -112,9 +112,39 @@ This is an existing `install` option, not a new save kind, source upgrade or mod
 
 Official controls-only recovery retains an existing owned unified listener or starts it when absent using the normal published-PID/listen checks. Unsupported or ambiguous optional logging-factory anchors do not prevent this branch from serving the panel. Native host bytes, saved logging settings, catalog, credentials and mode remain unchanged; there is no host wrap/reinstrumentation, native restart or inferred payload activation. A successful receipt has `wrapBytesChanged: false` and `hostBounce: "none"`. Existing Official finalization still stops a stale Custom guard with its self-PID protection and reconciles the saved exposure policy. This is not permission to adopt an unknown process, bypass a missing/foreign host, disable logging or erase settings.
 
-Normal source installs and UI saves retain the checked logging-wrap requirements when logging is enabled. Custom still needs its actual checked wrapper/provider path; `--keep-service` is not a universal escape from those checks. Preserving a listener also means it may still be running older service code, so use the normal deliberate update/reload path for source upgrades.
+Default CLI installs and UI saves retain checked logging-wrap requirements when logging is enabled. The source installer now explicitly supplies the separately guarded `--official-controls-fallback` exception below; it is not a universal bypass or a Custom repair. `--keep-service` continues to preserve a healthy listener and may therefore keep older service code loaded; deliberate source upgrades need the normal reload path or that narrow installer fallback, not service-only recovery.
 
 The existing `computer-recovery.py` service fallback passes `--keep-service` with the selected host/data paths and deferred-bounce setting, preserving the Official selection rather than repeatedly failing optional logging instrumentation. Read the owned service PID and `/api/state` separately from logging compatibility and an intended-client stock send/reply. An available panel, retained logging preference or successful service-only receipt does not establish a loaded native tap, fresh captured traffic, repaired roster/message delivery, full mode/context reconciliation or billing. Mode checks describe observed authority, not an atomic transaction against all external writers.
+
+### Installer fallback for unavailable Official logging
+
+The source installer invokes CLI `install --official-controls-fallback` when reconciling its staged release and `tunnel on --official-controls-fallback --json` during its existing explicitly authorized public setup. The latter prevents a second strict logging reconciliation from undoing the controls-only outcome. CLI install and mutating tunnel paths capture exact saved mode bytes once for both desired state and `expectedMode`; the flag enables internal `officialControlsFallback: true`. It adds no UI save kind/result shape, does not disable saved logging or switch mode, and grants no public-access permission by itself. A direct reviewed install diagnostic equivalent is:
+
+```bash
+node --experimental-strip-types /home/box/sand-data/openbot/src/cli.ts install \
+  --official-controls-fallback --json
+```
+
+For the separately authorized installer public setup, the corresponding existing tunnel action is `node --experimental-strip-types /home/box/sand-data/openbot/src/cli.ts tunnel on --official-controls-fallback --json`. Explicit `--official-controls-fallback` is recognized on mutating tunnel commands; default tunnel commands and UI saves still require their ordinary checked wrappers. Do not append it as a fallback after quickstart refuses saved exposure or treat it as authorization to change a private/public access choice. API/capability fields below are unchanged.
+
+The exception applies only when the desired and explicitly saved mode are Official, saved request logging is enabled, the host is unmarked and requires no source peel/rewrite, and census cannot find a unique usable stock logging hook (`private-lane`, `gap` or `ambiguous-factory`). It does not accept an existing marked composition or change an unknown/default mode into Official to qualify. When those conditions are absent, ordinary checked reconcile behavior remains, including Custom wrapping, supported Official tap installation or existing refusal. Default CLI invocation without this flag and UI saves remain strict.
+
+Unlike `--keep-service` recovery, this installer path reloads an existing owned control UI to load the staged release, or starts it if absent, using normal PID/listen checks. It rejects foreign listeners and rechecks the saved raw mode after asynchronous observation/startup before Official finalization. Native host bytes, mode, logging preferences, catalog, credentials and existing host backups stay untouched by this fallback; no wrapper is fabricated, host bounce scheduled or inference path replaced. Official's normal stale-Custom-guard cleanup/self-PID protection and requested exposure reconciliation remain distinct. Do not infer an atomic transaction against external writers or claim that another saved public access policy was implicitly authorized.
+
+Successful CLI JSON includes these capability fields (the full result also has its normal snapshot):
+
+```json
+{
+  "ok": true,
+  "wrapBytesChanged": false,
+  "hostBounce": "none",
+  "officialLogging": "unavailable-host-hook"
+}
+```
+
+`officialLogging` means controls were updated while optional stock request logging could not be installed on this host. The logging preference remains saved; this is not a claim that a tap is loaded or traffic captured. The detached install result preserves the same field. CLI text, `--bot-status` and `--bot-status --brief` must relay the capability warning; printed `OPENBOT_OFFICIAL_LOGGING=unavailable-host-hook` and `OPENBOT_CAPABILITY_WARNING` describe that limitation, and the Bot completion instruction carries it alongside success. A missing field or `not-reported` is not positive logging proof.
+
+Report source/controls success with optional logging unavailable, leaving stock delivery policy unchanged. It does not establish a completed native inference/tool turn, client delivery, billing, history/SDK/routine merge or mode handoff. Inspect a compatible loaded tap and actual intended-client stream/reply separately if those outcomes are required. Do not change providers, credentials or logging preferences simply to hide the disclosure.
 
 ### Explicit Official roster selection
 

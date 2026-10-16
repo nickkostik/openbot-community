@@ -487,6 +487,78 @@ test("a normal Official logging install still refuses an unsupported host", asyn
   assert.deepEqual(ctx.procs.started, []);
 });
 
+test("an Official installer can reload controls on an unsupported stock host while retaining settings", async () => {
+  const unsupported = "function createProtoSession2(client) { return {}; }\n";
+  const ctx = setup(unsupported, { serviceOurs: true });
+  const retained = {
+    [ctx.paths.mode]: "official\n",
+    [ctx.paths.logsSettings]: JSON.stringify({ loggingEnabled: true }),
+    [ctx.paths.plan]: "retained catalog",
+    [ctx.paths.secrets]: "retained credentials",
+    [ctx.paths.knownBackup]: "retained backup",
+    [ctx.paths.hostMain]: unsupported,
+  };
+  for (const [path, value] of Object.entries(retained)) ctx.fs.files[path] = value;
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps, {
+    officialControlsFallback: true, reloadService: true, expectedMode: "official\n",
+  });
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") {
+    assert.equal(result.officialLogging, "unavailable-host-hook");
+    assert.equal(result.wrapBytesChanged, false);
+    assert.equal(result.hostBounce, "none");
+  }
+  for (const [path, value] of Object.entries(retained)) assert.equal(ctx.fs.files[path], value);
+  assert.deepEqual(ctx.procs.stopped, [43]);
+  assert.equal(ctx.procs.started.length, 1);
+  assert.deepEqual(ctx.procs.termed, []);
+  assert.deepEqual(ctx.procs.checked, []);
+});
+
+test("Official installer fallback still installs logging when the stock hook is supported", async () => {
+  const ctx = setup(STOCK);
+  ctx.fs.files[ctx.paths.mode] = "official\n";
+  ctx.fs.files[ctx.paths.logsSettings] = JSON.stringify({ loggingEnabled: true });
+  const result = await reconcile(officialBox(ctx.paths), ctx.deps, { officialControlsFallback: true });
+  assert.equal(result.kind, "ok");
+  if (result.kind === "ok") assert.equal(result.officialLogging, undefined);
+  assert.match(ctx.fs.read(ctx.paths.hostMain) ?? "", /openbot-stock-wrap/);
+});
+
+test("installer fallback cannot bypass a Custom hook failure", async () => {
+  {
+    const source = "function createProtoSession2(client) { return {}; }\n";
+    const ctx = setup(source);
+    ctx.fs.files[ctx.paths.mode] = "custom\n";
+    ctx.fs.files[ctx.paths.logsSettings] = JSON.stringify({ loggingEnabled: true });
+    const result = await reconcile(zhipu(ctx.paths), ctx.deps,
+      { officialControlsFallback: true });
+    assert.equal(result.kind, "refused");
+    assert.equal(ctx.fs.read(ctx.paths.hostMain), source);
+    assert.deepEqual(ctx.procs.started, []);
+    assert.deepEqual(ctx.procs.termed, []);
+  }
+});
+
+test("Official installer fallback refuses a foreign listener and a selection changed during startup", async () => {
+  for (const foreign of [false, true]) {
+    const ctx = setup("function createProtoSession2(client) { return {}; }\n", { serviceForeign: foreign });
+    ctx.fs.files[ctx.paths.mode] = "official\n";
+    ctx.fs.files[ctx.paths.logsSettings] = JSON.stringify({ loggingEnabled: true });
+    const start = ctx.procs.start;
+    ctx.procs.start = (input) => {
+      const pid = start(input);
+      ctx.fs.files[ctx.paths.mode] = "custom\n";
+      return pid;
+    };
+    const result = await reconcile(officialBox(ctx.paths), ctx.deps,
+      { officialControlsFallback: true, expectedMode: "official\n" });
+    assert.deepEqual(result, { kind: "refused", error: { kind: foreign ? "foreign-ui" : "mode-changed" } });
+    assert.deepEqual(ctx.procs.stopped, []);
+    assert.deepEqual(ctx.procs.termed, []);
+  }
+});
+
 test("a mode change during service startup preserves the newly selected Custom guard", async () => {
   const ctx = setup(STOCK, { guardRunning: true });
   ctx.fs.files[ctx.paths.mode] = "official\n";

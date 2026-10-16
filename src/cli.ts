@@ -116,12 +116,6 @@ function askTunnel(): Expose {
   return exposeFromTunnelAnswer(answer);
 }
 
-function boxFromDisk(deps: SupervisorDeps, expose: Expose) {
-  const mode = deps.fs.read(deps.paths.mode);
-  const catalog = catalogFromPlanJson(deps.fs.read(deps.paths.plan));
-  return boxFromSavedMode({ paths: deps.paths, mode, catalog, expose });
-}
-
 export type FinalizeHostOpts = {
   /** One attempt, then exit — the detached worker passes none, the alias does. */
   readonly once: boolean;
@@ -282,7 +276,14 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     const expose: Expose = parsed.command.action === "on" ? { kind: "cloudflare-quick" } : loopbackExpose();
-    const result = await reconcile(boxFromDisk(deps, expose), deps, { reloadService: true, source: "cli:tunnel" });
+    const savedMode = deps.fs.read(deps.paths.mode);
+    const desired = boxFromSavedMode({ paths: deps.paths, mode: savedMode,
+      catalog: catalogFromPlanJson(deps.fs.read(deps.paths.plan)), expose });
+    const result = await reconcile(desired, deps, { reloadService: true, source: "cli:tunnel",
+      ...(parsed.command.officialControlsFallback ? {
+        officialControlsFallback: true, expectedMode: savedMode,
+      } : {}),
+    });
     printResult(result, parsed.json);
     return result.kind === "ok" ? 0 : 1;
   }
@@ -336,14 +337,19 @@ async function main(argv: string[]): Promise<number> {
     return result.kind === "ok" ? 0 : 1;
   }
 
-  const desired = boxFromDisk(deps, expose);
+  const savedMode = deps.fs.read(deps.paths.mode);
+  const desired = boxFromSavedMode({ paths: deps.paths, mode: savedMode,
+    catalog: catalogFromPlanJson(deps.fs.read(deps.paths.plan)), expose });
   const result = await reconcile(desired, deps, {
     reloadService: !keepService,
     source: keepService ? "cli:ensure-service" : "cli:install",
     ...(keepService ? { keepGuard: true } : {}),
+    ...(parsed.command.kind === "install" && parsed.command.officialControlsFallback ? {
+      officialControlsFallback: true, expectedMode: savedMode,
+    } : {}),
     ...(keepService && desired.kind === "official" ? {
       serviceOnly: true,
-      expectedMode: deps.fs.read(deps.paths.mode),
+      expectedMode: savedMode,
     } : {}),
     ...(deferHostBounce ? { deferHostBounce: true } : {}),
   });

@@ -27,6 +27,8 @@ bash "$openbot_source/quickstart.sh" --install
 
 Official 使用原厂宿主和平台投递，消耗 Grok 配额。Custom 需要经过审核且实际可运行的 BOX 引擎，并使用所选服务商。Temporal 云服务由厂商维护。新版上游移除 BOX 时，需要经过验证的兼容移植；版本号相同不代表所有功能已移植。
 
+如果新版原厂宿主移除了可选的日志接口，已有 Official 安装仍可更新控制面板。安装器会明确提示请求日志不可用，并保留原厂投递、已选模式及已有设置。这不代表聊天或日志采集已验证；Custom 仍须通过本地引擎兼容性检查。参阅[源码更新及验证说明](docs/updating.md#update-the-product-source)。
+
 ## 配置与验证
 
 - [模型、账户、推理、压缩、缓存和工具](docs/models-and-tools.md)

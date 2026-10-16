@@ -32,7 +32,8 @@ export type CliCommand =
   | { readonly kind: "dry-run" }
   | { readonly kind: "official" }
   | { readonly kind: "guard"; readonly action: "once" | "daemon" | "stop"; readonly intervalMinutes: number }
-  | { readonly kind: "tunnel"; readonly action: "on" | "off" | "status" }
+  | { readonly kind: "tunnel"; readonly action: "on" | "off" | "status";
+      readonly officialControlsFallback?: boolean }
   | {
       readonly kind: "finalize-host";
       /** One attempt, then exit (the alias --bot-finalize implies this). */
@@ -60,6 +61,8 @@ export type CliCommand =
       readonly deferHostBounce: boolean;
       /** Recovery only: reuse the owned service if it opens before reconcile. */
       readonly keepService: boolean;
+      /** Installer may update Official controls if the optional tap is unsupported. */
+      readonly officialControlsFallback: boolean;
     };
 
 export type ParsedCli = {
@@ -228,7 +231,9 @@ export function parseInstallCommand(input: {
   if (tunnelAt >= 0) {
     const action = argv[tunnelAt + 1];
     if (action === "on" || action === "off" || action === "status") {
-      return { command: { kind: "tunnel", action }, paths, json };
+      return { command: { kind: "tunnel", action,
+        ...(hasFlag(argv, "--official-controls-fallback") ? { officialControlsFallback: true } : {}),
+      }, paths, json };
     }
     throw new Error("OpenBot: tunnel is on, off, or status");
   }
@@ -239,6 +244,7 @@ export function parseInstallCommand(input: {
   const tunnelFlag = takeFlag(argv, "--tunnel");
   const deferHostBounce = hasFlag(argv, "--defer-host-bounce") || input.env.OPENBOT_DEFER_HOST_BOUNCE === "1";
   const keepService = hasFlag(argv, "--keep-service");
+  const officialControlsFallback = hasFlag(argv, "--official-controls-fallback");
   const exposeSpecified = Boolean(tunnelFlag || input.env.OPENBOT_TUNNEL);
   const expose =
     parseExposeToken(tunnelFlag) ?? parseExposeToken(input.env.OPENBOT_TUNNEL) ?? loopbackExpose();
@@ -264,13 +270,14 @@ export function parseInstallCommand(input: {
         json,
         deferHostBounce,
         keepService,
+        officialControlsFallback,
       },
       paths,
       json,
     };
   }
 
-  return { command: { kind: "install", expose, exposeSpecified, json, deferHostBounce, keepService }, paths, json };
+  return { command: { kind: "install", expose, exposeSpecified, json, deferHostBounce, keepService, officialControlsFallback }, paths, json };
 }
 
 export function parseUpstreamOrigin(raw: string): UpstreamOrigin {

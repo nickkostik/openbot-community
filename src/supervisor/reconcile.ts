@@ -39,12 +39,16 @@ export type ReconcileResult =
       readonly wrapBytesChanged: boolean;
       /** What happened to the stale host: bounced now, armed for later, or not needed. */
       readonly hostBounce: HostBounce;
+      /** Controls updated; optional stock request logging could not be installed. */
+      readonly officialLogging?: "unavailable-host-hook";
     }
   | { readonly kind: "refused"; readonly error: ReconcileError };
 
 export type ReconcileOpts = {
   /** Recover Official controls without editing or instrumenting the native host. */
   readonly serviceOnly?: boolean;
+  /** Installer only: retain explicit Official mode when its optional tap is unsupported. */
+  readonly officialControlsFallback?: boolean;
   /** Guard repairs must not overwrite a selection changed during async observation. */
   readonly expectedMode?: string | undefined;
   /** CLI install copies a new tree. Restart the owned loopback process so it loads that tree. */
@@ -908,6 +912,7 @@ export async function reconcile(
   deps: SupervisorDeps,
   opts: ReconcileOpts = {},
 ): Promise<ReconcileResult> {
+  const initialMode = deps.fs.read(deps.paths.mode);
   if (opts.serviceOnly && (desired.kind !== "official" || deps.fs.read(deps.paths.mode)?.trim() !== "official")) {
     return { kind: "refused", error: { kind: "mode-changed" } };
   }
@@ -962,6 +967,26 @@ export async function reconcile(
       return { kind: "refused", error: { kind: "mode-changed" } };
     }
     return finishOk(deps, desired, false, opts, currentPayloadFingerprint(deps));
+  }
+
+  if (opts.officialControlsFallback && desired.kind === "official" &&
+      initialMode?.trim() === "official" && loggingEnabledFromDisk(deps) &&
+      raw === source && !raw.includes(OPENBOT_MARKER)) {
+    const census = censusHost(source);
+    if (census.kind === "private-lane" || census.kind === "gap" || census.kind === "ambiguous-factory") {
+      if (deps.fs.read(deps.paths.mode) !== initialMode) {
+        return { kind: "refused", error: { kind: "mode-changed" } };
+      }
+      // Update the owned controls process to load the new release. Recovery's
+      // serviceOnly path above deliberately keeps a healthy listener instead.
+      const service = await ensureService(deps, before.uiListen.kind, opts);
+      if (service) return service;
+      if (deps.fs.read(deps.paths.mode) !== initialMode) {
+        return { kind: "refused", error: { kind: "mode-changed" } };
+      }
+      const result = await finishOk(deps, desired, false, opts, currentPayloadFingerprint(deps));
+      return result.kind === "ok" ? { ...result, officialLogging: "unavailable-host-hook" } : result;
+    }
   }
 
   deps.fs.mkdirp(deps.paths.sandData);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { type OwnedPid, type Snapshot } from "../domain/types.ts";
-import { printReady, printStatus } from "./print.ts";
+import { printReady, printStatus, printResult } from "./print.ts";
 
 function officialSnapshot(tunnel: Snapshot["tunnel"]): Snapshot {
   return {
@@ -27,6 +27,17 @@ function captureLog(run: () => void): string {
   }
   return lines.join("\n");
 }
+
+test("an Official controls update reports unavailable logging in human and JSON output", () => {
+  const result = { kind: "ok" as const, snapshot: officialSnapshot({ kind: "off" }),
+    hostBounce: "none" as const, wrapBytesChanged: false,
+    officialLogging: "unavailable-host-hook" as const };
+  const human = captureLog(() => printResult(result, false));
+  assert.match(human, /controls are ready.*Official chat stays on stock Grok.*logging is unavailable/);
+  const json = JSON.parse(captureLog(() => printResult(result, true)));
+  assert.equal(json.officialLogging, "unavailable-host-hook");
+  assert.equal(json.hostBounce, "none");
+});
 
 test("tunnel ready text prints the QR before Computer and Phone URLs", () => {
   const url = "https://openbot-test.trycloudflare.com";

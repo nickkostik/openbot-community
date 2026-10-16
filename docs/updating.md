@@ -31,6 +31,8 @@ For an existing reviewed checkout, use its actual path and commit instead of clo
 
 The installer stages source separately, validates syntax/dependencies and retains the previous release before activation. A retained old install after failed downloads is not an upgrade. Source rollback, an open port or a pending restart does not establish delivered chat. Verify the published owned service PID and `/api/state`. Use the supervisor's existing deferred/idle reload for changed code; ordinary catalog/credential edits are read on the next request and do not need a host bounce.
 
+If the saved mode is explicitly Official and an unmarked vendor host no longer supports the optional logging hook, the installer updates the owned controls process while preserving the host, mode, logging preference, catalog and credentials. It reports `officialLogging: "unavailable-host-hook"` in CLI JSON and the detached receipt, with a warning in full/brief status. This exception is explicitly requested by the installer through `--official-controls-fallback`, including its tunnel setup. It never makes an unsupported Custom engine pass or proves stock delivery/log capture; ordinary CLI installs and UI saves remain strict. Use `--keep-service` only for recovery that should retain a healthy listener, not to load a new release.
+
 ## Capture one vendor release for both paths
 
 Inspect the actual stock native version and the selected local manifest. The checked follower captures an authenticated vendor release, verifies archive/source hashes and prepares a compatible local pair for that same upstream release. A version label alone is not sufficient: the selected manifest, captured vendor source and prepared pair need matching provenance.

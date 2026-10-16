@@ -124,6 +124,27 @@ test("bot-status reports missing, running, success, and failed result files", (t
   }
 });
 
+test("Official logging capability survives the receipt and both status formats", t => {
+  if (!requireBash(t) || skipOnWindows(t)) return;
+  const data = mkdtempSync(path.join(os.tmpdir(), "openbot-capability-receipt-"));
+  try {
+    const writer = readFileSync(install, "utf8").match(/^bot_write_state\(\) \{[\s\S]*?^\}/m);
+    assert.ok(writer);
+    const result = path.join(data, "result.json");
+    const write = (value: string) => runBash(writer[0] + '\nBOT_RESULT_FILE=$1; export OPENBOT_OFFICIAL_LOGGING=$2; bot_write_state success start finish "" "" "" "" ready done', [result, value]);
+    write("unavailable-host-hook");
+    assert.equal(JSON.parse(readFileSync(result, "utf8")).officialLogging, "unavailable-host-hook");
+    for (const status of [runStatus(data), runStatusBrief(data)]) {
+      assert.match(status, /OPENBOT_OFFICIAL_LOGGING=unavailable-host-hook/);
+      assert.match(status, /OPENBOT_CAPABILITY_WARNING=.*logging is unavailable/);
+      assert.match(status, /OPENBOT_BOT_INSTRUCTION=.*logging is unavailable/);
+    }
+    write("");
+    assert.equal(JSON.parse(readFileSync(result, "utf8")).officialLogging, undefined);
+    assert.equal(runStatusBrief(data).includes("OPENBOT_OFFICIAL_LOGGING="), false);
+  } finally { rmSync(data, { recursive: true, force: true }); }
+});
+
 test("bot-mode guards duplicate workers and cleans stale pid files", async (t) => {
   if (!requireBash(t) || skipOnWindows(t)) return;
 

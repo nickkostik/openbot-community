@@ -83,6 +83,7 @@ export function printResult(result: ReconcileResult, json: boolean): void {
             ok: true,
             wrapBytesChanged: result.wrapBytesChanged,
             hostBounce: result.hostBounce,
+            ...(result.officialLogging ? { officialLogging: result.officialLogging } : {}),
             snapshot: result.snapshot,
           },
           null,
@@ -95,7 +96,9 @@ export function printResult(result: ReconcileResult, json: boolean): void {
     return;
   }
   if (result.kind === "ok") {
-    printReady(result.snapshot);
+    printReady(result.snapshot, result.officialLogging
+      ? "OpenBot controls are ready. Official chat stays on stock Grok; request logging is unavailable on this host."
+      : undefined);
     return;
   }
   printRefused(result);

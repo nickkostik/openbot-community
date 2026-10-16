@@ -104,6 +104,8 @@ If public access is already configured, `--check` reports it and `--install` sto
 
 Open **http://127.0.0.1:9280 in the Computer's browser**. A fresh install starts in Official mode. Add your own account, fetch its models, select a custom route, and complete the [first real turn checks](docs/portable-installation.md#prove-the-first-turn). Existing installs keep their saved mode and settings.
 
+An Official update can keep the panel available when a new vendor host removes the optional logging hook. The installer explicitly warns that request logging is unavailable and leaves stock delivery and saved settings unchanged. [Update behavior and verification](docs/updating.md#update-the-product-source).
+
 Quickstart defers any required host restart until the host is idle. A direct ordinary `install.sh` call can interrupt active turns unless deferred restart is requested. Use the agent prompt when installing from inside a bot turn.
 
 ## Set it up your way

@@ -33,6 +33,54 @@ PATCHES = ('local-mode-inject.py', 'gate-inject.py', 'room-mirror-guard-inject.p
            'store-status-inject.py', 'store-request-compression-inject.py', 'local-publication-inject.py')
 PACK_DIR = pathlib.Path('/tmp/sand-box-store-pack')
 HIBERNATE_HOOK = pathlib.Path('/var/run/anyrun-hibernate-hook')
+FLUSH_CHANNEL_DIR = pathlib.Path('/run/sand-box-store-flush')
+FLUSH_CHANNEL_CONTRACT = (
+    'SAND_BOX_STORE_FLUSH_FIFO_DIR = "/run/sand-box-store-flush";',
+    'var BoxStoreHibernateHookService = class {',
+    'this.fifoDir = deps.fifoDir ?? SAND_BOX_STORE_FLUSH_FIFO_DIR;',
+    'if (provisioned && (0, import_node_fs26.existsSync)(this.hookPath)) {',
+)
+FLUSH_CHANNEL_PREPARE = '''import json,os,stat,sys
+def prepare_channel(parent, uid, gid, *, parent_uid=0):
+    name = 'sand-box-store-flush'
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(parent, flags)
+    try:
+        parent_info = os.fstat(parent_fd)
+        if parent_info.st_uid != parent_uid or parent_info.st_mode & 0o022:
+            raise RuntimeError('Untrusted native runtime directory')
+        created = False
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            created = True
+        except FileExistsError:
+            pass
+        channel_fd = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            info = os.fstat(channel_fd)
+            if info.st_uid not in (0, uid):
+                raise RuntimeError('Foreign native flush channel')
+            if created:
+                try:
+                    os.fchown(channel_fd, uid, gid)
+                    os.fchmod(channel_fd, 0o700)
+                    os.fsync(channel_fd)
+                except BaseException:
+                    held = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (held.st_dev, held.st_ino) == (info.st_dev, info.st_ino):
+                        os.rmdir(name, dir_fd=parent_fd)
+                    raise
+            return {'state': 'created' if created else 'existing'}
+        finally:
+            os.close(channel_fd)
+    finally:
+        os.close(parent_fd)
+if __name__ == '__main__':
+    uid,gid = map(int, sys.argv[1:])
+    if uid < 0 or gid < 0:
+        raise RuntimeError('Invalid runtime owner')
+    print(json.dumps(prepare_channel('/run', uid, gid)))
+'''
 HIBERNATE_SCRIPT = '''#!/usr/bin/python3
 # openbot-computer-recovery: flush through the authenticated native gateway
 import json, pathlib, sys, urllib.request
@@ -211,8 +259,50 @@ def gateway_status():
         return json.load(response)
 
 
+def ensure_native_flush_channel():
+    """Pre-provision the native FIFO directory without replacing its hook."""
+    try:
+        info = HOST.lstat()
+    except FileNotFoundError:
+        return {'state': 'unsupported-host'}
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise RuntimeError('Refusing an unowned native flush contract')
+    try:
+        channel = FLUSH_CHANNEL_DIR.lstat()
+    except FileNotFoundError:
+        channel = None
+    if channel is not None:
+        if not stat.S_ISDIR(channel.st_mode) or channel.st_uid not in (0, os.getuid()):
+            raise RuntimeError('Refusing a foreign or symlinked native flush channel')
+        if not os.access(FLUSH_CHANNEL_DIR, os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeError('Existing native flush channel is not accessible')
+        return {'state': 'existing'}
+    # Existing owned directories need no mutation or repeated full-bundle read.
+    fd = os.open(HOST, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'r', encoding='utf8') as handle:
+        native = os.fstat(handle.fileno())
+        if not stat.S_ISREG(native.st_mode) or native.st_uid != os.getuid() or native.st_size > 48 * 1024 * 1024:
+            raise RuntimeError('Refusing an unowned or oversized native flush contract')
+        source = handle.read(48 * 1024 * 1024 + 1)
+    if any(source.count(anchor) != 1 for anchor in FLUSH_CHANNEL_CONTRACT):
+        return {'state': 'unsupported-host'}
+    result = subprocess.run(['sudo', '-n', '/usr/bin/python3', '-c', FLUSH_CHANNEL_PREPARE,
+                             str(os.getuid()), str(os.getgid())],
+                            check=True, capture_output=True, text=True, timeout=5)
+    prepared = json.loads(result.stdout)
+    if prepared not in ({'state': 'created'}, {'state': 'existing'}):
+        raise RuntimeError('Unexpected native flush preparation result')
+    # Another owner may have created the path while sudo started. Inspect its
+    # accessibility as the host user, never rewrite an existing directory.
+    channel = FLUSH_CHANNEL_DIR.lstat()
+    if not stat.S_ISDIR(channel.st_mode) or channel.st_uid not in (0, os.getuid()) or not os.access(
+            FLUSH_CHANNEL_DIR, os.R_OK | os.W_OK | os.X_OK):
+        raise RuntimeError('Prepared native flush channel is not accessible')
+    return prepared
+
+
 def ensure_backup_permissions():
-    """Repair two managed update artifacts, never sweep ownership of user data."""
+    """Repair named runtime artifacts, never sweep ownership of user data."""
     try:
         entry = PACK_DIR.lstat()
     except FileNotFoundError:
@@ -236,7 +326,8 @@ def ensure_backup_permissions():
             raise RuntimeError('Refusing to replace a foreign shutdown hook')
         previous = HIBERNATE_HOOK.read_bytes()
         if previous != PREVIOUS_HIBERNATE_SCRIPT.encode():
-            return {'packDirectory': 'writable', 'hibernateHook': 'existing'}
+            return {'packDirectory': 'writable', 'hibernateHook': 'existing',
+                    'nativeFlushChannel': ensure_native_flush_channel()}
         saved = SD / 'recovery-snapshots/backup-hooks' / (hashlib.sha256(previous).hexdigest() + '.py')
         saved.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not saved.exists():
@@ -261,7 +352,8 @@ def ensure_backup_permissions():
     finally:
         pathlib.Path(name).unlink(missing_ok=True)
         subprocess.run(['sudo', '-n', 'rm', '-f', str(stage)], capture_output=True, timeout=5)
-    return {'packDirectory': 'writable', 'hibernateHook': 'installed' if hook is None else 'updated'}
+    return {'packDirectory': 'writable', 'hibernateHook': 'installed' if hook is None else 'updated',
+            'nativeFlushChannel': ensure_native_flush_channel()}
 
 
 def ensure_named_tunnel():
@@ -559,6 +651,9 @@ def tick():
         state['upstreamSync'] = {'state': 'failed', 'errorType': type(error).__name__}
     try:
         state['backupRepair'] = ensure_backup_permissions()
+        if state['backupRepair'].get('nativeFlushChannel', {}).get('state') == 'created':
+            state['pendingOfficialStockReload' if mode == 'official' else 'pendingHostReload'] = True
+            atomic_bytes(state_path, (json.dumps(state, indent=2) + '\n').encode())
     except Exception as error:
         # Permissions must not prevent delivery/tunnel recovery when sudo is absent.
         state['backupRepair'] = {'state': 'failed', 'errorType': type(error).__name__}

@@ -12,7 +12,7 @@ Do not turn a server Temporal row into a working local bot merely by editing a p
 
 ## Preparing a reviewed engine pair
 
-From the complete installed fork's hook set, `prepare-local-engine.py` can construct an owned staging pair using verified public vendor baseline `861ef07` / `0.67.0-pre.9` and a host with an exact reviewed BOX compatibility recipe. Run it on the Computer after installing this fork, Node 22+, the required parser packages and native host dependencies:
+From the complete installed fork's hook set, `prepare-local-engine.py` can construct an owned staging pair using verified public vendor baseline `861ef07` / `0.67.0-pre.9` and a host with an exact reviewed BOX compatibility recipe. Run it on the Computer after installing this fork, Node 22.13+ (22.x) or 24+, the required parser packages and native host dependencies:
 
 ```bash
 python3 /home/box/sand-data/openbot/recovery/hooks/prepare-local-engine.py \

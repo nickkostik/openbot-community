@@ -1,13 +1,13 @@
 # OpenBot configuration reference
 
-Use with [SKILL.md](SKILL.md) and [the coordinated update guide](../../docs/updating.md). Source identity is `YOUR_ACCOUNT/YOUR_REPOSITORY`, selected by the reviewed exporter. These are generic product contracts, not a deployed fleet, incident record or delivery claim. Use your own account privately; never commit credentials, private SDK/session state, vendor bundles, generated engine artifacts or conversations.
+Use with [SKILL.md](SKILL.md) and [the coordinated update guide](../../docs/updating.md). Source identity is `nickkostik/openbot-community`, selected by the reviewed exporter. These are generic product contracts, not a deployed fleet, incident record or delivery claim. Use your own account privately; never commit credentials, private SDK/session state, vendor bundles, generated engine artifacts or conversations.
 
 ## Installation
 
 Run the reviewed fork on the authenticated Computer, with the native host already installed:
 
 ```bash
-gh repo clone YOUR_ACCOUNT/YOUR_REPOSITORY /tmp/openbot-source
+gh repo clone nickkostik/openbot-community /tmp/openbot-source
 OPENBOT_SRC=/tmp/openbot-source bash /tmp/openbot-source/install.sh --bot-mode
 ```
 
@@ -20,7 +20,7 @@ Installer source precedence is explicit `OPENBOT_REPOSITORY`/`OPENBOT_REF`, chec
 ```json
 {
   "schemaVersion": 1,
-  "repository": "YOUR_ACCOUNT/YOUR_REPOSITORY",
+  "repository": "nickkostik/openbot-community",
   "ref": "main",
   "commit": "<resolved source commit>",
   "sourceType": "local"
@@ -29,9 +29,15 @@ Installer source precedence is explicit `OPENBOT_REPOSITORY`/`OPENBOT_REF`, chec
 
 Metadata is bounded owned regular nonsymlink JSON, maximum 16 KiB, atomically published 0600 after activation. `sourceType` is `local`, `github` or `tarball`. Optional `tarball`/`archiveTarball` contain safe HTTP(S) URLs without credentials/query/fragment. Explicit source overrides are independently validated; corrupt saved settings are refused.
 
-Installation takes `openbot-install.lock`, stages source beside the destination, excludes runtime/private artifacts, validates Node syntax and required parser dependencies, and retains `openbot-previous`. Concurrent install exits 75. Node must actually be 22+; downloaded fallback is SHA256 checked and executed before cutover. Missing required `acorn`/`eslint-scope` refuses activation. Preserve existing mode/accounts/models, bot reasoning, histories/instructions/routines, tool/ACP/MCP settings and private session state. Source rollback, installer success and panel health are separate from a real native send/tool-return/reply. The default installer neither remints identities nor deletes data/replays routines; a native image operation, mode identity handoff and live cross-mode context merge need their own explicit process and verification.
+Installation takes `openbot-install.lock`, stages source beside the destination, excludes runtime/private artifacts, validates Node syntax and required parser dependencies, and retains `openbot-previous`. Concurrent install exits 75. The installer requires the supported version and executable capabilities described below; its checksum-verified fallback is staged and tested before cutover, preserving system Node and prior private runtime on invalid staging. Missing required `acorn`/`eslint-scope` refuses activation. Preserve existing mode/accounts/models, bot reasoning, histories/instructions/routines, tool/ACP/MCP settings and private session state. Source rollback, installer success and panel health are separate from a real native send/tool-return/reply. The default installer neither remints identities nor deletes data/replays routines; a native image operation, mode identity handoff and live cross-mode context merge need their own explicit process and verification.
 
-Detached files are `openbot-install-result.json`, `openbot-install.log`, `openbot-install.pid` and corresponding `openbot-uninstall-*` files. Result `status` is `running`, `success` or `failed`, with `startedAt`, terminal `finishedAt`, progress `{stage,summary,updatedAt}`, timings and optional source/commit/error/rollback/restart fields. Python-backed uninstall/status receipts survive removal of the cached Node runtime. Read the actual receipt after a client disconnect; do not restart a mutation blindly.
+### Supported Node runtime
+
+The source installer requires a stable Node 22.13+ release within 22.x, or Node 24+ (`^22.13.0 || >=24`), not a major-only 22+ test. Earlier 22.x and all 23.x releases are unsupported. A matching version must also execute `--experimental-strip-types` and expose built-in `fetch` and `WebSocket`; a version string alone is insufficient.
+
+Installation validates the system runtime first without replacing it. If unsuitable, it uses an already valid private cached runtime at `<data>/node22/bin/node`, or downloads/checksum-verifies and stages a supported runtime before source activation. Staged execution must pass the same version/capability checks before replacing the private cache; failed staging preserves the prior runtime and refuses activation. The cache directory name does not authorize an earlier 22.x runtime. Required parser/dependency checks and source rollback still apply. These checks validate installer prerequisites, not native engine/client delivery or a completed runtime upgrade; inspect the activated source and intended native operation separately.
+
+Detached files are `openbot-install-result.json`, `openbot-install.log`, `openbot-install.pid` and corresponding uninstall files. Result `status` is running/success/failed, with timestamps, progress/timings and optional source/commit/error/rollback/restart metadata. A successful installer controls fallback also retains `officialLogging: "unavailable-host-hook"`; status and Bot instructions must disclose optional Official logging unavailable rather than describe a fully verified install. Python-backed uninstall/status receipts survive removal of cached Node. Read the actual receipt after disconnect rather than repeating a mutation; capability disclosure and source success are not native chat validation.
 
 ### Quickstart exposure preflight
 
@@ -112,9 +118,39 @@ This is an existing `install` option, not a new save kind, source upgrade or mod
 
 Official controls-only recovery retains an existing owned unified listener or starts it when absent using the normal published-PID/listen checks. Unsupported or ambiguous optional logging-factory anchors do not prevent this branch from serving the panel. Native host bytes, saved logging settings, catalog, credentials and mode remain unchanged; there is no host wrap/reinstrumentation, native restart or inferred payload activation. A successful receipt has `wrapBytesChanged: false` and `hostBounce: "none"`. Existing Official finalization still stops a stale Custom guard with its self-PID protection and reconciles the saved exposure policy. This is not permission to adopt an unknown process, bypass a missing/foreign host, disable logging or erase settings.
 
-Normal source installs and UI saves retain the checked logging-wrap requirements when logging is enabled. Custom still needs its actual checked wrapper/provider path; `--keep-service` is not a universal escape from those checks. Preserving a listener also means it may still be running older service code, so use the normal deliberate update/reload path for source upgrades.
+Default CLI installs and UI saves retain checked logging-wrap requirements when logging is enabled. The source installer now explicitly supplies the separately guarded `--official-controls-fallback` exception below; it is not a universal bypass or a Custom repair. `--keep-service` continues to preserve a healthy listener and may therefore keep older service code loaded; deliberate source upgrades need the normal reload path or that narrow installer fallback, not service-only recovery.
 
 The existing `computer-recovery.py` service fallback passes `--keep-service` with the selected host/data paths and deferred-bounce setting, preserving the Official selection rather than repeatedly failing optional logging instrumentation. Read the owned service PID and `/api/state` separately from logging compatibility and an intended-client stock send/reply. An available panel, retained logging preference or successful service-only receipt does not establish a loaded native tap, fresh captured traffic, repaired roster/message delivery, full mode/context reconciliation or billing. Mode checks describe observed authority, not an atomic transaction against all external writers.
+
+### Installer fallback for unavailable Official logging
+
+The source installer invokes CLI `install --official-controls-fallback` when reconciling its staged release and `tunnel on --official-controls-fallback --json` during its existing explicitly authorized public setup. The latter prevents a second strict logging reconciliation from undoing the controls-only outcome. CLI install and mutating tunnel paths capture exact saved mode bytes once for both desired state and `expectedMode`; the flag enables internal `officialControlsFallback: true`. It adds no UI save kind/result shape, does not disable saved logging or switch mode, and grants no public-access permission by itself. A direct reviewed install diagnostic equivalent is:
+
+```bash
+node --experimental-strip-types /home/box/sand-data/openbot/src/cli.ts install \
+  --official-controls-fallback --json
+```
+
+For the separately authorized installer public setup, the corresponding existing tunnel action is `node --experimental-strip-types /home/box/sand-data/openbot/src/cli.ts tunnel on --official-controls-fallback --json`. Explicit `--official-controls-fallback` is recognized on mutating tunnel commands; default tunnel commands and UI saves still require their ordinary checked wrappers. Do not append it as a fallback after quickstart refuses saved exposure or treat it as authorization to change a private/public access choice. API/capability fields below are unchanged.
+
+The exception applies only when the desired and explicitly saved mode are Official, saved request logging is enabled, the host is unmarked and requires no source peel/rewrite, and census cannot find a unique usable stock logging hook (`private-lane`, `gap` or `ambiguous-factory`). It does not accept an existing marked composition or change an unknown/default mode into Official to qualify. When those conditions are absent, ordinary checked reconcile behavior remains, including Custom wrapping, supported Official tap installation or existing refusal. Default CLI invocation without this flag and UI saves remain strict.
+
+Unlike `--keep-service` recovery, this installer path reloads an existing owned control UI to load the staged release, or starts it if absent, using normal PID/listen checks. It rejects foreign listeners and rechecks the saved raw mode after asynchronous observation/startup before Official finalization. Native host bytes, mode, logging preferences, catalog, credentials and existing host backups stay untouched by this fallback; no wrapper is fabricated, host bounce scheduled or inference path replaced. Official's normal stale-Custom-guard cleanup/self-PID protection and requested exposure reconciliation remain distinct. Do not infer an atomic transaction against external writers or claim that another saved public access policy was implicitly authorized.
+
+Successful CLI JSON includes these capability fields (the full result also has its normal snapshot):
+
+```json
+{
+  "ok": true,
+  "wrapBytesChanged": false,
+  "hostBounce": "none",
+  "officialLogging": "unavailable-host-hook"
+}
+```
+
+`officialLogging` means controls were updated while optional stock request logging could not be installed on this host. The logging preference remains saved; this is not a claim that a tap is loaded or traffic captured. The detached install result preserves the same field. CLI text, `--bot-status` and `--bot-status --brief` must relay the capability warning; printed `OPENBOT_OFFICIAL_LOGGING=unavailable-host-hook` and `OPENBOT_CAPABILITY_WARNING` describe that limitation, and the Bot completion instruction carries it alongside success. A missing field or `not-reported` is not positive logging proof.
+
+Report source/controls success with optional logging unavailable, leaving stock delivery policy unchanged. It does not establish a completed native inference/tool turn, client delivery, billing, history/SDK/routine merge or mode handoff. Inspect a compatible loaded tap and actual intended-client stream/reply separately if those outcomes are required. Do not change providers, credentials or logging preferences simply to hide the disclosure.
 
 ### Explicit Official roster selection
 
@@ -435,6 +471,12 @@ Follower policy `openbot-upstream-sync.json`:
 
 Owned bounded nonsymlink policy; poll integer 60–86400, default 1800; only the stated strategy is accepted. Enabled tested pin/artifacts and complete helper/parser set are prerequisites. Vendor source is captured from verified bundle provenance with archive/source SHA checks; downloads/extraction/ownership/locks are bounded. Network assessment occurs separately; activation respects idle/memory/checkpoint authority.
 
+### Reviewed vendor download origin
+
+`local-upstream-sync.py.vendor_origin` derives the download base only from one of two reviewed trusted-stock-source layouts; there is no user-supplied origin field or JavaScript evaluation. The legacy layout uses unique literal `SAND_HOST_BUNDLE_S3_BUCKET`, `SAND_HOST_BUNDLE_S3_REGION` and `SAND_HOST_BUNDLE_S3_PREFIX` assignments. The shared public-daemon layout uses unique literal `PUBLIC_VM_DAEMON_BUCKET`, `PUBLIC_VM_DAEMON_BUCKET_REGION` and the same prefix, together with the exact HTTPS `PUBLIC_VM_DAEMON_BUCKET_ORIGIN` template, exact `SAND_HOST_BUNDLE_PUBLIC_ORIGIN = PUBLIC_VM_DAEMON_BUCKET_ORIGIN` alias and exact `SAND_HOST_BUNDLE_PUBLIC_BASE_URL` origin-plus-prefix template. Only whitespace around assignments may vary; literal bucket/region/prefix values remain restricted to letters, digits, underscore and hyphen.
+
+Duplicate assignments, dynamic expressions, mixed or partial chains, HTTP/lookalike origins and altered interpolation targets refuse capture. The parser does not execute source or accept arbitrary policy URLs to make discovery succeed. An unknown origin defers release work for review; preserve the current runtime/mode/settings rather than stamping an advertised version, switching mode, bypassing hashes or activating an unverified source. Supported discovery still requires the existing bounded download, archive/source digest, extraction/ownership, preparation and activation checks. A parsed origin or newly staged release is not loaded-engine, native delivery or full-parity proof. This compatibility addition introduces no save kind, configuration schema or automatic live activation.
+
 ### Same release local engine preparation in Official
 
 Official keeps native stock updates and stages a complete same-release local pair without selection/send. `openbot-upstream-local-ready.json` has schema 1, phase `local-release-ready`, complete proposed manifest, `savedAtMs,basePolicySha256`; `nativeDeliveryVerified:false,activationDeferred:true`. Follower state additionally reports generation/version/localEngineSaved/configurationUnchanged. Readiness or a partial instruction backport is not full same-release parity.
@@ -463,11 +505,53 @@ The panel starts the common recovery timer; network policy is inspected independ
 
 Official recovers panel/tunnel/backup and follows upstream without forcing BOX profiles/roster or pinning normal stock updates. Verified restoration touches only the known composition-marker targets and exact owned authenticated captured vendor source; invalid capture refuses instead of falling back to an older pin. Active composed-host restoration mode/CAS checks may synchronize native version. Ordinary newer marker-free host/version remain untouched. Changed verified restoration or neutral backup optimization may request one owned idle reload after fresh mode/ownership checks.
 
-Neutral canonical status remembers only validated reads/completed native writes, deduplicates cold reads, never seeds failures as success and preserves newer receipts. Successful empty reset reports durable false. SandBoxStore-only large serialized requests use native Connect gzip; stock clients remain unchanged. These repairs preserve payloads/auth/interceptors/etag/writer/conflict/durability and do not prove a fresh backup. Direct S3 manifest writes are a distinct path. Unknown contracts report compatibility-required, preserving native delivery.
+### Native canonical backup status
 
-Backup preparation is confined to `/tmp/sand-box-store-pack` and `/var/run/anyrun-hibernate-hook`, with symlink/foreign-owner refusal and no recursive data ownership sweep. A missing hook is installed as root-owned 0755 with an exclusive link. Only the byte-exact previous owned fallback may be upgraded: save its original bytes, require a root-owned regular target, recheck its SHA256 and atomically replace through noninteractive sudo. Other native or foreign hook contents are preserved. The credential-free fallback reads the gateway token only at execution, requests authenticated native `snapshotBoxStoreNow` with `includeIdleOnly: true` and a 180-second timeout, and exits successfully only for parsed literal `ok: true`. Preparation failures are recorded separately in `backupRepair`; successful hook status is `existing`, `installed` or `updated`. A repaired hook or cached receipt does not establish a fresh snapshot or image completion. This repair changes no inference mode and bypasses no writer fence, erase or durability check.
+The neutral [store-status-inject.py](../../recovery/hooks/store-status-inject.py) v2 patch remembers only numeric metadata from validated canonical reads or completed native writes, deduplicates cold reads and preserves newer acknowledged receipts. Failed reads clear their in-flight promise for retry; failed reads/writes and live unacknowledged edits never seed success. A successful empty reset reports `durable: false`. Cached durable status is not a fresh read or completed full flush.
+
+The summary walks the existing native Map directly or lazily iterates only own object entries/keys, without full `Object.entries`, replacement Map, value-array or Map-to-object copies in that bookkeeping path. Native parsing/storage and existing classifiers remain; this reduces status-poll allocation overhead, not all native RAM, manifest parsing cost or inference latency. Do not describe it as a complete memory fix or a measured memory ceiling.
+
+Only local catch-binding identifier renumbering is tolerated at the exact acknowledged-write anchor. Every read/write/hydration/acknowledgement fragment must remain complete and unique. A complete known `/* openbot-canonical-store-status-v1 */` composition upgrades to `/* openbot-canonical-store-status-v2 */`; complete v2 is a checked fixed point. Unknown, partial, duplicate or mixed compositions refuse rather than advertising repair. Unfamiliar contracts report compatibility-required and preserve native delivery.
+
+SandBoxStore-only large serialized requests still use the separate native Connect gzip helper; stock clients stay unchanged. Payloads, authentication/interceptors, writer fencing, etag/CAS, conflicts, full-flush/durability and update acceptance gates are unchanged. Direct S3 uploads/manifest writes are outside status/RPC gzip; their source-level byte-body copying/socket buffering is now addressed by the [separate byte-upload helper](#neutral-native-direct-store-byte-uploads), without proving complete transport or a fresh accepted flush. These patches change no mode/settings, add no save kind or persistent status schema, and prove neither fresh backup completion nor inference/chat delivery.
+
+Backup preparation handles only `/tmp/sand-box-store-pack`, `/var/run/anyrun-hibernate-hook` and the fixed `/run/sand-box-store-flush` channel, with symlink/foreign-owner refusal and no recursive data ownership sweep. The flush directory has the separate preserve-existing and checked-creation contract below. A missing shutdown hook is installed as root-owned 0755 with an exclusive link. Only the byte-exact previous owned fallback may be upgraded: save its original bytes, require a root-owned regular target, recheck its SHA256 and atomically replace through noninteractive sudo. Other native or foreign root-owned hook contents are preserved. The credential-free fallback reads the gateway token only at execution, requests authenticated native `snapshotBoxStoreNow` with `includeIdleOnly: true` and a 180-second timeout, and exits successfully only for parsed literal `ok: true`. Preparation failures are recorded separately in `backupRepair`; successful hook status is `existing`, `installed` or `updated`. A repaired hook/channel or cached receipt does not establish a fresh snapshot or image completion. This repair changes no inference mode and bypasses no writer fence, erase or durability check.
 
 Custom repair validates the complete owned transformation pipeline, keeps backups, compares actual expected bytes and reloads only through owned idle/checkpoint authority. Do not force profiles, migrate identities, enable routines or remint bots without specific authorization. Retain all current data and rollback authority.
+
+### Neutral native direct-store byte uploads
+
+[store-byte-upload-inject.py](../../recovery/hooks/store-byte-upload-inject.py) adds the checked `/* openbot-store-byte-upload-v1 */` helper only to `SandBoxStoreServiceObjectStore.putContentAddressed` and `putMutable` byte-PUT bodies. Ordinary `Uint8Array` and Buffer inputs become immutable Blobs assembled from 65536-byte (64 KiB) views of exactly the supplied byte range. A single large Blob still produced an oversized client socket queue in the tested runtime; explicit bounded parts matter. Uncommon non-byte inputs and SharedArrayBuffer-backed views retain the previous `Buffer.from` coercion. File uploads, multipart uploads and store RPCs stay on their distinct native paths.
+
+Native fetch continues to provide body length and replay behavior. The checked change preserves bytes, native hashing/size logic, presigned headers, redirects, abort signals, conditional retries, ETag/CAS, writer fencing and conflict handling. It adds no manual content header, relaxed commit/flush acceptance or alternate credentials. The two class/method regions and original bodies must be unique and ordered; missing/changed/ambiguous anchors, partial markers or duplicate helpers refuse. A complete known composition is a checked fixed point.
+
+Custom includes the byte-upload helper after canonical status v2 and native RPC gzip, followed by [browser-session coalescing](#coalesced-native-browser-session-backups), in its checked repair pipeline. Official composes those same four neutral transformations before full-bundle syntax validation, backup, mode/expected-byte-checked replacement and the existing owned idle reload. Unknown contracts leave the new composition unapplied rather than publishing a partial repair. Existing `storeStatusRepair` applied/current/compatibility-required reports cover this composition; no new mode, settings, identity, history, save kind or persistent status schema is introduced.
+
+A 32 MiB synthetic stalled TLS fixture on actual Node 22.14 observed maximum client socket queue fall from 32 MiB to 64 KiB and temporary ArrayBuffer usage from approximately 128 MiB to 69 MiB. Byte/header/length equality, replay and abort behavior also have executable fixture checks. These are bounded fixture observations, not a universal memory ceiling, network-speed promise, installation proof or completed live backup. The immutable upload copy and caller's manifest remain allocated. Direct S3 byte-body buffering is addressed in source; full native flush/transport completion, writer acceptance, durable state and image-update success still require fresh native evidence. Historical failures outside RPC gzip are not thereby proven resolved, and inference/chat delivery remains separate.
+
+### Coalesced native browser-session backups
+
+[store-chrome-snapshot-inject.py](../../recovery/hooks/store-chrome-snapshot-inject.py) changes only the reviewed `ChromeSessionWatcher` session-change callback inside `DefaultBoxStoreSyncService`, plus a `/* openbot-store-chrome-snapshot-v1 */` helper. A WeakMap keyed by the actual native sync owner keeps one active drain task and one dirty flag. Further browser events while capture is active mark the latest state dirty instead of enqueueing one independent manifest rewrite per event. A trailing capture scans the latest state; changes arriving during that capture may require another pass, so continuous activity is not reduced to exactly two lifetime captures. Separate sync owners do not coalesce or block each other.
+
+Each capture still calls native `snapshotNow({ chromeSessionOnly: true, waitForInFlight: true })`. Between captures the helper yields through `setImmediate`, allowing an already waiting manual full flush to acquire the native cycle under its existing concurrency rules. The manual/full snapshot path, database capture, writer fencing, ETag/CAS, conflict handling and durability/update gates remain native. No full snapshot is replaced by browser-only work, and no fairness deadline or completed flush is fabricated.
+
+Absent/stopped sync owners start no work; an owner becoming stopped prevents trailing replay after its active capture settles. Rejections retain the native `chrome-session snapshot rejected` log and do not create an error-only retry spin; later changes can request capture again. The native service class, callback location, helper/marker counts and complete fixed-point composition must match exactly. Unknown, partial, duplicated or out-of-class callback contracts refuse before publishing a new patch. The callback matcher accepts exactly the reviewed current `error64` form or its consistent lexical `error42` variant used by retained engines; all binding uses must match within the original callback. This is not generalized identifier matching: unreviewed names, mismatched references or mixed callback forms refuse. Both accepted originals produce identical coalescer bytes and remain subject to complete fixed-point checks. Compatibility/source dry runs are not activation, mode-switch, fresh-backup or native-delivery proof; inspect the actually loaded runtime and intended operation separately.
+
+Custom includes this helper after status v2, store RPC gzip and direct-store byte uploads. Official stages those same four neutral transformations together before complete syntax validation, backup, mode/expected-byte checks and the existing owned idle reload. Existing `storeStatusRepair` results describe the combined repair; no new mode, settings, identity, history, save kind or persistent queue schema is added.
+
+Executable synthetic checks cover event storms, latest trailing state, changes during a trailing capture, waiting manual-flush ordering, independent owners, stopped owners and error logging. They do not prove deployment, diagnose a live flush queue as the root cause, establish a backup deadline or verify full backup/durable completion. Successful background cycles can coexist with a timed-out full-flush caller; inspect the native operation and fresh full-flush acceptance separately rather than treating either observation as conclusive.
+
+### Native FIFO flush channel
+
+The bounded backup preparation also handles the native fixed `/run/sand-box-store-flush` directory, addressing startup `EACCES` when the native nonroot host cannot create it. It does not install a replacement runner or overwrite an existing root shutdown hook. The selected native host must first be a regular file owned by the helper UID. An existing real root- or host-owned directory must be readable, writable and searchable by that host UID; retain its owner, mode and contents without rereading the full bundle. Symlink, non-directory, foreign-owned or inaccessible existing paths refuse instead of being chowned or replaced.
+
+Only creation of a missing directory reads the selected host source and requires all four native contract anchors exactly once: the fixed FIFO-directory constant, `BoxStoreHibernateHookService` class, native `deps.fifoDir` fallback and provisioned-plus-hook-exists branch. Missing/unknown/ambiguous contracts return `unsupported-host` without invoking sudo or provisioning. This is a source-checked native pre-provision contract, not authority to create arbitrary runtime directories.
+
+Creation uses bounded `sudo -n /usr/bin/python3` with the fixed `/run` parent and leaf name. It opens parent and child through no-follow directory file descriptors, requires the parent to be root-owned without group/other write permission, and sets only the newly created child to the runtime UID/GID and 0700. Existing root/host-owned directories, including one appearing during the creation race, retain their metadata and contents and must pass a host-user accessibility recheck. Failure cleanup is limited to its own still-matching empty newly created directory; it never sweeps data ownership or removes an existing channel.
+
+`computer-recovery-state.json.backupRepair.nativeFlushChannel` reports `{"state":"created"}`, `{"state":"existing"}` or `{"state":"unsupported-host"}`. A refusal/permission/sudo error is caught as failed backup preparation; inspect it separately from panel/tunnel/native delivery. `created` persists the existing mode-specific pending reload (`pendingOfficialStockReload` in Official, `pendingHostReload` in Custom) so the native service can initialize its FIFO channel at the next owned idle restart. Busy/unknown state remains pending; unchanged `existing` does not request a new restart. The normal mode/process ownership checks still govern restart.
+
+Provisioning changes no inference mode, provider, settings, identity or history. A directory, armed reload or initialized hook is not a completed backup, fresh accepted manifest, full-flush/durability proof or image-update success. Native writer fencing, etag/CAS, conflicts, erase protections and backup/update acceptance remain authoritative; verify those outcomes separately.
 
 ### Optional persistent Tailscale recovery
 

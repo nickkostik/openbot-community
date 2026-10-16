@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -230,11 +230,44 @@ test('two installers cannot interleave a release switch and activation', async t
   assert.equal(JSON.parse(readFileSync(path.join(f.dest, 'payload/version.json'), 'utf8')).commit, newCommit);
 });
 
-test('Node bootstrap verifies its archive before replacing an old cached runtime', async t => {
+test('runtime selection rejects early Node 22, Node 23, prereleases and missing capabilities', t => {
+  if (skipOnWindows(t)) return;
+  const f = fixture(t), candidate = path.join(f.data, 'candidate-node');
+  writeFileSync(candidate, `#!${process.execPath}
+const expression=process.argv[3];
+if(process.argv[2]==='-p') {
+ Object.defineProperty(process.versions,'node',{value:process.env.RUNTIME_TEST_VERSION});
+ console.log(eval(expression));
+} else if(process.argv[2]==='--experimental-strip-types') {
+ if(process.env.RUNTIME_TEST_CAPABILITY==='missing-flag') process.exit(9);
+ if(process.env.RUNTIME_TEST_CAPABILITY==='missing-websocket') globalThis.WebSocket=undefined;
+ eval(process.argv[4]);
+} else process.exit(10);
+`); chmodSync(candidate, 0o755);
+  const source = readFileSync(installer, 'utf8');
+  const helper = source.slice(source.indexOf('node_runtime_supported() {'), source.indexOf('\nensure_node() {'));
+  assert.ok(helper.length > 0);
+  for (const [version, expected] of [
+    ['20.19.0', false], ['22.0.0', false], ['22.6.0', false], ['22.12.0', false],
+    ['22.13.0', true], ['22.14.0', true], ['22.23.3', true], ['23.11.0', false],
+    ['24.0.0', true], ['24.21.0', true], ['25.0.0', true], ['24.0.0-rc.1', false], ['invalid', false],
+  ] as const) {
+    const result = spawnSync('bash', ['-c', helper + '\nnode_runtime_supported "$1"', 'runtime-test', candidate],
+      { env: { ...process.env, RUNTIME_TEST_VERSION: version }, encoding: 'utf8' });
+    assert.equal(result.status === 0, expected, version + ': ' + result.stderr);
+  }
+  for (const capability of ['missing-flag', 'missing-websocket']) {
+    const result = spawnSync('bash', ['-c', helper + '\nnode_runtime_supported "$1"', 'runtime-test', candidate],
+      { env: { ...process.env, RUNTIME_TEST_VERSION: '22.13.0', RUNTIME_TEST_CAPABILITY: capability }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0, capability);
+  }
+});
+
+test('Node bootstrap verifies its archive before replacing an unsupported early Node 22 cache', async t => {
   if (skipOnWindows(t)) return;
   const f = fixture(t), bin = path.join(f.data, 'bin'); mkdirSync(bin);
   const realNode = process.execPath;
-  const oldNode = `#!/usr/bin/env sh\nif [ "$1" = "-p" ]; then case "$2" in *">= 22"*) echo false ;; *) echo 20 ;; esac; else exec '${realNode}' "$@"; fi\n`;
+  const oldNode = `#!/usr/bin/env sh\nif [ "$1" = "-p" ]; then case "$2" in *">= 22"*) echo true ;; *) echo 22 ;; esac; else exec '${realNode}' "$@"; fi\n`;
   for (const file of [path.join(bin, 'node'), path.join(f.data, 'node22/bin/node')]) {
     mkdirSync(path.dirname(file), { recursive: true });writeFileSync(file, oldNode);chmodSync(file, 0o755);
   }

@@ -25,7 +25,7 @@ When you are outside the host's bot turn, run the checked-out install.sh with OP
 
 When you are running inside the host's bot turn, run the same ordinary installer with OPENBOT_DEFER_HOST_BOUNCE=1 as well. After successful installation, invoke that checked-out install.sh --bot-finalize once to start the owned idle finalizer. Do not wait for your own turn to end while keeping it open. Report the pending restart and continue verification on a fresh turn. Do not use --bot-mode here: it creates a public Cloudflare URL even if OPENBOT_TUNNEL=off is set.
 
-Use the same OPENBOT_SAND_DATA and OPENBOT_HOST_MAIN overrides for installation, finalization, and status. Use Node 22+ on PATH for status/finalization, including the installer's cached runtime if needed. Preserve the install source. Do not set a fake version or force a restart.
+Use the same OPENBOT_SAND_DATA and OPENBOT_HOST_MAIN overrides for installation, finalization, and status. Use Node 22.13+ (22.x) or 24+ on PATH for status/finalization, including the installer's cached runtime if needed. Preserve the install source. Do not set a fake version or force a restart.
 
 Give me http://127.0.0.1:9280 to open in the Computer's browser. If I need access from another device, explain the available authenticated SSH forwarding option; do not expose port 9280 to the internet.
 

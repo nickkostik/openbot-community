@@ -6,6 +6,7 @@ commands. The native client and billing are separate verification boundaries.
 """
 import argparse
 import base64
+import contextlib
 import importlib.util
 import json
 import os
@@ -580,6 +581,87 @@ class Reminter:
                 return {'state': 'already-finalized', 'agentCount': len(journal['entries'])}
             mapping = {e['oldId']: e['newId'] for e in journal['entries']}
             return self._finalize_preferences(journal, mapping)
+
+    def reselect_active(self):
+        """Reuse verified copies after Official without copying another identity.
+
+        A visible source with new history or changed instructions needs an
+        explicit merge. Never conceal that branch merely to finish a switch.
+        """
+        self.require_local_mode()
+        with self.m.migration_lock():
+            journal = self.read()
+            if not journal['entries'] or any(e['phase'] != 'active' for e in journal['entries']):
+                raise RuntimeError('Every copy must already be active before reselection')
+            mapping = {e['oldId']: e['newId'] for e in journal['entries']}
+            settings = self.m.rpc('GetGrokBotUserRuntimeSettings', {}).get('settings', {})
+            visible = any(not owned_json(SD/'agents'/e['oldId']/'settings.json').get('hiddenFromSidebar', False)
+                          or owned_json(SD/'agents'/e['newId']/'settings.json').get('hiddenFromSidebar', False)
+                          for e in journal['entries'])
+            preferences_changed = remap_preferences(settings, mapping) != remap_preferences(settings, {}) or settings.get('mainAgentId') in mapping
+            if not visible and not preferences_changed and journal.get('preferencesFinalized') is True:
+                return {'state': 'already-selected', 'agentCount': len(mapping)}
+            results = self.verify()
+            if len(results) != len(mapping) or any(r['status'] != 'verified-box' for r in results):
+                raise RuntimeError('Every existing BOX copy must be verified before reselection')
+            rows = self.rows()
+            indexed = {row['agentId']: row for row in rows}
+            if len(indexed) != len(rows):
+                raise RuntimeError('Ambiguous reselection roster')
+            backup = SD/'recovery-snapshots'/('box-reselection-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
+            backup.mkdir(parents=True, mode=0o700)
+            self.m.write(backup/'platform-settings.json', settings)
+            lineage = identity_mapping(journal)
+            def entries(aid):
+                with contextlib.closing(sqlite3.connect('file:' + str(SD/'agents'/aid/'store.db') + '?mode=ro', uri=True)) as conn:
+                    return [json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
+            def normalized(value):
+                return json.dumps(self.m.remap_json(value, lineage), sort_keys=True, separators=(',', ':'))
+            for entry in journal['entries']:
+                old, new = entry['oldId'], entry['newId']
+                source = indexed.get(old)
+                if (not source or source.get('viewerIsOwner') is not True or source.get('legacyAgentId') != old
+                        or str(source.get('id')) != entry['sourceServerId']):
+                    raise RuntimeError('Source ownership or binding changed before reselection')
+                if source.get('kind') != entry['kind']:
+                    raise RuntimeError('Source kind changed before reselection')
+                if self.publisher.require_box_row(indexed.get(new), new) != entry['serverId']:
+                    raise RuntimeError('BOX journal binding changed before reselection')
+                source_profile = owned_json(SD/'agents'/old/'profile.json')
+                target_profile = owned_json(SD/'agents'/new/'profile.json')
+                if str(source_profile.get('serverId')) != entry['sourceServerId']:
+                    raise RuntimeError('Local source binding changed before reselection')
+                role = lambda p: {k:v for k,v in p.items() if k not in ('serverId','harness')}
+                if normalized(role(source_profile)) != normalized(role(target_profile)):
+                    raise RuntimeError('Source/copy instructions differ; explicit reconciliation is required')
+                cloud = self.m.fetch_transcript(old, backup)
+                source_entries = entries(old) + [json.loads(base64.b64decode(r['body'], validate=True)) for r in cloud]
+                target_entries = {normalized(value) for value in entries(new)}
+                if any(normalized(value) not in target_entries for value in source_entries):
+                    raise RuntimeError('Source has uncopied history; explicit reconciliation is required')
+            # All pairs pass before the first visibility or scheduler mutation.
+            for entry in journal['entries']:
+                self.require_local_mode()
+                old, new = entry['oldId'], entry['newId']
+                self.pause_cloud_routines(old, backup)
+                for path in (SD/'agents'/old/'automations').rglob('automation.json'):
+                    raw = self.m.checked_bytes(path); definition = json.loads(raw)
+                    if definition.get('enabled') is True:
+                        self.m.atomic_bytes(backup/'retired-automations'/old/path.parent.name/'automation.json', raw)
+                        self.m.atomic_bytes(path, self.m.json_bytes({**definition, 'enabled': False}), expected=raw,
+                                            pre_commit=self.require_local_mode)
+                self.require_local_mode()
+                self.m.rpc('SetGrokBotAgentClientState', {'agentId':new, 'hiddenFromSidebar':False})
+                self.require_local_mode()
+                self.m.gateway('setAgentHiddenFromSidebar', {'id':new, 'isHidden':False})
+                self.require_local_mode()
+                self.m.rpc('SetGrokBotAgentClientState', {'agentId':old, 'hiddenFromSidebar':True})
+                self.require_local_mode()
+                self.m.gateway('setAgentHiddenFromSidebar', {'id':old, 'isHidden':True})
+            self.require_local_mode()
+            self._finalize_preferences(journal, mapping)
+            return {'state':'reselected', 'agentCount':len(mapping), 'backup':str(backup),
+                    'liveHistoryMerged':False, 'sdkContextsMerged':False, 'pruneAllowed':False}
 
     def checked_routine_states(self, aid, states):
         """Accept only captured switches for owned, unchanged routine paths."""

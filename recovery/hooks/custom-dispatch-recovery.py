@@ -102,7 +102,8 @@ class Recovery:
         self.r.m.JOURNAL = root / 'openbot-local-migration.json'
         self.sleep, self.clock, self.last_request = sleep, clock, -10.0
         self.progress = {'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
-                         'rateLimitRetries': 0, 'nativeAppDeliveryVerified': False, 'billingVerified': False}
+                         'rateLimitRetries': 0, 'nativeAppDeliveryVerified': False, 'billingVerified': False,
+                         'liveHistoryMerged': False, 'sdkContextsMerged': False}
 
     def require(self):
         if not allowed(self.root):
@@ -185,10 +186,19 @@ class Recovery:
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
         if journal is None or all(e['phase'] == 'active' for e in journal['entries']):
             rows = self.r.rows()
-            sources = self.module.source_candidates(rows, self.r.profiles())
+            expected = load('server-roster-check').authority(journal) if journal else {}
+            report = load('server-roster-check').compare(expected, rows)
+            profiles = self.r.profiles()
+            if expected and report['state'] == 'bound-box':
+                # Official can reveal the recorded sources while leaving their
+                # real BOX counterparts intact. Do not mint another generation
+                # from those already-paired originals (or require fake labels).
+                paired = {e['oldId'] for e in journal['entries']}
+                profiles = {aid:p for aid,p in profiles.items() if aid not in paired}
+            sources = self.module.source_candidates(rows, profiles)
+            if expected and report['state'] == 'bound-box':
+                self.r.reselect_active()
             if not sources:
-                expected = load('server-roster-check').authority(journal) if journal else {}
-                report = load('server-roster-check').compare(expected, rows)
                 if not expected or report['state'] != 'bound-box':
                     raise RuntimeError('No verified active BOX authority; handoff requires recovery')
                 self.r.restore_routines()

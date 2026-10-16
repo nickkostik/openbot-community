@@ -94,6 +94,18 @@ This loop recovers a daemon inside a running Computer. A pod/image replacement k
 
 ## Verification required for each installation
 
+Official recovery retains its last confirmed stock conversation selection while
+that counterpart remains eligible. A later migration of the preserved BOX copy
+does not itself request a different Official identity. The owned
+`openbot-official-dispatch-state.json` receipt must report
+`phase: "stock-roster-selected"` and `mode: "official"`; both legacy sparse
+`new -> old` mappings and current complete mappings are supported. Every selected
+counterpart is still checked against the journal, platform ownership, kind,
+harness and native server binding. Missing or stale receipts retain the normal
+first-handoff policy; malformed confirmed mappings refuse before settings writes.
+An ineligible remembered counterpart uses the existing verified stock fallback.
+Selection stability is not a transcript/SDK merge or permission to prune copies.
+
 Transcript identity normalization changes only the record's top-level owner
 `agentId`. Quoted IDs in messages, rich text and historical tool payloads remain
 part of the original evidence. Different message bodies remain distinct branches;

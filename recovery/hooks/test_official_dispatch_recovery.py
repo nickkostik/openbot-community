@@ -86,6 +86,84 @@ class OfficialTests(fleet.RemintTests):
         recovery.run()
         self.assertEqual(self.server_settings['sidebarSections']['sections'][0]['agentIds'], [fleet.NEW, fleet.OTHER])
 
+    def test_confirmed_stock_selection_survives_later_migration_of_the_copy(self):
+        recovery = self.selected_official()
+        first = recovery.run()
+        self.assertEqual(first['identityMapping'], {fleet.OLD:fleet.OLD, fleet.NEW:fleet.OLD})
+        self.roster[1]['harness'] = 'temporal'
+        protected = {p:p.read_bytes() for p in self.root.rglob('*')
+                     if p.is_file() and p.name in ('store.db','automation.json','openbot-bot-models.json')}
+        self.calls.clear(); self.gateway_calls.clear()
+        planned = recovery.plan()
+        self.assertEqual(planned['identityMapping'], first['identityMapping'])
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})])
+        self.assertEqual(self.gateway_calls, [])
+        result = recovery.run()
+        self.assertEqual(result['identityMapping'], first['identityMapping'])
+        self.assertEqual(self.server_settings['mainAgentId'], fleet.OLD)
+        self.assertEqual(self.server_settings['pinnedAgents']['agentIds'], [fleet.OLD])
+        self.assertEqual(self.server_settings['sidebarSections']['sections'][0]['agentIds'], [fleet.OLD, fleet.OTHER])
+        self.assertFalse(json.loads((self.source/'settings.json').read_text())['hiddenFromSidebar'])
+        self.assertTrue(json.loads((self.root/'agents'/fleet.NEW/'settings.json').read_text())['hiddenFromSidebar'])
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+        self.assertFalse(result['liveHistoryMerged']); self.assertFalse(result['pruneAllowed'])
+
+    def test_legacy_sparse_confirmed_selection_remains_read_only_during_plan(self):
+        recovery = self.selected_official(); recovery.run()
+        state = self.root/'openbot-official-dispatch-state.json'
+        value = json.loads(state.read_text())
+        self.write(state, {**value, 'identityMapping':{fleet.NEW:fleet.OLD}})
+        self.roster[1]['harness'] = 'temporal'
+        before = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.calls.clear(); self.gateway_calls.clear()
+        self.assertEqual(recovery.plan()['identityMapping'], {fleet.OLD:fleet.OLD, fleet.NEW:fleet.OLD})
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})]); self.assertEqual(self.gateway_calls, [])
+        self.assertEqual({p:p.read_bytes() for p in before}, before)
+
+    def test_unavailable_confirmed_stock_counterpart_uses_an_eligible_owned_peer(self):
+        recovery = self.selected_official(); recovery.run()
+        self.roster[0]['harness'] = 'box'; self.roster[1]['harness'] = 'temporal'
+        self.assertEqual(recovery.plan()['identityMapping'], {fleet.OLD:fleet.NEW, fleet.NEW:fleet.NEW})
+
+    def test_confirmed_counterpart_still_requires_journal_binding_and_ownership(self):
+        recovery = self.selected_official(); recovery.run()
+        self.roster[1]['harness'] = 'temporal'
+        for change in ({'viewerIsOwner':False}, {'id':'999'}, {'legacyAgentId':fleet.OTHER}):
+            before = dict(self.roster[0]); self.roster[0].update(change); self.calls.clear()
+            with self.subTest(change=change), self.assertRaises(RuntimeError): recovery.run()
+            self.assertEqual(self.calls, [('ListGrokBotAgents', {})])
+            self.roster[0] = before
+
+    def test_another_generation_or_incomplete_receipt_does_not_pin_a_counterpart(self):
+        recovery = self.migrated_copy()
+        for state in [
+            {'phase':'stock-roster-selected','mode':'official','identityMapping':{fleet.OTHER:fleet.OLD}},
+            {'phase':'stock-roster-prepared','mode':'official','identityMapping':{fleet.NEW:fleet.OLD}},
+            {'phase':'stock-roster-selected','mode':'custom','identityMapping':{fleet.NEW:fleet.OLD}},
+        ]:
+            self.write(self.root/'openbot-official-dispatch-state.json', state)
+            with self.subTest(state=state):
+                self.assertEqual(recovery.plan()['identityMapping'], {fleet.OLD:fleet.NEW, fleet.NEW:fleet.NEW})
+
+    def test_malformed_confirmed_mapping_refuses_before_settings_writes(self):
+        recovery = self.migrated_copy()
+        for mapping in [[], {fleet.NEW:'not-an-identity'}, {fleet.NEW:fleet.OLD, fleet.OLD:fleet.NEW}]:
+            self.write(self.root/'openbot-official-dispatch-state.json',
+                       {'phase':'stock-roster-selected','mode':'official','identityMapping':mapping})
+            self.calls.clear(); self.gateway_calls.clear()
+            with self.subTest(mapping=mapping), self.assertRaises((RuntimeError, ValueError)): recovery.run()
+            self.assertEqual(self.calls, [('ListGrokBotAgents', {})]); self.assertEqual(self.gateway_calls, [])
+
+    def test_symlinked_confirmed_selection_is_not_trusted(self):
+        recovery = self.migrated_copy()
+        target = self.root/'other-receipt.json'
+        self.write(target, {'phase':'stock-roster-selected','mode':'official',
+                            'identityMapping':{fleet.NEW:fleet.OLD}})
+        (self.root/'openbot-official-dispatch-state.json').symlink_to(target)
+        self.calls.clear(); self.gateway_calls.clear()
+        with self.assertRaises(RuntimeError): recovery.run()
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})]); self.assertEqual(self.gateway_calls, [])
+
     def test_plan_reads_authority_without_mutating_either_service_or_local_files(self):
         recovery = self.migrated_copy()
         files = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}

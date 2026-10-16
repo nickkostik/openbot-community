@@ -39,10 +39,26 @@ class Recovery:
         self.require()
         return self.r.m.gateway(method, body)
 
+    def confirmed_mapping(self):
+        path = self.root / 'openbot-official-dispatch-state.json'
+        if not path.exists() and not path.is_symlink():
+            return {}
+        state = self.module.owned_json(path)
+        if state.get('phase') != 'stock-roster-selected' or state.get('mode') != 'official':
+            return {}
+        mapping = state.get('identityMapping')
+        if not isinstance(mapping, dict):
+            raise RuntimeError('Confirmed stock selection mapping is invalid')
+        for source, target in mapping.items():
+            self.module.canonical(source)
+            self.module.canonical(target)
+        return mapping
+
     def targets(self, journal, rows):
         by_id = {row['agentId']: row for row in rows}
         if len(by_id) != len(rows):
             raise RuntimeError('Platform roster contains duplicate identities')
+        confirmed = self.confirmed_mapping()
         mapping, selected = {}, []
         for entry in journal['entries']:
             if entry['phase'] != 'active':
@@ -52,6 +68,18 @@ class Recovery:
             # A migrated plain agent is not a replacement for a typed room.
             target = current if current and current.get('harness') == 'temporal' and \
                 current.get('kind') == entry['kind'] else previous
+            # Upstream can migrate a preserved BOX copy after Official already
+            # selected its stock peer. That is not a request to change the
+            # conversation identity. Revalidate the confirmed selection below.
+            # Older receipts contain only new -> old, without old -> old.
+            remembered = confirmed.get(new)
+            if remembered in (old, new):
+                if old in confirmed and confirmed[old] != remembered:
+                    raise RuntimeError('Confirmed stock selection mapping is inconsistent')
+                candidate = by_id.get(remembered)
+                if candidate and candidate.get('harness') == 'temporal' and \
+                        candidate.get('kind') == entry['kind']:
+                    target = candidate
             if not target or target.get('harness') != 'temporal' or target.get('viewerIsOwner') is not True:
                 raise RuntimeError('No verified owned stock counterpart exists')
             if target.get('kind') != entry['kind']:

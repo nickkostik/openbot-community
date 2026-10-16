@@ -138,6 +138,12 @@ class Reminter:
     def __init__(self):
         self.m = helper('migrate-local-bots')
         self.publisher = helper('publish-local-fleet')
+        self.merger = helper('fleet-state-merge')
+
+    def transcript_key(self, value, mapping):
+        """Compare evidence with owner-only normalization, never quoted IDs."""
+        return json.dumps(self.merger.remap_transcript_owner(value, mapping),
+                          sort_keys=True, separators=(',', ':'))
 
     def require_local_mode(self):
         flag=SD/'openbot-local-only.enable'
@@ -636,8 +642,8 @@ class Reminter:
                     raise RuntimeError('Source/copy instructions differ; explicit reconciliation is required')
                 cloud = self.m.fetch_transcript(old, backup)
                 source_entries = entries(old) + [json.loads(base64.b64decode(r['body'], validate=True)) for r in cloud]
-                target_entries = {normalized(value) for value in entries(new)}
-                if any(normalized(value) not in target_entries for value in source_entries):
+                target_entries = {self.transcript_key(value, lineage) for value in entries(new)}
+                if any(self.transcript_key(value, lineage) not in target_entries for value in source_entries):
                     raise RuntimeError('Source has uncopied history; explicit reconciliation is required')
             # All pairs pass before the first visibility or scheduler mutation.
             for entry in journal['entries']:
@@ -808,8 +814,8 @@ class Reminter:
                 raise RuntimeError('Peer copy has not completed visibility cutover')
             if old in (existing_copies or {}):
                 # Separate Q/Dating recovery has no entry in this batch journal.
-                # Explicit mapping requires matching role, retained source IDs,
-                # and the destination's actual published order after cloud merge.
+                # Explicit mapping requires matching role, retained source
+                # payloads, and the destination's actual published payload/order.
                 before = owned_json(source/'profile.json')
                 if before.get('description','') != profile.get('description',''):
                     raise RuntimeError('Existing peer copy has a different role')
@@ -817,32 +823,48 @@ class Reminter:
                 for directory in (source,destination):
                     conn=sqlite3.connect('file:'+str(directory/'store.db')+'?mode=ro',uri=True)
                     try:
-                        histories.append([r[0] for r in conn.execute('SELECT id FROM transcript_entries ORDER BY seq')])
+                        histories.append([json.loads(r[0]) for r in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')])
                     finally:
                         conn.close()
-                source_ids,target_ids=histories
+                source_entries,target_entries=histories
+                source_ids,target_ids=([item['id'] for item in entries] for entries in histories)
                 kept=set(source_ids)
                 if not kept.issubset(set(target_ids)):
                     raise RuntimeError('Existing peer copy did not retain source history IDs')
-                published={};before_seq=None
+                lineage={**identity_mapping(journal),**mapping}
+                target_payloads={self.transcript_key(item,lineage) for item in target_entries}
+                if any(self.transcript_key(item,lineage) not in target_payloads for item in source_entries):
+                    raise RuntimeError('Existing peer copy did not retain source history payload')
+                published={};before_seq=None;generation=None
                 while True:
                     request={'agentId':new,'limit':200}
                     if before_seq is not None:request['beforeSeq']=str(before_seq)
+                    if generation is not None:request['generation']=generation
                     page=self.m.rpc('ListGrokBotTranscriptEntries',request)
+                    if generation is not None and page.get('generation',generation)!=generation:
+                        raise RuntimeError('Existing peer transcript generation changed')
+                    generation=page.get('generation',generation)
                     entries=page.get('entries',[])
                     if not entries:break
                     for entry in entries:
-                        published[int(entry['seq'])]=json.loads(base64.b64decode(entry['body']))['id']
+                        seq=int(entry['seq']);payload=json.loads(base64.b64decode(entry['body'],validate=True))
+                        if seq in published and published[seq]!=payload:
+                            raise RuntimeError('Existing peer transcript payload changed during pagination')
+                        published[seq]=payload
                     earliest=min(int(entry['seq']) for entry in entries)
                     if earliest<=1:break
                     if before_seq is not None and earliest>=before_seq:
                         raise RuntimeError('Existing peer transcript pagination did not advance')
                     before_seq=earliest
-                cloud_ids=[published[seq] for seq in sorted(published)]
+                cloud_entries=[published[seq] for seq in sorted(published)]
+                cloud_ids=[item['id'] for item in cloud_entries]
                 if cloud_ids[:len(target_ids)] != target_ids:
                     raise RuntimeError('Existing peer copy order differs from its published history')
+                if cloud_entries[:len(target_entries)]!=target_entries:
+                    raise RuntimeError('Existing peer published history payload differs from its local copy')
                 existing_proofs.append({'sourceId':old,'targetId':new,'sourceEntries':len(source_ids),
                     'sourceIdsRetained':True,'destinationPublicationVerified':True,
+                    'sourcePayloadsRetained':True,'destinationPayloadsPublished':True,
                     'sourceOrderPreserved':[item for item in target_ids if item in kept]==source_ids})
             current=native[new]
             members=current.get('memberIds',[]) if current.get('isGroup') is True else []

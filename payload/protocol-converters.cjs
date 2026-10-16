@@ -1,0 +1,88 @@
+"use strict";
+function isObj(v) { return v !== null && typeof v === "object" && !Array.isArray(v); }
+function hash(v) { var h = 2166136261; var bytes = Buffer.from(v, "utf8"); for (var i = 0; i < bytes.length; i++) h = Math.imul(h ^ bytes[i], 16777619) >>> 0; return h.toString(36).padStart(7, "0"); }
+function clampId(v) { var s = typeof v === "string" && v ? v : "call_0"; if (Buffer.byteLength(s, "utf8") <= 64) return s; var prefix = ""; var bytes = 0; var chars = Array.from(s); for (var i = 0; i < chars.length; i++) { var size = Buffer.byteLength(chars[i], "utf8"); if (bytes + size > 56) break; prefix += chars[i]; bytes += size; } return prefix + "_" + hash(s); }
+function resolveApiType(model, provider, openaiOAuth) {
+  if (openaiOAuth) return "responses";
+  var nativeOpenAI = false;
+  try { var origin = new URL(String(provider.origin || "")); nativeOpenAI = origin.protocol === "https:" && origin.hostname === "api.openai.com"; } catch (_) {}
+  if (nativeOpenAI && /^gpt-[56](?:[.-]|$)/i.test(String(model.slug || ""))) return "responses";
+  var modelType = model.apiType == null ? model.api_type : model.apiType;
+  if (modelType === "responses" || modelType === "anthropic" || modelType === "chat-completions") return modelType;
+  return provider.apiType === "responses" || provider.apiType === "anthropic" ? provider.apiType : "chat-completions";
+}
+function contentToResponses(v, role) {
+  if (!Array.isArray(v)) return v == null ? "" : v;
+  return v.map(function (p) {
+    if (!isObj(p)) return p;
+    if (p.type === "text") return Object.assign({}, p, { type: role === "assistant" ? "output_text" : "input_text" });
+    if (p.type === "image_url") { var image = isObj(p.image_url) ? p.image_url : {}; return { type: "input_image", image_url: image.url || p.url || "", detail: image.detail || "auto" }; }
+    return p;
+  });
+}
+function chatToResponses(body) {
+  if (!isObj(body)) return {};
+  var out = {};
+  ["model","stream","temperature","top_p","metadata","store","user","parallel_tool_calls","tool_choice","previous_response_id","prompt","conversation"].forEach(function (k) { if (body[k] !== undefined) out[k] = body[k]; });
+  if (isObj(body.tool_choice) && isObj(body.tool_choice.function)) out.tool_choice = { type: "function", name: body.tool_choice.function.name };
+  out.max_output_tokens = body.max_output_tokens !== undefined ? body.max_output_tokens : (body.max_completion_tokens !== undefined ? body.max_completion_tokens : body.max_tokens);
+  if (typeof body.reasoning_effort === "string") out.reasoning = { effort: body.reasoning_effort };
+  if (Array.isArray(body.tools)) out.tools = body.tools.map(function (t) { return isObj(t) && isObj(t.function) ? Object.assign({ type: "function", strict: false }, t.function) : t; });
+  var messages = Array.isArray(body.messages) ? body.messages : [];
+  var input = [];
+  messages.forEach(function (m) {
+    if (!isObj(m)) return;
+    if (m.role === "tool") { input.push({ type: "function_call_output", call_id: clampId(m.tool_call_id), output: typeof m.content === "string" ? m.content : JSON.stringify(m.content == null ? "" : m.content) }); return; }
+    input.push({ role: m.role, content: contentToResponses(m.content, m.role) });
+    (Array.isArray(m.tool_calls) ? m.tool_calls : []).forEach(function (c) { if (isObj(c) && isObj(c.function)) input.push({ type: "function_call", call_id: clampId(c.id), name: c.function.name, arguments: c.function.arguments || "{}" }); });
+  });
+  // Responses-native bodies already carry input / previous_response_id /
+  // prompt / conversation. Do not wipe a populated input when messages is
+  // absent or empty (OpenAI treats input:[] as missing).
+  if (input.length) {
+    out.input = input;
+  } else if (Array.isArray(body.input) && body.input.length) {
+    out.input = body.input;
+  } else if (out.previous_response_id || out.prompt || out.conversation) {
+    // Leave input unset; one of the alternate required fields is present.
+  } else if (Array.isArray(body.input)) {
+    out.input = body.input;
+  } else {
+    out.input = [];
+  }
+  return out;
+}
+// OAuth-only Codex wire contract. API-key routes retain their output budget.
+function prepareCodexResponses(body) {
+  var out = Object.assign({}, body, { stream: true, store: false, instructions: typeof body.instructions === "string" ? body.instructions : "" });
+  ["max_output_tokens", "max_tokens", "max_completion_tokens", "temperature", "top_p"].forEach(function (key) { delete out[key]; });
+  return out;
+}
+function responsesSseToJson(raw) {
+  var terminal, items = new Map();
+  parseSse(raw).forEach(function (event) {
+    if (event.type === "response.output_item.done" && isObj(event.item)) {
+      items.set(typeof event.output_index === "number" ? event.output_index : items.size, event.item);
+    } else if (event.type === "error") terminal = mapUpstreamError(event);
+    else if (event.type === "response.failed") terminal = mapUpstreamError(isObj(event.response) ? event.response : event);
+    else if ((event.type === "response.completed" || event.type === "response.incomplete") && isObj(event.response)) {
+      var response = Object.assign({}, event.response);
+      if (!Array.isArray(response.output) || response.output.length === 0) response.output = Array.from(items).sort(function (a,b) { return a[0]-b[0]; }).map(function (pair) { return pair[1]; });
+      terminal = responsesToChat(response);
+    }
+  });
+  return terminal || mapUpstreamError({ error: { message: "Responses stream ended without a terminal response", code: "incomplete_stream" } });
+}
+function chatToAnthropic(body) { if (!isObj(body)) return {}; var out = { model: body.model, max_tokens: body.max_tokens || body.max_completion_tokens || 65536, stream: body.stream === true }; if (isObj(body.thinking)) out.thinking = Object.assign({}, body.thinking); if (isObj(body.output_config)) out.output_config = Object.assign({}, body.output_config); if (typeof body.reasoning_effort === "string" && body.reasoning_effort !== "none") { out.output_config = Object.assign({}, out.output_config || {}, { effort: body.reasoning_effort }); if (!out.thinking) out.thinking = { type: "adaptive" }; } if (body.temperature !== undefined) out.temperature = body.temperature; if (body.top_p !== undefined) out.top_p = body.top_p; if (body.stop !== undefined) out.stop_sequences = body.stop; var system = []; if (Array.isArray(body.tools)) out.tools = body.tools.map(function (t) { return isObj(t) && isObj(t.function) ? { name: t.function.name, description: t.function.description, input_schema: t.function.parameters || { type: "object", properties: {} } } : t; }); out.messages = []; (Array.isArray(body.messages) ? body.messages : []).forEach(function (m) { if (!isObj(m)) return; if (m.role === "system") { if (typeof m.content === "string") system.push(m.content); return; } if (m.role === "tool") { var tr = { type: "tool_result", tool_use_id: m.tool_call_id, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content == null ? "" : m.content) }; var prevMsg = out.messages.length ? out.messages[out.messages.length - 1] : null; if (prevMsg && prevMsg.role === "user" && Array.isArray(prevMsg.content) && prevMsg.content.length && prevMsg.content.every(function (b) { return isObj(b) && b.type === "tool_result"; })) { prevMsg.content.push(tr); } else { out.messages.push({ role: "user", content: [tr] }); } return; } var blocks = []; var thinking = typeof m.reasoning_content === "string" ? m.reasoning_content : typeof m.thinking === "string" ? m.thinking : ""; if (thinking) blocks.push({ type: "thinking", thinking: thinking }); if (typeof m.content === "string" && m.content) blocks.push({ type: "text", text: m.content }); (Array.isArray(m.tool_calls) ? m.tool_calls : []).forEach(function (c) { if (!isObj(c) || !isObj(c.function)) return; var input = {}; try { input = JSON.parse(String(c.function.arguments || "{}")); } catch (_) {} blocks.push({ type: "tool_use", id: clampId(c.id), name: c.function.name, input: isObj(input) ? input : {} }); }); out.messages.push({ role: m.role === "assistant" ? "assistant" : "user", content: blocks.length === 1 && blocks[0].type === "text" ? blocks[0].text : blocks }); }); if (system.length) out.system = system.join("\n\n"); return out; }
+function responsesUsage(u) { if (!isObj(u)) return undefined; return { prompt_tokens: Number(u.input_tokens || 0), completion_tokens: Number(u.output_tokens || 0), total_tokens: Number(u.total_tokens || (Number(u.input_tokens || 0) + Number(u.output_tokens || 0))), ...(isObj(u.input_tokens_details) ? { prompt_tokens_details: u.input_tokens_details } : {}), ...(isObj(u.output_tokens_details) ? { completion_tokens_details: u.output_tokens_details } : {}) }; }
+function anthropicUsage(u) { if (!isObj(u)) return undefined; var input = Number(u.input_tokens || 0) + Number(u.cache_read_input_tokens || 0) + Number(u.cache_creation_input_tokens || 0); var cached = Number(u.cache_read_input_tokens || 0) + Number(u.cache_creation_input_tokens || 0); return { prompt_tokens: input, completion_tokens: Number(u.output_tokens || 0), total_tokens: input + Number(u.output_tokens || 0), ...(cached ? { prompt_tokens_details: { cached_tokens: cached } } : {}) }; }
+function responseParts(p) { var text = "", reasoning = "", calls = []; (Array.isArray(p.output) ? p.output : []).forEach(function (i) { if (!isObj(i)) return; if (i.type === "function_call") calls.push({ id: i.call_id || i.id, type: "function", function: { name: i.name, arguments: i.arguments || "{}" } }); if (i.type === "reasoning") (Array.isArray(i.summary) ? i.summary : []).concat(Array.isArray(i.content) ? i.content : []).forEach(function (x) { if (isObj(x) && typeof x.text === "string") reasoning += x.text; }); if (i.type === "message") (Array.isArray(i.content) ? i.content : []).forEach(function (x) { if (isObj(x) && typeof x.text === "string") text += x.text; }); }); return { text: text, reasoning: reasoning, calls: calls }; }
+function responsesFinish(p) { var parts = responseParts(p); if (parts.calls.length) return "tool_calls"; var d = isObj(p.incomplete_details) ? p.incomplete_details : {}; if (String(d.reason || "") === "content_filter") return "content_filter"; if (p.status === "incomplete" || /max_tokens|output_tokens/.test(String(d.reason || ""))) return "length"; return "stop"; }
+function responsesToChat(p) { if (!isObj(p)) return { id: "", object: "chat.completion", choices: [] }; var o = responseParts(p); var result = { id: p.id || "", object: "chat.completion", created: p.created_at || Math.floor(Date.now() / 1000), model: p.model, choices: [{ index: 0, message: Object.assign({ role: "assistant", content: o.text || null }, o.reasoning ? { reasoning_content: o.reasoning } : {}, o.calls.length ? { tool_calls: o.calls } : {}), finish_reason: responsesFinish(p) }] }; var u = responsesUsage(p.usage); if (u) result.usage = u; return result; }
+function anthropicToChat(p) { if (!isObj(p)) return { id: "", object: "chat.completion", choices: [] }; var text = "", reasoning = "", calls = []; (Array.isArray(p.content) ? p.content : []).forEach(function (b) { if (!isObj(b)) return; if (b.type === "text" && typeof b.text === "string") text += b.text; if (b.type === "thinking") reasoning += typeof b.thinking === "string" ? b.thinking : (b.text || ""); if (b.type === "tool_use") calls.push({ id: b.id, type: "function", function: { name: b.name, arguments: JSON.stringify(b.input || {}) } }); }); var reason = p.stop_reason === "tool_use" ? "tool_calls" : p.stop_reason === "max_tokens" ? "length" : p.stop_reason === "refusal" ? "content_filter" : "stop"; var result = { id: p.id || "", object: "chat.completion", created: Math.floor(Date.now() / 1000), model: p.model, choices: [{ index: 0, message: Object.assign({ role: "assistant", content: text || null }, reasoning ? { reasoning_content: reasoning } : {}, calls.length ? { tool_calls: calls } : {}), finish_reason: reason }] }; var u = anthropicUsage(p.usage); if (u) result.usage = u; return result; }
+function parseSse(raw) { var out = []; var pending = []; function flush() { var data = pending.join("\n").trim(); pending = []; if (!data || data === "[DONE]") return; try { var p = JSON.parse(data); if (isObj(p)) out.push(p); } catch (_) {} } raw.split(/\r?\n/).forEach(function (line) { if (line.indexOf("data:") === 0) { var value = line.slice(5).trim(); if (pending.length) { try { var p = JSON.parse(pending.join("\n").trim()); if (isObj(p)) out.push(p); pending = []; } catch (_) {} } if (value === "[DONE]") { flush(); return; } try { var parsed = JSON.parse(value); if (isObj(parsed)) out.push(parsed); else pending.push(value); } catch (_) { pending.push(value); } } else if (!line.trim()) flush(); }); flush(); return out; }
+function chunk(id, model, delta, finish, usage) { var c = { id: id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: model, choices: [{ index: 0, delta: delta || {}, finish_reason: finish == null ? null : finish }] }; if (usage) c.usage = usage; return c; }
+function responsesSseToChat(raw, opts) { var terminal = !(opts && opts.terminal === false); var framing = !(opts && opts.framing === false); var out = [], id = "", model; parseSse(raw).forEach(function (e) { if (e.type === "response.created" && isObj(e.response)) { id = String(e.response.id || id); model = e.response.model || model; out.push(chunk(id, model, { role: "assistant" }, null)); } else if (e.type === "response.output_text.delta") out.push(chunk(id, model, { content: e.delta }, null)); else if (String(e.type).indexOf("reasoning") >= 0 && String(e.type).slice(-6) === ".delta") out.push(chunk(id, model, { reasoning_content: e.delta }, null)); else if (e.type === "response.output_item.added" && isObj(e.item) && e.item.type === "function_call") out.push(chunk(id, model, { tool_calls: [{ index: Number(e.output_index || 0), id: e.item.call_id || e.item.id, type: "function", function: { name: e.item.name, arguments: "" } }] }, null)); else if (e.type === "response.function_call_arguments.delta") out.push(chunk(id, model, { tool_calls: [{ index: Number(e.output_index || 0), function: { arguments: e.delta } }] }, null)); else if (e.type === "error" || e.type === "response.failed") out.push(mapUpstreamError(e.type === "response.failed" && isObj(e.response) ? e.response : e)); else if (e.type === "response.completed" || e.type === "response.incomplete") { var r = isObj(e.response) ? e.response : {}; out.push(chunk(id, model, {}, responsesFinish(r), responsesUsage(r.usage))); } }); var tail = out.map(function (c) { return "data: " + JSON.stringify(c) + "\n\n"; }).join(""); return framing ? tail + "data: [DONE]\n\n" : tail; }
+function anthropicSseToChat(raw, opts) { var terminal = !(opts && opts.terminal === false); var framing = !(opts && opts.framing === false); var out = [], id = "", model, finish = null, usage; parseSse(raw).forEach(function (e) { if (e.type === "message_start" && isObj(e.message)) { id = String(e.message.id || id); model = e.message.model || model; } if (e.type === "content_block_delta" && isObj(e.delta)) { if (e.delta.type === "text_delta") out.push(chunk(id, model, { content: e.delta.text }, null)); if (e.delta.type === "thinking_delta") out.push(chunk(id, model, { reasoning_content: e.delta.thinking }, null)); if (e.delta.type === "input_json_delta") out.push(chunk(id, model, { tool_calls: [{ index: e.index, function: { arguments: e.delta.partial_json } }] }, null)); } if (e.type === "message_delta") { var d = isObj(e.delta) ? e.delta : {}; finish = d.stop_reason; usage = e.usage; if (!terminal) { var liveReason = finish === "tool_use" ? "tool_calls" : finish === "max_tokens" ? "length" : "stop"; out.push(chunk(id, model, {}, liveReason, anthropicUsage(usage))); } } }); if (terminal) { var reason = finish === "tool_use" ? "tool_calls" : finish === "max_tokens" ? "length" : "stop"; out.push(chunk(id, model, {}, reason, anthropicUsage(usage))); } var tail = out.map(function (c) { return "data: " + JSON.stringify(c) + "\n\n"; }).join(""); return framing ? tail + "data: [DONE]\n\n" : tail; }
+function mapUpstreamError(payload, status) { var root = isObj(payload) ? payload : {}; var e = isObj(root.error) ? root.error : root; var message = typeof e.message === "string" ? e.message : typeof root.detail === "string" ? root.detail : "upstream request failed"; var code = typeof e.code === "string" ? e.code : typeof e.type === "string" ? e.type : "upstream_error"; var rid = [e.request_id, e.requestId, root.request_id, root.requestId].filter(function (v) { return typeof v === "string" && v.length > 0; })[0]; var out = { error: { message: message, type: code, code: code } }; if (typeof status === "number" && Number.isFinite(status) && status > 0) out.error.upstream_status = status; if (rid) out.error.request_id = rid; return out; }
+module.exports = { prepareCodexResponses, responsesSseToJson, resolveApiType, chatToResponses, responsesToChat, responsesSseToChat, chatToAnthropic, anthropicToChat, anthropicSseToChat, mapUpstreamError };

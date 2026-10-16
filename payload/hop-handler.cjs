@@ -1,0 +1,2265 @@
+"use strict";
+
+var fs = require("fs");
+var http = require("http");
+var https = require("https");
+var nodeCrypto = require("crypto");
+var { URL } = require("url");
+var path = require("path");
+var { toOpenAIMessages, sanitizeToolCallIds, repairOrphanedToolCalls, TOOL_CALL_INCOMPLETE_CONTENT } = require("./openai-messages.cjs");
+var {
+  enrichImageReads,
+  enforceImageBudget,
+  omitTextToWireBudget,
+  MAX_REQUEST_WIRE_BYTES,
+  WIRE_HEADROOM_BYTES,
+} = require("./image-read.cjs");
+var { applyOpenBotVersionHeader } = require("./version.cjs");
+var requestLog = require("./request-log.cjs");
+var turnLease = require("./turn-lease.cjs");
+var contextTruncate = require("./context-truncate.cjs");
+var botModels = require("./bot-models.cjs");
+var protocolConverters = require("./protocol-converters.cjs");
+var injectionHardening = require("./injection-hardening.cjs");
+
+var TIMEOUT_MS = Number(process.env.OPENBOT_HOP_TIMEOUT || "1800000");
+var HIGH_AGENT_MAX_TOKENS = 65536;
+
+// Global safety ceiling for outbound max_tokens. No shipping
+// chat/completions provider accepts a larger single completion (largest
+// known maxima are ~128K output); catalog rows come from third-party
+// aggregators that occasionally report the context window (or a
+// context-minus-prompt remainder, e.g. the 943718 seen on
+// meta/muse-spark-1.3-contributor in 2026-09) in a max-completion field.
+// Anything above this is data corruption, never a real model limit.
+// (Mirrors MAX_OUTPUT_TOKENS_CEILING in src/domain/types.ts; payload is
+// zero-dependency CJS injected into the host, so the constant is duplicated
+// rather than imported.)
+var MAX_OUTPUT_TOKENS_CEILING = 131072;
+
+/** Policy for retrying upstream HTTP 429 before any client bytes are sent. */
+var UPSTREAM_429_RETRY = {
+  maxRetries: 3,
+  baseDelayMs: 500,
+  factor: 2,
+  maxDelayMs: 8000,
+  budgetMs: 30000,
+};
+
+/** Retry policy for upstream 5xx and network-layer failures, while the
+ * response is still fully buffered (no client byte written yet).
+ *
+ * budgetMs bounds TOTAL BACKOFF SLEEP, not wall-clock since the first
+ * attempt: a slow failure (e.g. Cloudflare 524 arriving after ~100s of
+ * origin timeout) must still get its maxRetries retries — gating on
+ * wall-clock would exhaust the budget before any retry happens. Fast
+ * failures are bounded by maxRetries plus the sleep budget. The runtime
+ * adds its own bounded retries on top. */
+var UPSTREAM_5XX_RETRY = {
+  maxRetries: 2,
+  baseDelayMs: 500,
+  factor: 3,
+  maxDelayMs: 5000,
+  budgetMs: 10000,
+};
+
+function isRetryableUpstreamStatus(status) {
+  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
+  // Cloudflare edge errors 520-527 (522/524 = origin unreachable/timed out)
+  // are transient gateway weather, retryable like a 502. 525 (SSL handshake)
+  // and 521 (web server down) are excluded: they indicate config issues where
+  // an immediate retry only adds latency.
+  return status === 520 || status === 522 || status === 523 || status === 524 || status === 526 || status === 527;
+}
+
+function isRetryableUpstreamError(err) {
+  if (!err) return false;
+  if (err instanceof Error && err.message === "openbot-hop: upstream timeout") return true;
+  var code = typeof err.code === "string" ? err.code : "";
+  if (err.upstreamStreamFailure === true) {
+    return code === "server_error" || code === "internal_error" ||
+      code === "server_is_overloaded" || code === "overloaded_error";
+  }
+  if (code === "ECONNREFUSED") return true;
+  if (code === "ECONNRESET" || code === "ECONNABORTED" || code === "ETIMEDOUT") return true;
+  if (code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "EAI_AGAIN" || code === "EPIPE") return true;
+  var msg = typeof err.message === "string" ? err.message : "";
+  // A correct HTTPS route can transiently receive a non-TLS response from
+  // its egress transport. Retry that record-layer failure without changing
+  // the endpoint, scheme, or certificate verification. Certificate/auth
+  // failures are deliberately excluded.
+  if (code === "EPROTO" && /wrong version number/i.test(msg)) return true;
+  if (msg.indexOf("socket hang up") !== -1) return true;
+  if (msg.indexOf("ECONNRESET") !== -1 || msg.indexOf("ETIMEDOUT") !== -1) return true;
+  return false;
+}
+
+function headerValue(headers, name) {
+  if (!headers) return "";
+  var lower = name.toLowerCase();
+  var keys = Object.keys(headers);
+  for (var i = 0; i < keys.length; i++) {
+    if (String(keys[i]).toLowerCase() === lower) {
+      var value = headers[keys[i]];
+      if (Array.isArray(value)) return value.length ? String(value[0]) : "";
+      if (value === undefined || value === null) return "";
+      return String(value);
+    }
+  }
+  return "";
+}
+
+function parseRetryAfterMs(headers, nowMs) {
+  var raw = headerValue(headers, "retry-after").trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    return Math.max(0, Number(raw) * 1000);
+  }
+  var when = Date.parse(raw);
+  if (Number.isNaN(when)) return null;
+  return Math.max(0, when - (Number.isFinite(nowMs) ? nowMs : Date.now()));
+}
+
+function exponentialBackoffMs(attemptIndex) {
+  var policy = arguments.length > 1 && arguments[1] ? arguments[1] : UPSTREAM_429_RETRY;
+  var exp = policy.baseDelayMs * Math.pow(policy.factor, attemptIndex);
+  var capped = Math.min(policy.maxDelayMs, exp);
+  var jittered = capped * (0.5 + Math.random() * 0.5);
+  return Math.max(0, Math.floor(jittered));
+}
+
+function delayBefore429RetryMs(attemptIndex, headers, nowMs, sleepSpentMs) {
+  var retryAfter = parseRetryAfterMs(headers, nowMs);
+  var policy = UPSTREAM_429_RETRY;
+  var delay = retryAfter === null ? exponentialBackoffMs(attemptIndex, policy) : retryAfter;
+  var remaining = policy.budgetMs - Math.max(0, Number(sleepSpentMs) || 0);
+  if (remaining <= 0) return null;
+  return Math.min(delay, remaining);
+}
+
+function delayBefore5xxRetryMs(attemptIndex, headers, nowMs, sleepSpentMs) {
+  var retryAfter = parseRetryAfterMs(headers, nowMs);
+  var policy = UPSTREAM_5XX_RETRY;
+  var delay = retryAfter === null ? exponentialBackoffMs(attemptIndex, policy) : retryAfter;
+  var remaining = policy.budgetMs - Math.max(0, Number(sleepSpentMs) || 0);
+  if (remaining <= 0) return null;
+  return Math.min(delay, remaining);
+}
+
+function sleepMs(ms) {
+  var wait = Math.max(0, Number(ms) || 0);
+  if (wait === 0) return Promise.resolve();
+  return new Promise(function (resolve) {
+    setTimeout(resolve, wait);
+  });
+}
+
+/** Record how many upstream retries were spent on this attempt chain so the
+ * handler can surface it in the request log without changing the log API. */
+function tagHopRetries(err, attemptIndex) {
+  if (err && attemptIndex > 0) {
+    try {
+      err.hopRetries = attemptIndex;
+    } catch (ignored) {
+      /* frozen error objects just skip the annotation */
+    }
+  }
+  return err;
+}
+
+function isQuotaLimitResponse(raw) {
+  try {
+    var body = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw);
+    var error = body && body.error;
+    return Boolean(error && [error.code, error.type].some(function (value) {
+      return value === "usage_limit_reached" || value === "insufficient_quota" || value === "GoUsageLimitError";
+    }));
+  } catch (ignored) { return false; }
+}
+
+function canRetryUpstream429(status, attemptIndex, clientRes, sleepSpentMs, raw) {
+  if (status !== 429) return false;
+  // Subscription/billing quota does not recover during a retry delay.
+  // Preserve the provider's actionable error instead of multiplying calls.
+  if (isQuotaLimitResponse(raw)) return false;
+  var policy = UPSTREAM_429_RETRY;
+  if (attemptIndex >= policy.maxRetries) return false;
+  if (clientRes && (clientRes.headersSent || clientRes.destroyed || clientRes.writableEnded)) return false;
+  // The budget bounds backoff sleep only; attempt wall-time never counts, so a
+  // slow 429 (or a slow 5xx) still earns its retries.
+  if (sleepSpentMs >= policy.budgetMs) return false;
+  return true;
+}
+
+function canRetryUpstreamStatus(status, attemptIndex, clientRes, sleepSpentMs) {
+  if (!isRetryableUpstreamStatus(status)) return false;
+  var policy = UPSTREAM_5XX_RETRY;
+  if (attemptIndex >= policy.maxRetries) return false;
+  if (clientRes && (clientRes.headersSent || clientRes.destroyed || clientRes.writableEnded)) return false;
+  if (sleepSpentMs >= policy.budgetMs) return false;
+  return true;
+}
+
+function canRetryUpstreamError(err, attemptIndex, clientRes, sleepSpentMs) {
+  if (!isRetryableUpstreamError(err)) return false;
+  if (attemptIndex >= UPSTREAM_5XX_RETRY.maxRetries) return false;
+  if (clientRes && (clientRes.headersSent || clientRes.destroyed || clientRes.writableEnded)) return false;
+  if (sleepSpentMs >= UPSTREAM_5XX_RETRY.budgetMs) return false;
+  return true;
+}
+
+function retryAfterForwardHeaders(upstreamHeaders) {
+  var raw = headerValue(upstreamHeaders, "retry-after");
+  var requestId = headerValue(upstreamHeaders, "x-request-id");
+  if (!raw && !requestId) return undefined;
+  var out = {};
+  if (raw) out["Retry-After"] = raw;
+  if (requestId) out["x-request-id"] = requestId;
+  return out;
+}
+
+// ---- Request source metadata (task: record every clue the hop sees). ----
+//
+// The OpenAI-compatible hop protocol carries no bot / group-chat identity,
+// so the best available clues are the inbound headers (User-Agent, x-*
+// SDK headers, forwarding headers) plus body-level conversation keys some
+// callers attach. Everything here is best-effort and redaction-safe (no
+// secrets: Authorization / api keys are never copied).
+function detectClientName(userAgent, headers) {
+  var ua = String(userAgent || "").toLowerCase();
+  if (ua.indexOf("claude-cli") !== -1 || ua.indexOf("claude-code") !== -1) return "Claude Code";
+  if (ua.indexOf("cursor") !== -1) return "Cursor";
+  if (ua.indexOf("opencode") !== -1) return "OpenCode";
+  if (ua.indexOf("cline") !== -1 || ua.indexOf("vscode") !== -1) return "Cline";
+  if (ua.indexOf("aider") !== -1) return "Aider";
+  if (ua.indexOf("windsurf") !== -1) return "Windsurf";
+  if (ua.indexOf("zed") !== -1) return "Zed";
+  if (ua.indexOf("apifox") !== -1) return "Apifox";
+  if (ua.indexOf("openbot") !== -1) return "OpenBot";
+  if (ua.indexOf("openai") !== -1 || ua.indexOf("stainless") !== -1) {
+    var lang = headerValue(headers, "x-stainless-lang");
+    return lang ? "OpenAI SDK (" + lang + ")" : "OpenAI SDK";
+  }
+  if (ua.indexOf("curl") !== -1) return "curl";
+  if (
+    ua.indexOf("mozilla") !== -1 ||
+    ua.indexOf("chrome") !== -1 ||
+    ua.indexOf("safari") !== -1 ||
+    ua.indexOf("edge") !== -1 ||
+    ua.indexOf("firefox") !== -1
+  ) {
+    return "Browser";
+  }
+  return "";
+}
+
+function parseClientVersion(userAgent) {
+  var ua = String(userAgent || "");
+  var m = ua.match(/\/v?(\d+\.\d[\w.\-]*)/);
+  return m ? m[1].slice(0, 40) : "";
+}
+
+function findConversationId(body) {
+  if (!isRecord(body)) return "";
+  var keys = ["conversationId", "conversation_id", "sessionId", "session_id", "chatId", "chat_id"];
+  for (var i = 0; i < keys.length; i++) {
+    var value = body[keys[i]];
+    if (typeof value === "string" && value && value.length <= 128) return value;
+  }
+  return "";
+}
+
+// Deterministic OpenCode Zen session id per provider + conversation. The
+// upstream requires x-opencode-session since 2026-09-07 (MissingSessionID 400).
+// Identity is derived only from box-owned values: the routed provider id and
+// the conversation id already extracted for the request log. Inbound client
+// headers are never promoted to cross-request identity, so a caller cannot
+// forge or rotate another conversation's session. Requests without a
+// conversation id fall back to one fresh UUID per request; they are stateless
+// one-shot turns, so a stable id would be meaningless there.
+function opencodeSessionId(providerId, conversationId) {
+  var scope = String(providerId || "") + "\n" + String(conversationId || "");
+  var hex = nodeCrypto.createHash("sha256").update("openbot-opencode-session\0" + scope, "utf8").digest("hex").slice(0, 32).split("");
+  hex[12] = "5";
+  hex[16] = ["8", "9", "a", "b"][parseInt(hex[16], 16) & 3];
+  var compact = hex.join("");
+  return compact.slice(0, 8) + "-" + compact.slice(8, 12) + "-" + compact.slice(12, 16) + "-" + compact.slice(16, 20) + "-" + compact.slice(20);
+}
+
+function stableCacheKey(providerId, conversationId, botId) {
+  var scope = String(conversationId || botId || providerId || "openbot");
+  return nodeCrypto.createHash("sha256")
+    .update("openbot-prompt-cache\0" + String(providerId || "") + "\0" + scope, "utf8")
+    .digest("hex").slice(0, 40);
+}
+
+function inboundClientMeta(req, body) {
+  var headers = (req && req.headers) || {};
+  var userAgent = headerValue(headers, "user-agent");
+  var forwarded = headerValue(headers, "x-forwarded-for").split(",")[0].trim();
+  return {
+    userAgent: userAgent,
+    clientName: detectClientName(userAgent, headers),
+    clientVersion: parseClientVersion(userAgent),
+    conversationId: findConversationId(body),
+    origin: forwarded || headerValue(headers, "x-real-ip").trim(),
+    requestId: headerValue(headers, "x-request-id").slice(0, 128),
+  };
+}
+
+function hasSseContent(parsed) {
+  try {
+    if (requestLog && typeof requestLog.sseChunkHasContent === "function") {
+      return requestLog.sseChunkHasContent(parsed);
+    }
+  } catch (err) {
+    /* fall through to the permissive fallback */
+  }
+  return true;
+}
+
+// Incremental first-content scan for a live SSE forward: appends the chunk,
+// drains complete lines, and returns Date.now() the moment a data frame
+// carries real model output. Unparseable lines are skipped; the buffer is
+// capped so a pathological single line cannot grow it without bound.
+function noteFirstContent(state, chunk) {
+  state.buf += chunk.toString("utf8");
+  if (state.buf.length > 65536) state.buf = state.buf.slice(state.buf.length - 65536);
+  var nl = state.buf.indexOf("\n");
+  while (nl >= 0) {
+    var line = state.buf.slice(0, nl);
+    state.buf = state.buf.slice(nl + 1);
+    if (line.indexOf("data:") === 0) {
+      var data = line.slice(5).trim();
+      if (data && data !== "[DONE]") {
+        var parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch (err) {
+          parsed = undefined;
+        }
+        if (parsed !== undefined && hasSseContent(parsed)) return Date.now();
+      }
+    }
+    nl = state.buf.indexOf("\n");
+  }
+  return 0;
+}
+
+function planPath() {
+  return process.env.OPENBOT_PLAN || "/home/box/sand-data/openbot-plan.json";
+}
+
+function sandDataDir() {
+  if (process.env.OPENBOT_SAND_DATA) return process.env.OPENBOT_SAND_DATA;
+  if (process.env.OPENBOT_PLAN) return path.dirname(process.env.OPENBOT_PLAN);
+  return "/home/box/sand-data";
+}
+
+function pausePath() {
+  if (process.env.OPENBOT_PAUSE) return process.env.OPENBOT_PAUSE;
+  return path.join(sandDataDir(), "openbot-pause.json");
+}
+
+// Global gateway pause flag. Read synchronously on every completions
+// request so flipping the switch takes effect without a hop restart.
+// Missing file = not paused. Corrupt JSON = not paused (fail open: a
+// half-written pause file must never wedge the gateway shut).
+function readPauseState() {
+  try {
+    var raw = fs.readFileSync(pausePath(), "utf8");
+    var parsed = JSON.parse(raw);
+    return parsed && parsed.paused === true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function pauseBotsPath() {
+  if (process.env.OPENBOT_PAUSE_BOTS) return process.env.OPENBOT_PAUSE_BOTS;
+  return path.join(sandDataDir(), "openbot-pause-bots.json");
+}
+
+function readPauseBotsState() {
+  try {
+    var parsed = JSON.parse(fs.readFileSync(pauseBotsPath(), "utf8"));
+    if (!parsed || !Array.isArray(parsed.pausedBotIds)) return [];
+    return parsed.pausedBotIds.filter(function (id) { return typeof id === "string" && id.trim(); });
+  } catch (err) {
+    return [];
+  }
+}
+
+function isBotPaused(botId) {
+  return typeof botId === "string" && readPauseBotsState().indexOf(botId) >= 0;
+}
+
+function secretsPath() {
+  return process.env.OPENBOT_SECRETS || "/home/box/sand-data/secrets.json";
+}
+
+function mapsPath() {
+  return process.env.OPENBOT_MAPS || path.join(__dirname, "provider-maps.cjs");
+}
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function pathnameOf(req) {
+  try {
+    return new URL(req.url || "/", "http://127.0.0.1").pathname;
+  } catch (err) {
+    return "/";
+  }
+}
+
+function completionsUrl(origin) {
+  var b = String(origin || "").replace(/\/+$/, "");
+  if (!b) throw new Error("openbot-hop: missing origin");
+  if (/\/chat\/completions$/i.test(b)) return b;
+  if (/\/v1$/i.test(b) || /\/v4$/i.test(b) || /\/paas\/v4$/i.test(b)) return b + "/chat/completions";
+  return b + "/v1/chat/completions";
+}
+
+function upstreamUrl(origin, apiType) {
+  var b = String(origin || "").replace(/\/+$/, "");
+  if (!b) throw new Error("openbot-hop: missing origin");
+  if (apiType === "responses") return /\/responses$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/responses" : b + "/v1/responses");
+  if (apiType === "anthropic") return /\/messages$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/messages" : b + "/v1/messages");
+  return completionsUrl(b);
+}
+
+function findById(rows, id) {
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].id === id) return rows[i];
+  }
+  return null;
+}
+
+function lookupRoute(plan, requested) {
+  var catalog = plan && plan.catalog;
+  var models = (catalog && catalog.models) || [];
+  var providers = (catalog && catalog.providers) || [];
+  var agents = (plan && plan.agents) || {};
+  var wildcard = agents["*"];
+
+  function routeFor(model) {
+    if (!model) return null;
+    var provider = findById(providers, model.providerId);
+    if (!provider) return null;
+    return { model: model, provider: provider };
+  }
+
+  if (wildcard && typeof wildcard.modelId === "string") {
+    var bound = null;
+    for (var i = 0; i < models.length; i++) {
+      var row = models[i];
+      if (!row) continue;
+      if (row.providerId !== wildcard.providerId) continue;
+      if (row.slug === wildcard.modelId || row.id === wildcard.modelId) {
+        bound = row;
+        break;
+      }
+    }
+    if (bound && (requested === bound.slug || requested === bound.id || requested === wildcard.modelId)) {
+      return routeFor(bound);
+    }
+  }
+
+  var byId = findById(models, requested);
+  if (byId) return routeFor(byId);
+  var slugMatches = [];
+  for (var j = 0; j < models.length; j++) {
+    if (models[j] && models[j].slug === requested) slugMatches.push(models[j]);
+  }
+  if (slugMatches.length === 1) return routeFor(slugMatches[0]);
+  if (slugMatches.length > 1) {
+    // The same slug can exist in several families. Prefer, in order:
+    // the active model's provider, an OpenCode family, OpenAI, then catalog order.
+    var activeProvider = wildcard && wildcard.providerId || "";
+    function rank(m) {
+      if (activeProvider && m.providerId === activeProvider) return 0;
+      if (String(m.providerId).indexOf("opencode") === 0) return 1;
+      if (m.providerId === "openai") return 2;
+      return 3;
+    }
+    slugMatches.sort(function (a, b) { return rank(a) - rank(b); });
+    return routeFor(slugMatches[0]);
+  }
+  return null;
+}
+
+function loadStoredSecret(providerId) {
+  var store = readJson(secretsPath());
+  var providers = store && store.providers;
+  if (!isRecord(providers) || typeof providers[providerId] !== "string") {
+    return "";
+  }
+  return providers[providerId];
+}
+
+function resolveUpstreamUrl(provider, isOpenAIOAuth, apiType) {
+  if (isOpenAIOAuth) return "https://chatgpt.com/backend-api/codex/responses";
+  return upstreamUrl(provider && provider.origin, apiType);
+}
+
+function openAIOAuthAccountId(credential) {
+  if (!isRecord(credential)) return "";
+  if (typeof credential.chatgptAccountId === "string" && credential.chatgptAccountId.trim()) return credential.chatgptAccountId.trim();
+  var tokens = [credential.idToken, credential.accessToken];
+  for (var i = 0; i < tokens.length; i++) {
+    try {
+      var parts = String(tokens[i] || "").split(".");
+      if (parts.length < 2) continue;
+      var claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      var auth = claims && isRecord(claims["https://api.openai.com/auth"]) ? claims["https://api.openai.com/auth"] : null;
+      if (auth && typeof auth.chatgpt_account_id === "string" && auth.chatgpt_account_id.trim()) return auth.chatgpt_account_id.trim();
+    } catch (err) { /* a non-JWT token simply has no embedded account id */ }
+  }
+  return "";
+}
+
+function readOpenAIOAuthCredential(providerId) {
+  var raw = loadStoredSecret(providerId);
+  try {
+    var parsed = JSON.parse(raw);
+    return isRecord(parsed) && parsed.kind === "openai-oauth" ? parsed : null;
+  } catch (err) { return null; }
+}
+
+function requestOAuthRefresh(refreshToken) {
+  return new Promise(function (resolve, reject) {
+    var payload = Buffer.from("grant_type=refresh_token&client_id=app_EMoamEEZ73f0CkXaXp7hrann&refresh_token=" + encodeURIComponent(refreshToken), "utf8");
+    var req = https.request({
+      hostname: "auth.openai.com", path: "/oauth/token", method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(payload.length), Accept: "application/json" },
+    }, function (res) {
+      collectResponse(res).then(function (out) {
+        var parsed;
+        try { parsed = JSON.parse(out.raw.toString("utf8")); } catch (err) { parsed = null; }
+        if ((out.status || 500) < 200 || (out.status || 500) >= 300 || !parsed || typeof parsed.access_token !== "string") {
+          reject(new Error("openbot-hop: OpenAI OAuth refresh failed"));
+          return;
+        }
+        resolve(parsed);
+      }, reject);
+    });
+    req.on("error", reject);
+    req.setTimeout(TIMEOUT_MS, function () { req.destroy(new Error("openbot-hop: OAuth refresh timeout")); });
+    req.end(payload);
+  });
+}
+
+// Persist a rotated OAuth credential. Returns true when the new value is on
+// disk; a false return means the caller must treat the refresh as failed so a
+// later request never proceeds with an access token that was not persisted.
+function saveStoredSecret(providerId, value) {
+  try {
+    var file = secretsPath();
+    var store = readJson(file) || { providers: {} };
+    if (!isRecord(store.providers)) store.providers = {};
+    store.providers[providerId] = value;
+    var tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return true;
+  } catch (err) { /* refresh persistence is best-effort; the request still uses the new token */ }
+  return false;
+}
+
+// Per-provider single-flight refresh. Concurrent requests share one token
+// exchange, so a rotating refresh token is written exactly once and no later
+// writer can overwrite it with credentials minted from the now-consumed token.
+var oauthRefreshFlights = {};
+
+function refreshOpenAIOAuthCredential(providerId, parsed) {
+  if (oauthRefreshFlights[providerId]) return oauthRefreshFlights[providerId];
+  var flight = requestOAuthRefresh(parsed.refreshToken)
+    .then(function (refreshed) {
+      var next = Object.assign({}, parsed, {
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token || parsed.refreshToken,
+        expiresAt: Math.floor(Date.now() / 1000) + Math.max(1, Number(refreshed.expires_in) || 3600),
+      });
+      var refreshedAccountId = openAIOAuthAccountId({ idToken: refreshed.id_token, accessToken: refreshed.access_token });
+      if (refreshedAccountId) next.chatgptAccountId = refreshedAccountId;
+      if (!saveStoredSecret(providerId, JSON.stringify(next))) {
+        throw new Error("openbot-hop: OpenAI OAuth credential was not persisted");
+      }
+      return next.accessToken;
+    })
+    .finally(function () {
+      delete oauthRefreshFlights[providerId];
+    });
+  oauthRefreshFlights[providerId] = flight;
+  return flight;
+}
+
+async function loadKey(providerId, provider) {
+  var raw = loadStoredSecret(providerId);
+  if (!raw) return "";
+  var parsed;
+  try { parsed = JSON.parse(raw); } catch (err) { return raw; }
+  if (!isRecord(parsed) || parsed.kind !== "openai-oauth" || typeof parsed.accessToken !== "string") return raw;
+  var expiresAt = Number(parsed.expiresAt || 0);
+  if (expiresAt > Math.floor(Date.now() / 1000) + 60) return parsed.accessToken;
+  if (typeof parsed.refreshToken !== "string" || !parsed.refreshToken) {
+    throw new Error("openbot-hop: OpenAI OAuth credential is expired with no refresh token");
+  }
+  try {
+    return await refreshOpenAIOAuthCredential(providerId, parsed);
+  } catch (err) {
+    throw new Error("openbot-hop: OpenAI OAuth refresh failed (" + err.message + ")");
+  }
+}
+
+function levelsHaveDefault(model) {
+  var levels = model && model.reasoningLevels;
+  if (!Array.isArray(levels)) return false;
+  for (var i = 0; i < levels.length; i++) {
+    if (levels[i] === "default") return true;
+  }
+  return false;
+}
+
+function hopReasoning(model) {
+  var level = model && typeof model.activeReasoning === "string" ? model.activeReasoning : "";
+  if (!levelsHaveDefault(model) && (level === "" || level === "none")) {
+    return "default";
+  }
+  if (!level) return "default";
+  return level;
+}
+
+function hopParameters(model) {
+  var params = [];
+  var rows = model && model.parameters;
+  if (Array.isArray(rows)) {
+    for (var i = 0; i < rows.length; i++) {
+      var p = rows[i];
+      if (!p || !p.id) continue;
+      if (p.id === "effort" || p.id === "thinking") continue;
+      params.push(p);
+    }
+  }
+  var level = hopReasoning(model);
+  if (level === "default") {
+    return params;
+  }
+  if (level === "none") {
+    params.push({ id: "thinking", value: "false" });
+    return params;
+  }
+  params.push({ id: "effort", value: String(level) });
+  return params;
+}
+
+function applyMaxTokens(body, model, apiType) {
+  // Generic outbound governance (all providers): the model cap itself is
+  // clamped to the global ceiling first, because a poisoned catalog row
+  // (e.g. 943718) would otherwise pass a self-comparison and sail through.
+  // Missing/unreliable caps fall back to HIGH_AGENT_MAX_TOKENS (existing
+  // default); the ceiling only truncates, never inflates.
+  var rawCap = Number(model && model.maxOutputTokens);
+  var cap = HIGH_AGENT_MAX_TOKENS;
+  if (Number.isFinite(rawCap) && rawCap > 0) {
+    cap = Math.min(Math.floor(rawCap), MAX_OUTPUT_TOKENS_CEILING);
+  }
+  var requested = Number(apiType === "responses" ? (body.max_output_tokens !== undefined ? body.max_output_tokens : body.max_tokens) : body.max_tokens);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    if (apiType === "responses") body.max_output_tokens = cap; else body.max_tokens = cap;
+    return;
+  }
+  if (requested > cap) { if (apiType === "responses") body.max_output_tokens = cap; else body.max_tokens = cap; }
+}
+
+function applyMaps(body, ctx) {
+  var maps;
+  try {
+    delete require.cache[require.resolve(mapsPath())];
+    maps = require(mapsPath());
+  } catch (err) {
+    return;
+  }
+  if (maps && typeof maps.applyProviderReasoningControls === "function") {
+    maps.applyProviderReasoningControls(body, ctx);
+  }
+}
+
+// Serialized size of the outbound body WITHOUT its messages: tools, model,
+// stream and every other envelope field. The image governance pass subtracts
+// this from its wire budget, so the 4 MiB limit is enforced on the full
+// outbound wire (messages + tools + envelope), not on messages alone — the
+// 2026-09-04 incident body passed a messages-only check by a few KB and still
+// 413'd once the ~230 KB of tools were added on top.
+function outboundEnvelopeBytes(body) {
+  try {
+    var envelope = {};
+    for (var key in body) {
+      if (Object.prototype.hasOwnProperty.call(body, key) && key !== "messages") {
+        envelope[key] = body[key];
+      }
+    }
+    envelope.messages = [];
+    return Buffer.byteLength(JSON.stringify(envelope), "utf8");
+  } catch (err) {
+    return 0;
+  }
+}
+
+// Advisory only: after governance, max_tokens and the provider parameter maps
+// have been applied, so this is the wire the upstream actually receives. The
+// governance budget already reserved WIRE_HEADROOM_BYTES for these additions;
+// if this still fires, the body carries oversized non-image content no image
+// pass can shrink, and the log names it instead of letting a 413 explain it.
+function noteWireBytes(body) {
+  try {
+    var bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    if (bytes > MAX_REQUEST_WIRE_BYTES) {
+      process.stderr.write(
+        "openbot-hop outbound wire is " + bytes + " bytes, over the " +
+        MAX_REQUEST_WIRE_BYTES + " byte budget (non-image content too large)\n",
+      );
+    }
+  } catch (err) {
+    /* advisory only, never throw into the chat path */
+  }
+}
+
+function headerContentType(headers) {
+  if (!headers) return "";
+  return String(headers["content-type"] || headers["Content-Type"] || "");
+}
+
+function looksLikeEventStream(headers, wantStream) {
+  var ctype = headerContentType(headers);
+  if (/text\/event-stream/i.test(ctype)) return true;
+  if (wantStream && !/application\/json/i.test(ctype)) return true;
+  return false;
+}
+
+function hopAccept(wantStream) {
+  return wantStream ? "text/event-stream, application/json" : "application/json";
+}
+
+function inboundUserAgent(inbound) {
+  if (!inbound || !inbound.headers) return "";
+  var ua = inbound.headers["user-agent"];
+  if (typeof ua === "string" && ua.trim()) return ua;
+  return "";
+}
+
+function openUpstream(urlStr, body, key, inbound, apiType) {
+  var u = new URL(urlStr);
+  var lib = u.protocol === "https:" ? https : http;
+  var outboundBody = Object.assign({}, body);
+  delete outboundBody.__openbot_api_type;
+  delete outboundBody.openbot_internal_model;
+  delete outboundBody.openbot_internal_auxiliary;
+  delete outboundBody.openbotRequestId;
+  // Identity metadata rides the body for logging and the dry-run gate only;
+  // no upstream provider ever sees it (same gate as __openbot_api_type).
+  delete outboundBody.openbotBotId;
+  delete outboundBody.openbotChatType;
+  // Explicit mirrors of the conversation identity on converted (allow-list)
+  // documents — the converted families drop body.conversationId/epochId by
+  // construction, so these mirrors exist only there and are deleted with
+  // the rest of the identity metadata.
+  delete outboundBody.openbotConversationId;
+  delete outboundBody.openbotEpochId;
+  // Conversation identity stamped by the custom wrap (runtime.cjs) for the
+  // injection gate. Same contract: it feeds findConversationId / the
+  // observable fallback and the request log, never the provider wire. This
+  // is the single serialization point for chat-completions AND the source
+  // body of both converted families, so stripping here (plus the mirror
+  // deletions on the converted documents below) keeps every outbound
+  // payload free of the mirror fields.
+  delete outboundBody.conversationId;
+  delete outboundBody.conversation_id;
+  delete outboundBody.sessionId;
+  delete outboundBody.session_id;
+  delete outboundBody.chatId;
+  delete outboundBody.chat_id;
+  delete outboundBody.epochId;
+  delete outboundBody.epoch_id;
+  if (inbound && inbound.openaiOAuth === true) outboundBody = protocolConverters.prepareCodexResponses(outboundBody);
+  var payload = Buffer.from(JSON.stringify(outboundBody), "utf8");
+  var wantStream = outboundBody.stream === true;
+  var headers = {
+    "Content-Type": "application/json",
+    "Content-Length": String(payload.length),
+    "Accept": hopAccept(wantStream),
+    "Accept-Encoding": "identity",
+  };
+  if (key) {
+    headers.Authorization = "Bearer " + key;
+    if (apiType === "anthropic") {
+      headers["x-api-key"] = key;
+      headers["anthropic-version"] = "2023-06-01";
+      delete headers.Authorization;
+    }
+  }
+  var origin = String((inbound && inbound.providerOrigin) || "");
+  var providerId = String((inbound && inbound.providerId) || "");
+  var isOpenAIOAuth = inbound && inbound.openaiOAuth === true;
+  if (isOpenAIOAuth) {
+    headers["User-Agent"] = "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)";
+    headers.originator = "codex-tui";
+    if (inbound.chatgptAccountId) headers["chatgpt-account-id"] = inbound.chatgptAccountId;
+    // Codex derives ChatGPT cache affinity from this header, separately from
+    // the JSON cache key. Use the box-derived scope, never client headers.
+    if (inbound.openaiSessionKey) headers["session-id"] = inbound.openaiSessionKey;
+  }
+  if (u.hostname === "opencode.ai" || /^opencode(?:-|$)/.test(providerId)) {
+    var scope = findConversationId(body, (inbound && inbound.headers) || {}) || body.openbotConversationId || body.openbotBotId;
+    headers["x-opencode-session"] = (inbound && inbound.opencodeSession) || opencodeSessionId(providerId || u.pathname.split("/").slice(0,4).join("/"), scope || "auxiliary");
+  }
+  if (providerId === "openrouter") {
+    headers["HTTP-Referer"] = "https://openbot.local";
+    headers["X-Title"] = "OpenBot";
+  }
+  applyOpenBotVersionHeader(headers);
+  var ua = inboundUserAgent(inbound);
+  if (ua && !isOpenAIOAuth) headers["User-Agent"] = ua;
+  else if (!ua && !isOpenAIOAuth && (u.hostname === "opencode.ai" || /^opencode(?:-|$)/.test(providerId))) {
+    // Go requires an identified coding client. Native/compactor callers may
+    // have no UA; identify this installed OpenBot rather than an HTTP library
+    // or another product. A caller's supplied identity always wins.
+    headers["User-Agent"] = "OpenBot/" + String(headers["x-openbot-version"]).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128);
+  }
+  var req = lib.request({
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === "https:" ? 443 : 80),
+    path: u.pathname + u.search,
+    method: "POST",
+    headers: headers,
+    signal: inbound && inbound.signal,
+  });
+  req.write(payload);
+  return req;
+}
+
+function collectResponse(res) {
+  return new Promise(function (resolve, reject) {
+    var chunks = [];
+    res.on("data", function (c) { chunks.push(c); });
+    res.on("end", function () {
+      resolve({ status: res.statusCode || 502, headers: res.headers, raw: Buffer.concat(chunks) });
+    });
+    res.on("error", reject);
+  });
+}
+
+function postUpstreamOnce(urlStr, body, key, inbound, apiType) {
+  return new Promise(function (resolve, reject) {
+    var req = openUpstream(urlStr, body, key, inbound, apiType);
+    req.setTimeout(TIMEOUT_MS, function () {
+      req.destroy();
+      reject(new Error("openbot-hop: upstream timeout"));
+    });
+    req.on("error", reject);
+    req.on("response", function (res) {
+      collectResponse(res).then(function (out) {
+        var failure = apiType === "responses" && out.status >= 200 && out.status < 300
+          ? streamedUpstreamError(out.raw) : null;
+        if (failure) reject(failure); else resolve(out);
+      }, reject);
+    });
+    req.end();
+  });
+}
+
+/** Same shape as postUpstreamOnce, but a network-layer failure or a retryable
+ * status never rejects: it resolves with an attemptFailed marker so the retry
+ * loop can count it without aborting the chain. */
+async function postUpstreamAttempt(urlStr, body, key, inbound, apiType) {
+  try {
+    var out = await postUpstreamOnce(urlStr, body, key, inbound, apiType);
+    if (isRetryableUpstreamStatus(out.status)) {
+      return { attemptFailed: true, status: out.status, headers: out.headers, raw: out.raw };
+    }
+    return out;
+  } catch (err) {
+    if (!isRetryableUpstreamError(err)) throw err;
+    return { attemptFailed: true, status: 0, headers: {}, raw: Buffer.alloc(0), attemptError: err };
+  }
+}
+
+async function postUpstream(urlStr, body, key, inbound, apiType, clientRes) {
+  if (!clientRes) return postUpstreamWithRetry(urlStr, body, key, inbound, apiType);
+  // Non-streaming compaction calls can outlive their caller's timeout.
+  // Propagate its disconnect through the entire upstream/retry chain.
+  var controller = new AbortController();
+  var nextInbound = Object.assign({}, inbound, { signal: controller.signal });
+  function onClientClose() {
+    if (!clientRes.writableEnded) controller.abort();
+  }
+  clientRes.on("close", onClientClose);
+  if (clientRes.destroyed || clientRes.writableEnded) controller.abort();
+  try {
+    return await postUpstreamWithRetry(urlStr, body, key, nextInbound, apiType, clientRes);
+  } finally {
+    clientRes.removeListener("close", onClientClose);
+  }
+}
+
+async function postUpstreamWithRetry(urlStr, body, key, inbound, apiType, clientRes) {
+  var attemptIndex = 0;
+  var retriesSpent = 0;
+  // Retry allowance is measured in backoff sleep, not wall clock: an attempt
+  // that takes 100s+ to fail (Cloudflare 524 origin timeout) must still get
+  // its retries instead of exhausting the budget before sleeping once.
+  var sleepSpentMs = 0;
+  // Per-attempt chain for the request log: every upstream try records its
+  // status / error / latency so retries are visible instead of collapsing
+  // into a single "upstream-retries=N" suffix.
+  var attempts = [];
+  function withAttempts(out) {
+    if (attempts.length) {
+      out.attempts = attempts;
+      out.attemptCount = attempts.length;
+    }
+    return out;
+  }
+  while (true) {
+    var attemptStartedMs = Date.now();
+    var out;
+    try {
+      out = await postUpstreamOnce(urlStr, body, key, inbound, apiType);
+    } catch (err) {
+      if (!canRetryUpstreamError(err, attemptIndex, clientRes, sleepSpentMs)) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: 0,
+          error: errorMessage(err, "hop failed"),
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        throw tagHopRetries(err, attemptIndex);
+      }
+      out = { attemptFailed: true, status: 0, headers: {}, raw: Buffer.alloc(0), attemptError: err };
+    }
+    if (!out.attemptFailed) {
+      var retryKind = classifyUpstreamRetry(out.status, attemptIndex, clientRes, sleepSpentMs, out.raw);
+      if (retryKind === null) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status,
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        if (retriesSpent > 0) out.hopRetries = retriesSpent;
+        return withAttempts(out);
+      }
+      var delay = retryDelayMs(retryKind, attemptIndex, out.headers, Date.now(), sleepSpentMs);
+      if (delay === null) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status,
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        if (retriesSpent > 0) out.hopRetries = retriesSpent;
+        return withAttempts(out);
+      }
+      attempts.push({
+        attempt: attemptIndex + 1,
+        status: out.status,
+        latencyMs: Date.now() - attemptStartedMs,
+        decision: "retry",
+      });
+      await sleepMs(delay);
+      sleepSpentMs += delay;
+      attemptIndex += 1;
+      retriesSpent = attemptIndex;
+      continue;
+    }
+    var delayErr = delayBefore5xxRetryMs(attemptIndex, out.headers, Date.now(), sleepSpentMs);
+    if (delayErr === null) {
+      attempts.push({
+        attempt: attemptIndex + 1,
+        status: out.status || 0,
+        error: errorMessage(out.attemptError, "hop failed"),
+        latencyMs: Date.now() - attemptStartedMs,
+        decision: "final",
+      });
+      throw tagHopRetries(out.attemptError, attemptIndex);
+    }
+    attempts.push({
+      attempt: attemptIndex + 1,
+      status: out.status || 0,
+      error: errorMessage(out.attemptError, "hop failed"),
+      latencyMs: Date.now() - attemptStartedMs,
+      decision: "retry",
+    });
+    await sleepMs(delayErr);
+    sleepSpentMs += delayErr;
+    attemptIndex += 1;
+    retriesSpent = attemptIndex;
+  }
+}
+
+function classifyUpstreamRetry(status, attemptIndex, clientRes, sleepSpentMs, raw) {
+  if (canRetryUpstream429(status, attemptIndex, clientRes, sleepSpentMs, raw)) return "429";
+  if (isRetryableUpstreamStatus(status) && canRetryUpstreamStatus(status, attemptIndex, clientRes, sleepSpentMs)) {
+    return "5xx";
+  }
+  return null;
+}
+
+function retryDelayMs(kind, attemptIndex, headers, nowMs, sleepSpentMs) {
+  if (kind === "429") return delayBefore429RetryMs(attemptIndex, headers, nowMs, sleepSpentMs);
+  return delayBefore5xxRetryMs(attemptIndex, headers, nowMs, sleepSpentMs);
+}
+
+function startEventStream(clientRes, status, contentType) {
+  if (clientRes.headersSent || clientRes.destroyed || clientRes.writableEnded) return;
+  clientRes.writeHead(status || 200, {
+    "Content-Type": contentType || "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+  });
+  if (typeof clientRes.flushHeaders === "function") clientRes.flushHeaders();
+}
+
+function pipeOrBufferUpstreamOnce(urlStr, body, key, clientRes, inbound, activeReq, transformResponse) {
+  return new Promise(function (resolve, reject) {
+    var req = openUpstream(urlStr, body, key, inbound, body && body.__openbot_api_type);
+    if (activeReq) activeReq.current = req;
+    var settled = false;
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      if (activeReq && activeReq.current === req) activeReq.current = null;
+      reject(err);
+    }
+    function ok(value) {
+      if (settled) return;
+      settled = true;
+      if (activeReq && activeReq.current === req) activeReq.current = null;
+      resolve(value);
+    }
+    req.setTimeout(TIMEOUT_MS, function () {
+      req.destroy();
+      fail(new Error("openbot-hop: upstream timeout"));
+    });
+    req.on("error", fail);
+    req.on("response", function (res) {
+      var status = res.statusCode || 502;
+      // Retryable statuses are decided before any client byte. Collect and
+      // return without writeHead so the caller can retry while headersSent
+      // is false.
+      if (status === 429 || isRetryableUpstreamStatus(status)) {
+        collectResponse(res).then(ok, fail);
+        return;
+      }
+      if (!looksLikeEventStream(res.headers, true)) {
+        collectResponse(res).then(function (out) {
+          ok(Object.assign({ forwarded: false }, out));
+        }, fail);
+        return;
+      }
+      var ctype = headerContentType(res.headers) || "text/event-stream";
+      // Headers commit the client response too. For converted streams the
+      // entire attempt is already buffered; keep it replaceable until the
+      // upstream ends and conversion succeeds. Direct SSE commits with its
+      // first byte, never merely because upstream headers arrived.
+      var chunks = [];
+      var scanState = { buf: "" };
+      var firstContentAt = 0;
+      res.on("data", function (c) {
+        chunks.push(c);
+        if (!transformResponse && !clientRes.writableEnded && !clientRes.destroyed) {
+          startEventStream(clientRes, status, ctype);
+          clientRes.write(c);
+        }
+        if (!firstContentAt) {
+          var at = noteFirstContent(scanState, c);
+          if (at) firstContentAt = at;
+        }
+      });
+      res.on("end", function () {
+        try {
+          var failure = transformResponse ? streamedUpstreamError(Buffer.concat(chunks)) : null;
+          if (failure) throw failure;
+          if (!clientRes.writableEnded && !clientRes.destroyed) {
+            var outgoing = transformResponse ? transformResponse(Buffer.concat(chunks)) : Buffer.concat(chunks);
+            startEventStream(clientRes, status, ctype);
+            if (transformResponse) clientRes.write(outgoing);
+            clientRes.end();
+          }
+        } catch (err) {
+          fail(err);
+          return;
+        }
+        ok({
+          status: status || 200,
+          headers: res.headers,
+          raw: Buffer.concat(chunks),
+          forwarded: true,
+          firstContentAt: firstContentAt,
+        });
+      });
+      res.on("error", fail);
+    });
+    req.end();
+  });
+}
+
+async function pipeOrBufferUpstream(urlStr, body, key, clientRes, inbound, transformResponse) {
+  var requestStartedMs = Date.now();
+  var attemptIndex = 0;
+  var activeReq = { current: null };
+  var retriesSpent = 0;
+  // Same sleep-based budget as postUpstream: slow attempts never eat retries.
+  var sleepSpentMs = 0;
+  var attempts = [];
+  function withAttempts(out) {
+    if (attempts.length) {
+      out.attempts = attempts;
+      out.attemptCount = attempts.length;
+    }
+    return out;
+  }
+  function onClientClose() {
+    if (!clientRes.writableEnded && activeReq.current) activeReq.current.destroy();
+  }
+  clientRes.on("close", onClientClose);
+  try {
+    while (true) {
+      var attemptStartedMs = Date.now();
+      var out;
+      try {
+        out = await pipeOrBufferUpstreamOnce(urlStr, body, key, clientRes, inbound, activeReq, transformResponse);
+      } catch (err) {
+        if (!canRetryUpstreamError(err, attemptIndex, clientRes, sleepSpentMs)) {
+          attempts.push({
+            attempt: attemptIndex + 1,
+            status: 0,
+            error: errorMessage(err, "hop failed"),
+            latencyMs: Date.now() - attemptStartedMs,
+            decision: "final",
+          });
+          throw tagHopRetries(err, attemptIndex);
+        }
+        out = { attemptFailed: true, status: 0, headers: {}, raw: Buffer.alloc(0), attemptError: err };
+      }
+      if (out.attemptFailed) {
+        var delay = delayBefore5xxRetryMs(attemptIndex, out.headers, Date.now(), sleepSpentMs);
+        if (delay === null) {
+          attempts.push({
+            attempt: attemptIndex + 1,
+            status: out.status || 0,
+            error: errorMessage(out.attemptError, "hop failed"),
+            latencyMs: Date.now() - attemptStartedMs,
+            decision: "final",
+          });
+          throw tagHopRetries(out.attemptError, attemptIndex);
+        }
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status || 0,
+          error: errorMessage(out.attemptError, "hop failed"),
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "retry",
+        });
+        await sleepMs(delay);
+        sleepSpentMs += delay;
+        attemptIndex += 1;
+        retriesSpent = attemptIndex;
+        continue;
+      }
+      if (out.forwarded) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status,
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        if (typeof out.firstContentAt === "number" && out.firstContentAt > 0) {
+          out.firstTokenMs = Math.max(0, Math.round(out.firstContentAt - requestStartedMs));
+        }
+        if (retriesSpent > 0) out.hopRetries = retriesSpent;
+        return withAttempts(out);
+      }
+      var retryKind = classifyUpstreamRetry(out.status, attemptIndex, clientRes, sleepSpentMs, out.raw);
+      if (retryKind === null) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status,
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        if (retriesSpent > 0) out.hopRetries = retriesSpent;
+        out = convertBufferedResponse(out, body.__openbot_api_type || "chat-completions");
+        if (!clientRes.headersSent) {
+          send(clientRes, out.status, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+        }
+        return withAttempts(out);
+      }
+      var retryDelay = retryDelayMs(retryKind, attemptIndex, out.headers, Date.now(), sleepSpentMs);
+      if (retryDelay === null) {
+        attempts.push({
+          attempt: attemptIndex + 1,
+          status: out.status,
+          latencyMs: Date.now() - attemptStartedMs,
+          decision: "final",
+        });
+        if (retriesSpent > 0) out.hopRetries = retriesSpent;
+        out = convertBufferedResponse(out, body.__openbot_api_type || "chat-completions");
+        if (!clientRes.headersSent) {
+          send(clientRes, out.status, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+        }
+        return withAttempts(out);
+      }
+      attempts.push({
+        attempt: attemptIndex + 1,
+        status: out.status,
+        latencyMs: Date.now() - attemptStartedMs,
+        decision: "retry",
+      });
+      await sleepMs(retryDelay);
+      sleepSpentMs += retryDelay;
+      attemptIndex += 1;
+      retriesSpent = attemptIndex;
+    }
+  } finally {
+    clientRes.removeListener("close", onClientClose);
+  }
+}
+
+function send(res, status, payload, contentType, extraHeaders) {
+  var body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  var headers = {
+    "Content-Type": contentType || "application/json",
+    "Content-Length": String(body.length),
+  };
+  if (extraHeaders && typeof extraHeaders === "object") {
+    var keys = Object.keys(extraHeaders);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (extraHeaders[k] !== undefined && extraHeaders[k] !== null) {
+        headers[k] = String(extraHeaders[k]);
+      }
+    }
+  }
+  res.writeHead(status, headers);
+  res.end(body);
+}
+
+function sendJson(res, status, payload) {
+  send(res, status, JSON.stringify(payload), "application/json");
+}
+
+function convertBufferedResponse(out, apiType, wantStream) {
+  if (!out || apiType === "chat-completions") return out;
+  var text = Buffer.isBuffer(out.raw) ? out.raw.toString("utf8") : String(out.raw || "");
+  if (out.status < 200 || out.status >= 300) {
+    try { out.raw = Buffer.from(JSON.stringify(protocolConverters.mapUpstreamError(JSON.parse(text), out.status)), "utf8"); } catch (err) { /* preserve non-JSON error */ }
+    out.headers = Object.assign({}, out.headers, { "content-type": "application/json" });
+    return out;
+  }
+  var eventStream = /(^|\n)(event:|data:)/.test(text) || /text\/event-stream/i.test(headerContentType(out.headers));
+  try {
+    if (eventStream && apiType === "responses" && wantStream === false) {
+      var completed = protocolConverters.responsesSseToJson(text);
+      if (completed.error) out.status = 502;
+      text = JSON.stringify(completed);
+      eventStream = false;
+    } else if (eventStream) text = apiType === "responses" ? protocolConverters.responsesSseToChat(text) : protocolConverters.anthropicSseToChat(text);
+    else {
+      var parsed = JSON.parse(text);
+      parsed = apiType === "responses" ? protocolConverters.responsesToChat(parsed) : protocolConverters.anthropicToChat(parsed);
+      text = JSON.stringify(parsed);
+    }
+    out.raw = Buffer.from(text, "utf8");
+    out.headers = Object.assign({}, out.headers, { "content-type": eventStream ? "text/event-stream" : "application/json" });
+  } catch (err) { /* preserve upstream response for diagnostics */ }
+  return out;
+}
+
+function readBody(req) {
+  return new Promise(function (resolve, reject) {
+    var chunks = [];
+    var size = 0;
+    req.on("data", function (c) {
+      size += c.length;
+      if (size > 64 * 1024 * 1024) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", function () { resolve(Buffer.concat(chunks)); });
+    req.on("error", reject);
+  });
+}
+
+function recordHopSafe(entry) {
+  try {
+    requestLog.recordHop(entry);
+  } catch (err) {
+    /* never throw into the chat path */
+  }
+}
+
+function appendEventSafe(entry) {
+  try {
+    requestLog.appendEvent(entry);
+  } catch (err) {
+    /* best-effort: a warning write must never break chat */
+  }
+}
+
+function errorMessage(err, fallback) {
+  if (err && typeof err.message === "string" && err.message.trim()) return err.message;
+  return fallback || "hop failed";
+}
+
+function errorMessageWithRetries(err, fallback) {
+  var base = errorMessage(err, fallback);
+  var count = err && typeof err.hopRetries === "number" ? err.hopRetries : 0;
+  if (count > 0) {
+    return base + " [upstream-retries=" + String(count) + "]";
+  }
+  return base;
+}
+
+/**
+ * Last OpenAI finish_reason in a hop response, or undefined when the response
+ * is not OpenAI-shaped (protocol-converted providers) or carries none. The
+ * value only steers the deferred-bounce quiet window; unknown stays
+ * conservative, so a miss is harmless.
+ */
+function finishReasonFromRaw(raw) {
+  if (!raw) return undefined;
+  var text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+  var match;
+  var found;
+  var re = /"finish_reason"\s*:\s*"([a-zA-Z_]+)"/g;
+  while ((match = re.exec(text)) !== null) {
+    found = match[1];
+  }
+  return found;
+}
+
+
+function injectionHeader(headers, name) {
+  var value = headers && (headers[name] !== undefined ? headers[name] : headers[name.toLowerCase()]);
+  if (Array.isArray(value)) value = value[0];
+  return typeof value === "string" ? value.trim().slice(0, 256) : "";
+}
+
+function injectionObservedContext(req, body, conversationId) {
+  var headers = (req && req.headers) || {};
+  // Observable identity is bounded to body fields, transport headers and the
+  // host prompt path — never transcript prose (plan §9.1). The OpenAI wire
+  // protocol carries no bot identity, so the request-log contract (botId from
+  // /home/box/agent-data/agents/<uuid>/profile.json in the system prompt,
+  // chatType from <user_query>) is the only observable source the custom wrap
+  // actually provides. It stays observable-only: it can never reach the
+  // trusted gate.
+  var clues = requestLog.extractChatContext ? requestLog.extractChatContext(isRecord(body) ? body.messages : undefined) : {};
+  var observed = {
+    botId: isRecord(body) && typeof body.botId === "string" ? body.botId : injectionHeader(headers, "x-openbot-bot-id") || clues.botId || "",
+    conversationId: conversationId || "",
+    epochId: isRecord(body) && typeof body.epochId === "string" ? body.epochId : injectionHeader(headers, "x-openbot-epoch-id"),
+    chatType: isRecord(body) && typeof body.chatType === "string" ? body.chatType : injectionHeader(headers, "x-openbot-chat-type") || clues.chatType || "",
+    directChat: isRecord(body) && (body.directChat === true || body.direct_chat === true),
+    internalLane: isRecord(body) && (body.internalLane === true || body.internal_lane === true),
+  };
+  // Bounded observation fields for the request log. They are NOT trust: the
+  // gate below never consults them when a trusted host context is present.
+  if (observed.botId) body.openbotBotId = String(observed.botId).slice(0, 64);
+  if (observed.chatType) body.openbotChatType = String(observed.chatType).slice(0, 32);
+  return injectionHardening.contextFromRequest(req, body, observed);
+}
+
+function isInjectionTerminalEvent(event) {
+  if (!event || !Array.isArray(event.choices)) return false;
+  for (var i = 0; i < event.choices.length; i++) {
+    var reason = event.choices[i] && (event.choices[i].finish_reason !== undefined ? event.choices[i].finish_reason : event.choices[i].finishReason);
+    if (reason !== null && reason !== undefined && reason !== "") return true;
+  }
+  return false;
+}
+
+function parseInjectionSseData(text) {
+  var values = [];
+  var done = false;
+  var lines = String(text || "").split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (line.indexOf("data:") !== 0) continue;
+    var value = line.slice(5).trim();
+    if (!value) continue;
+    if (value === "[DONE]") {
+      done = true;
+      continue;
+    }
+    try {
+      var parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object") values.push(parsed);
+    } catch (err) {
+      // Split or malformed frames are classified at stream completion.
+    }
+  }
+  return { values: values, done: done };
+}
+
+function streamedUpstreamError(raw) {
+  var text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw || "");
+  var events = parseInjectionSseData(text).values;
+  if (!events.length) {
+    try { events = [JSON.parse(text)]; } catch (ignored) { return null; }
+  }
+  for (var i = 0; i < events.length; i++) {
+    var event = events[i];
+    if (!isRecord(event)) continue;
+    var payload = event.type === "response.failed" && isRecord(event.response) ? event.response : event;
+    if (event.type !== "response.failed" && event.type !== "error" && !isRecord(payload.error)) continue;
+    var mapped = protocolConverters.mapUpstreamError(payload, 200);
+    var failure = new Error(mapped.error.message);
+    failure.code = mapped.error.code;
+    failure.upstreamStreamFailure = true;
+    failure.upstreamError = mapped;
+    failure.httpStatus = isRetryableUpstreamError(failure) ? 503 : 502;
+    return failure;
+  }
+  return null;
+}
+
+
+function mappedInjectionFrame(apiType, frame) {
+  // Per-frame mapping must never synthesize a finish-bearing chunk or the
+  // mandatory [DONE] framing (plan §7.3): the terminal event and the [DONE]
+  // tail are delivered by the injection adapter itself -- the real upstream
+  // `message_delta` / `response.completed` event and the real `data: [DONE]`
+  // frame -- exactly once each. Whole-document conversion below keeps the
+  // default (synthesized) behavior unchanged.
+  if (apiType === "responses") return protocolConverters.responsesSseToChat(frame, { terminal: false, framing: false });
+  if (apiType === "anthropic") return protocolConverters.anthropicSseToChat(frame, { terminal: false, framing: false });
+  return frame;
+}
+
+function createInjectionSseAdapter(apiType, onEvent, onDone) {
+  var pending = "";
+  var doneSeen = false;
+  var terminalSeen = false;
+  var failed = null;
+  function consume(frame) {
+    if (!frame || !frame.trim()) return;
+    var upstreamFailure = streamedUpstreamError(frame);
+    if (upstreamFailure) { failed = upstreamFailure; return; }
+    var mapped;
+    try {
+      mapped = mappedInjectionFrame(apiType, frame);
+    } catch (err) {
+      failed = err;
+      return;
+    }
+    // With terminal/framing disabled a bare upstream [DONE] frame maps to
+    // empty output, so parse the raw frame too: the upstream [DONE] is the
+    // only framing source and must trip done exactly once (plan \u00a77.3).
+    var upstreamDone = parseInjectionSseData(frame).done;
+    var parsed = parseInjectionSseData(mapped);
+    for (var i = 0; i < parsed.values.length; i++) {
+      var event = parsed.values[i];
+      var terminal = false;
+      try { terminal = onEvent(event); } catch (err) { failed = err; return; }
+      if (terminal) terminalSeen = true;
+    }
+    if (parsed.done || upstreamDone) {
+      doneSeen = true;
+      try { onDone(terminalSeen); } catch (err) { failed = err; }
+    }
+  }
+  function feed(chunk) {
+    if (failed) return;
+    pending += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+    if (pending.length > 131072) {
+      failed = new Error("openbot-hop: injection parser frame too large");
+      return;
+    }
+    while (true) {
+      var m = pending.match(/\r?\n\r?\n/);
+      if (!m || m.index === undefined) break;
+      var end = m.index + m[0].length;
+      var frame = pending.slice(0, end);
+      pending = pending.slice(end);
+      consume(frame);
+      if (failed) return;
+    }
+  }
+  function end() {
+    if (!failed && pending.trim()) {
+      consume(pending);
+      pending = "";
+    }
+    return { done: doneSeen, terminal: terminalSeen, error: failed };
+  }
+  return { feed: feed, end: end };
+}
+
+function addInjectionTerminal(observation, event, bytes) {
+  if (!observation || !isInjectionTerminalEvent(event)) return;
+  var choice = event.choices && event.choices[0];
+  var reason = choice && (choice.finish_reason !== undefined ? choice.finish_reason : choice.finishReason);
+  observation.terminalEvents.push({ sequence: observation.terminalEvents.length + 1, finishReason: String(reason || ""), bytes: Buffer.byteLength(bytes, "utf8") });
+}
+
+function writeInjectionEvent(res, bytes) {
+  if (!res || res.writableEnded) return false;
+  try { res.write(bytes); return true; } catch (err) { return false; }
+}
+
+
+function injectionStreamAttempt(urlStr, body, key, clientRes, inbound, apiType, runtime, isSecond) {
+  return new Promise(function (resolve, reject) {
+    var req;
+    try { req = openUpstream(urlStr, body, key, inbound, apiType); } catch (err) { reject(err); return; }
+    runtime.activeReq = req;
+    var settled = false;
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      if (runtime.activeReq === req) runtime.activeReq = null;
+      reject(err);
+    }
+    function ok(value) {
+      if (settled) return;
+      settled = true;
+      if (runtime.activeReq === req) runtime.activeReq = null;
+      resolve(value);
+    }
+    req.setTimeout(isSecond ? runtime.retryTimeoutMs : TIMEOUT_MS, function () {
+      req.destroy();
+      fail(new Error("openbot-hop: upstream timeout"));
+    });
+    req.on("error", fail);
+    req.on("response", function (upstreamRes) {
+      var status = upstreamRes.statusCode || 502;
+      if (status < 200 || status >= 300) {
+        collectResponse(upstreamRes).then(function (out) {
+          ok({ attemptFailed: isRetryableUpstreamStatus(status) || status === 429, status: status, headers: upstreamRes.headers, raw: out.raw, forwarded: false });
+        }, fail);
+        return;
+      }
+      if (!looksLikeEventStream(upstreamRes.headers, true)) {
+        collectResponse(upstreamRes).then(function (out) {
+          ok({ forwarded: false, status: status, headers: out.headers, raw: out.raw });
+        }, fail);
+        return;
+      }
+      var pendingMetadata = [];
+      var pendingMetadataBytes = 0;
+      function writeFrame(bytes) {
+        if (apiType === "responses" && !clientRes.headersSent) {
+          var values = parseInjectionSseData(bytes.toString("utf8")).values;
+          var roleOnly = values.length === 1 && values[0].choices && values[0].choices.length === 1 &&
+            values[0].choices[0].delta && values[0].choices[0].delta.role &&
+            Object.keys(values[0].choices[0].delta).length === 1 && !isInjectionTerminalEvent(values[0]);
+          if (roleOnly) {
+            pendingMetadataBytes += bytes.length;
+            if (pendingMetadataBytes > 65536) throw new Error("openbot-hop: excessive stream metadata");
+            pendingMetadata.push(bytes);
+            return true;
+          }
+        }
+        // Protocol metadata may map to no client output (e.g. Responses
+        // response.created). Hold role-only metadata too, so a failure before
+        // user, reasoning or tool output remains safe to retry.
+        startEventStream(clientRes, status, headerContentType(upstreamRes.headers));
+        for (var j = 0; j < pendingMetadata.length; j++) writeInjectionEvent(clientRes, pendingMetadata[j]);
+        pendingMetadata = [];
+        return writeInjectionEvent(clientRes, bytes);
+      }
+      var observation = injectionHardening.createObservation();
+      var shouldHold = isSecond || Boolean(runtime.config && runtime.config.mode === "enforce" && runtime.config.l2 && runtime.config.l2.enabled && runtime.l2Eligible);
+      var hold = injectionHardening.createTerminalHold(function (bytes) {
+        // Always attempt replay; the hold module clears state if the socket is closed.
+        writeFrame(bytes);
+      }, observation);
+      runtime.pendingHold = hold;
+      var doneBytes = Buffer.from("data: [DONE]\n\n", "utf8");
+      var adapter = createInjectionSseAdapter(apiType, function (event) {
+        var bytes = Buffer.from("data: " + JSON.stringify(event) + "\n\n", "utf8");
+        injectionHardening.observeChatEvent(observation, event, bytes);
+        var terminal = isInjectionTerminalEvent(event);
+        if (terminal) {
+          addInjectionTerminal(observation, event, bytes);
+          if (shouldHold) hold.hold(bytes); else writeFrame(bytes);
+        } else {
+          if (!observation.firstContentAt && event.choices && event.choices[0] && event.choices[0].delta && (event.choices[0].delta.content || event.choices[0].delta.reasoning_content)) observation.firstContentAt = Date.now();
+          writeFrame(bytes);
+        }
+        return terminal;
+      }, function (hasTerminal) {
+        // The only [DONE] the client receives here is the upstream's own,
+        // relayed exactly once -- per-frame conversion no longer synthesizes
+        // framing (plan §7.3). It rides behind the terminal in the hold.
+        if (hasTerminal && shouldHold) hold.hold(doneBytes); else writeFrame(doneBytes);
+      });
+      upstreamRes.on("data", function (chunk) { adapter.feed(chunk); });
+      upstreamRes.on("end", function () {
+        var statusResult = adapter.end();
+        if (statusResult.error) {
+          try { req.destroy(); } catch (ignored) {}
+          fail(statusResult.error);
+          return;
+        }
+        injectionHardening.finalizeObservation(observation, statusResult.terminal && statusResult.done);
+        ok({ forwarded: true, status: status, headers: upstreamRes.headers, observation: observation, heldTerminal: hold, firstContentAt: observation.firstContentAt, finishReason: observation.finishReasons.length ? observation.finishReasons[observation.finishReasons.length - 1] : undefined });
+      });
+      upstreamRes.on("error", fail);
+    });
+    req.end();
+  });
+}
+
+
+function buildInjectionOutbound(baseBody, messages, route, apiType, maxCompletionTokens) {
+  var next = Object.assign({}, baseBody);
+  next.messages = Array.isArray(messages) ? messages.slice() : [];
+  if (maxCompletionTokens !== undefined) {
+    if (apiType === "responses") next.max_output_tokens = maxCompletionTokens;
+    else next.max_tokens = maxCompletionTokens;
+  }
+  applyMaxTokens(next, route.model, apiType);
+  applyMaps(next, { modelId: route.model.slug, baseUrl: route.provider.origin, maxMode: false, parameters: hopParameters(route.model) });
+  var outbound = apiType === "responses" ? protocolConverters.chatToResponses(next) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(next) : next;
+  outbound.__openbot_api_type = apiType;
+  noteWireBytes(outbound);
+  return outbound;
+}
+
+
+function mergeInjectionChatResponses(first, second) {
+  var left = isRecord(first) ? first : {};
+  var right = isRecord(second) ? second : {};
+  var leftChoice = Array.isArray(left.choices) && left.choices[0] ? left.choices[0] : {};
+  var rightChoice = Array.isArray(right.choices) && right.choices[0] ? right.choices[0] : {};
+  var leftMessage = isRecord(leftChoice.message) ? leftChoice.message : {};
+  var rightMessage = isRecord(rightChoice.message) ? rightChoice.message : {};
+  var mergedMessage = Object.assign({}, rightMessage);
+  var leftContent = leftMessage.content == null ? "" : String(leftMessage.content);
+  var rightContent = rightMessage.content == null ? "" : String(rightMessage.content);
+  mergedMessage.content = leftContent + rightContent || null;
+  if (leftMessage.reasoning_content || rightMessage.reasoning_content) mergedMessage.reasoning_content = String(leftMessage.reasoning_content || "") + String(rightMessage.reasoning_content || "");
+  if (Array.isArray(leftMessage.tool_calls) || Array.isArray(rightMessage.tool_calls)) mergedMessage.tool_calls = (Array.isArray(leftMessage.tool_calls) ? leftMessage.tool_calls : []).concat(Array.isArray(rightMessage.tool_calls) ? rightMessage.tool_calls : []);
+  var merged = Object.assign({}, left, right);
+  merged.choices = [Object.assign({}, rightChoice, { index: 0, message: mergedMessage, finish_reason: rightChoice.finish_reason !== undefined ? rightChoice.finish_reason : leftChoice.finish_reason })];
+  return merged;
+}
+
+
+async function pipeInjectedStreaming(urlStr, outboundBody, key, clientRes, inbound, apiType, runtime, route, canonicalBody) {
+  var attempts = [];
+  var attemptIndex = 0;
+  var sleepSpentMs = 0;
+  var retriesSpent = 0;
+  runtime.retryTimeoutMs = runtime.config && runtime.config.l2 ? runtime.config.l2.timeoutMs : 15000;
+  clientRes.on("close", function () {
+    if (clientRes.writableEnded) return;
+    runtime.clientClosed = true;
+    try { if (runtime.abortController) runtime.abortController.abort(); } catch (ignored) {}
+    try { if (runtime.activeReq) runtime.activeReq.destroy(); } catch (ignored) {}
+    try { if (runtime.pendingHold && runtime.pendingHold.isHeld()) runtime.pendingHold.release("client_closed"); } catch (ignored) {}
+  });
+  while (true) {
+    var started = Date.now();
+    var out;
+    try {
+      out = await injectionStreamAttempt(urlStr, outboundBody, key, clientRes, inbound, apiType, runtime, false);
+    } catch (err) {
+      if (clientRes.headersSent || !canRetryUpstreamError(err, attemptIndex, clientRes, sleepSpentMs)) {
+        attempts.push({ attempt: attemptIndex + 1, status: 0, error: errorMessage(err, "hop failed"), latencyMs: Date.now() - started, decision: "final" });
+        try {
+          // A failed first stream is not a successful EOF. Do not release
+          // an unverified held terminal or let the harness invent a finish.
+          runtime.pendingHold = null;
+          if (clientRes.headersSent && !clientRes.writableEnded) clientRes.destroy();
+        } catch (ignored) {}
+        throw tagHopRetries(err, attemptIndex);
+      }
+      var retryErrorDelay = delayBefore5xxRetryMs(attemptIndex, {}, Date.now(), sleepSpentMs);
+      if (retryErrorDelay === null) throw tagHopRetries(err, attemptIndex);
+      attempts.push({ attempt: attemptIndex + 1, status: 0, error: errorMessage(err, "hop failed"), latencyMs: Date.now() - started, decision: "retry" });
+      await sleepMs(retryErrorDelay); sleepSpentMs += retryErrorDelay; attemptIndex += 1; retriesSpent = attemptIndex; continue;
+    }
+    if (out.attemptFailed) {
+      if (clientRes.headersSent) throw new Error("openbot-hop: stream upstream failed after headers");
+      var retryKind = classifyUpstreamRetry(out.status, attemptIndex, clientRes, sleepSpentMs, out.raw);
+      var delay = retryKind === null ? null : retryDelayMs(retryKind, attemptIndex, out.headers, Date.now(), sleepSpentMs);
+      if (delay === null) {
+        attempts.push({ attempt: attemptIndex + 1, status: out.status || 0, latencyMs: Date.now() - started, decision: "final" });
+        out = convertBufferedResponse({ status: out.status || 502, headers: out.headers || {}, raw: out.raw || Buffer.alloc(0), forwarded: false, attempts: attempts, attemptCount: attempts.length }, apiType);
+        send(clientRes, out.status, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+        return out;
+      }
+      attempts.push({ attempt: attemptIndex + 1, status: out.status || 0, latencyMs: Date.now() - started, decision: "retry" });
+      await sleepMs(delay); sleepSpentMs += delay; attemptIndex += 1; retriesSpent = attemptIndex; continue;
+    }
+    attempts.push({ attempt: attemptIndex + 1, status: out.status, latencyMs: Date.now() - started, decision: "final" });
+    out.attempts = attempts; out.attemptCount = attempts.length;
+    if (retriesSpent > 0) out.hopRetries = retriesSpent;
+    if (!out.forwarded) {
+      out = convertBufferedResponse(out, apiType);
+      if (!clientRes.headersSent) send(clientRes, out.status, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+      return out;
+    }
+    runtime.firstObservation = out.observation;
+    runtime.firstHold = out.heldTerminal;
+    if (!out.observation.terminalEvents.length || !out.heldTerminal.isHeld()) {
+      if (!clientRes.writableEnded) clientRes.end();
+      injectionHardening.rememberResponse({ context: runtime.context, stateKey: runtime.stateKey, observation: out.observation, silent: injectionHardening.silentStop(out.observation) });
+      return out;
+    }
+    var l2 = await injectionHardening.runL2({
+      config: runtime.config,
+      context: runtime.context,
+      messages: runtime.canonicalMessages,
+      observation: out.observation,
+      heldTerminal: out.heldTerminal,
+      injection: runtime.injection,
+      stateKey: runtime.stateKey,
+      hostEvents: runtime.hostEvents,
+      hostEventContract: runtime.hostEventContract,
+      signal: runtime.signal,
+      abortSecond: function () { if (runtime.activeReq) runtime.activeReq.destroy(); },
+      runSecond: async function (second) {
+        var secondOutbound = buildInjectionOutbound(canonicalBody, second.messages, route, apiType, second.maxCompletionTokens);
+        try {
+          var secondOut = await injectionStreamAttempt(urlStr, secondOutbound, key, clientRes, inbound, apiType, runtime, true);
+          if (!secondOut.forwarded) throw new Error("l2 upstream status " + String(secondOut.status));
+          return { ok: true, observation: secondOut.observation, heldTerminal: secondOut.heldTerminal, hasValidTerminal: Boolean(secondOut.observation && secondOut.observation.terminalEvents.length) };
+        } catch (err) {
+          try { if (runtime.pendingHold && runtime.pendingHold.isHeld()) runtime.pendingHold.release("l2_second_failure"); } catch (ignored) {}
+          throw err;
+        }
+      },
+    });
+    runtime.injection = l2.injection;
+    if (!clientRes.writableEnded) clientRes.end();
+    return { status: out.status, headers: out.headers, raw: Buffer.alloc(0), forwarded: true, attempts: attempts, attemptCount: attempts.length, firstTokenMs: out.firstContentAt ? Math.max(0, out.firstContentAt - runtime.startedMs) : undefined, finishReason: l2.second && l2.second.observation && l2.second.observation.finishReasons.length ? l2.second.observation.finishReasons[l2.second.observation.finishReasons.length - 1] : out.finishReason, injection: l2.injection };
+  }
+}
+
+
+function queueInjectionResponse(runtime, status, headers, raw, contentType, extraHeaders) {
+  runtime.pendingResponse = { status: status, headers: headers || {}, raw: raw, contentType: contentType || "application/json", extraHeaders: extraHeaders };
+}
+
+async function processInjectedJson(out, apiType, runtime, res, req, route, key, upstream, canonicalBody) {
+  out = convertBufferedResponse(out, apiType, false);
+  if (!out || out.status < 200 || out.status >= 300) {
+    queueInjectionResponse(runtime, out.status, out.headers, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+    return out;
+  }
+  var parsed;
+  try { parsed = JSON.parse(Buffer.isBuffer(out.raw) ? out.raw.toString("utf8") : String(out.raw || "")); } catch (err) {
+    queueInjectionResponse(runtime, out.status, out.headers, out.raw, headerContentType(out.headers) || "application/json");
+    return out;
+  }
+  var observation = injectionHardening.observationFromChatResponse(parsed);
+  if (!runtime.config || runtime.config.mode !== "enforce" || !runtime.l2Eligible || !runtime.config.l2 || !runtime.config.l2.enabled) {
+    queueInjectionResponse(runtime, out.status, out.headers, out.raw, "application/json", retryAfterForwardHeaders(out.headers));
+    injectionHardening.rememberResponse({ context: runtime.context, stateKey: runtime.stateKey, observation: observation, silent: injectionHardening.silentStop(observation) });
+    return { status: out.status, headers: out.headers, raw: out.raw, attempts: out.attempts, attemptCount: out.attemptCount, finishReason: observation.finishReasons.length ? observation.finishReasons[observation.finishReasons.length - 1] : undefined, injection: runtime.injection };
+  }
+  if (observation.finishReasons.length) observation.terminalEvents.push({ sequence: 1, finishReason: observation.finishReasons[observation.finishReasons.length - 1], bytes: Buffer.byteLength(JSON.stringify(parsed), "utf8") });
+  var firstBytes = Buffer.from(JSON.stringify(parsed), "utf8");
+  var firstHold = injectionHardening.createTerminalHold(function (bytes) {
+    queueInjectionResponse(runtime, out.status, out.headers, bytes, "application/json");
+  }, observation);
+  firstHold.hold(firstBytes);
+  var l2 = await injectionHardening.runL2({
+    config: runtime.config,
+    context: runtime.context,
+    messages: runtime.canonicalMessages,
+    observation: observation,
+    heldTerminal: firstHold,
+    injection: runtime.injection,
+    stateKey: runtime.stateKey,
+    hostEvents: runtime.hostEvents,
+    hostEventContract: runtime.hostEventContract,
+    signal: runtime.signal,
+    runSecond: async function (second) {
+      var secondOutbound = buildInjectionOutbound(canonicalBody, second.messages, route, apiType, second.maxCompletionTokens);
+      var secondOut = await postUpstream(upstream, secondOutbound, key, req, apiType, res);
+      secondOut = convertBufferedResponse(secondOut, apiType, false);
+      if (!secondOut || secondOut.status < 200 || secondOut.status >= 300) throw new Error("l2 upstream status " + String(secondOut && secondOut.status));
+      var secondParsed;
+      try { secondParsed = JSON.parse(Buffer.isBuffer(secondOut.raw) ? secondOut.raw.toString("utf8") : String(secondOut.raw || "")); } catch (err) { throw new Error("l2 parse error"); }
+      var merged = mergeInjectionChatResponses(parsed, secondParsed);
+      var secondObservation = injectionHardening.observationFromChatResponse(merged);
+      if (secondObservation.finishReasons.length) secondObservation.terminalEvents.push({ sequence: 1, finishReason: secondObservation.finishReasons[secondObservation.finishReasons.length - 1], bytes: Buffer.byteLength(JSON.stringify(merged), "utf8") });
+      var secondBytes = Buffer.from(JSON.stringify(merged), "utf8");
+      var secondHold = injectionHardening.createTerminalHold(function (bytes) {
+        queueInjectionResponse(runtime, out.status, out.headers, bytes, "application/json");
+      }, secondObservation);
+      secondHold.hold(secondBytes);
+      return { ok: true, observation: secondObservation, heldTerminal: secondHold, hasValidTerminal: Boolean(secondObservation.terminalEvents.length) };
+    },
+  });
+  runtime.injection = l2.injection;
+  return { status: out.status, headers: out.headers, raw: firstBytes, attempts: out.attempts, attemptCount: out.attemptCount, injection: l2.injection, finishReason: observation.finishReasons.length ? observation.finishReasons[observation.finishReasons.length - 1] : undefined };
+}
+
+async function handleCompletions(req, res) {
+  turnLease.beginTurn();
+  var finishReason;
+  try {
+    finishReason = await handleCompletionsInner(req, res);
+  } finally {
+    turnLease.endTurn(finishReason);
+  }
+}
+
+async function handleCompletionsInner(req, res) {
+  var startedMs = Date.now();
+  var startedAt = new Date().toISOString();
+  var fields = {
+    inboundEndpoint: "/v1/chat/completions",
+    stream: false,
+  };
+  var clientMeta = {
+    userAgent: "",
+    clientName: "",
+    clientVersion: "",
+    conversationId: "",
+    origin: "",
+    requestId: "",
+  };
+  var recorded = false;
+  var injectionMetadata;
+
+  function record(extra) {
+    if (recorded) return;
+    recorded = true;
+    extra = extra || {};
+    recordHopSafe({
+      startedAt: startedAt,
+      completedAt: new Date().toISOString(),
+      latencyMs: Date.now() - startedMs,
+      inboundEndpoint: fields.inboundEndpoint,
+      stream: extra.stream === undefined ? fields.stream : extra.stream,
+      model: extra.model !== undefined ? extra.model : fields.model,
+      providerId: extra.providerId !== undefined ? extra.providerId : fields.providerId,
+      providerName: extra.providerName !== undefined ? extra.providerName : fields.providerName,
+      upstreamEndpoint: extra.upstreamEndpoint !== undefined ? extra.upstreamEndpoint : fields.upstreamEndpoint,
+      requestBody: extra.requestBody !== undefined ? extra.requestBody : fields.requestBody,
+      responseBody: extra.responseBody,
+      responseRaw: extra.responseRaw,
+      status: extra.status,
+      error: extra.error,
+      attempts: extra.attempts,
+      attemptCount: extra.attemptCount,
+      firstTokenMs: extra.firstTokenMs,
+      clientName: extra.clientName !== undefined ? extra.clientName : clientMeta.clientName,
+      clientVersion: extra.clientVersion !== undefined ? extra.clientVersion : clientMeta.clientVersion,
+      userAgent: extra.userAgent !== undefined ? extra.userAgent : clientMeta.userAgent,
+      conversationId: extra.conversationId !== undefined ? extra.conversationId : clientMeta.conversationId,
+      origin: extra.origin !== undefined ? extra.origin : clientMeta.origin,
+      requestId: extra.requestId !== undefined ? extra.requestId : clientMeta.requestId,
+      purpose: fields.purpose,
+      injection: extra.injection !== undefined ? extra.injection : injectionMetadata,
+    });
+  }
+
+  try {
+    // Gateway pause gate: fail fast with 503 before touching the body or
+    // the plan, so a paused gateway performs no upstream work at all.
+    if (readPauseState()) {
+      var paused = { error: { message: "openbot gateway paused", code: "paused" } };
+      record({
+        status: 503,
+        error: "openbot gateway paused",
+        responseBody: paused,
+      });
+      sendJson(res, 503, paused);
+      return;
+    }
+    var raw = await readBody(req);
+    // Capture header clues even when the JSON body itself is unreadable.
+    clientMeta = inboundClientMeta(req, undefined);
+    var body;
+    try {
+      body = JSON.parse(raw.toString("utf8"));
+    } catch (err) {
+      var invalid = { error: { message: "invalid json" } };
+      record({
+        status: 400,
+        error: "invalid json",
+        requestBody: raw.toString("utf8").slice(0, 8000),
+        responseBody: invalid,
+      });
+      sendJson(res, 400, invalid);
+      return;
+    }
+    if (isRecord(body)) {
+      fields.stream = body.stream === true;
+      if (typeof body.model === "string") fields.model = body.model;
+      fields.requestBody = body;
+    }
+    clientMeta = inboundClientMeta(req, body);
+    var botContext = requestLog.extractChatContext && requestLog.extractChatContext(body && body.messages);
+    if (botContext && botContext.botId && isBotPaused(botContext.botId)) {
+      var botPaused = { error: { message: "openbot bot paused", code: "bot_paused", botId: botContext.botId } };
+      record({ status: 503, error: "openbot bot paused", responseBody: botPaused });
+      sendJson(res, 503, botPaused);
+      return;
+    }
+    var plan;
+    try {
+      plan = readJson(planPath());
+    } catch (err) {
+      var missing = { error: { message: "openbot plan missing; save a provider in the UI" } };
+      record({ status: 503, error: missing.error.message, responseBody: missing });
+      sendJson(res, 503, missing);
+      return;
+    }
+    // Per-bot model override, resolved before routing. A stale assignment
+    // (model removed from the catalog) must never fail the chat: warn once
+    // per request and fall back. When the runtime already rewrote body.model
+    // to the stale value, fall back to the wildcard (global) binding.
+    var requested = body && body.model;
+    fields.purpose = body && body.openbot_internal_model === true && String(findConversationId(body)).indexOf("openbot-compaction:") === 0 ? "compaction"
+      : body && body.openbot_internal_auxiliary === true ? "auxiliary" : "chat";
+    var assignment = null;
+    var botSettings = null;
+    if (!body || body.openbot_internal_model !== true) {
+    try {
+      botSettings = botModels.readBotSettings();
+      assignment = botModels.resolveAssignment(body && body.messages, plan, botSettings);
+    } catch (err) {
+      assignment = null;
+    }
+    }
+    if (assignment && assignment.stale) {
+      appendEventSafe({
+        type: "bot-models.stale",
+        severity: "WARN",
+        message: "Bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is no longer in the catalog; using the global model.",
+        metadata: { botId: assignment.botId, modelId: assignment.modelId },
+      });
+      if (requested === assignment.modelId) {
+        var wildcardAgent = plan && plan.agents && plan.agents["*"];
+        if (wildcardAgent && typeof wildcardAgent.modelId === "string") requested = wildcardAgent.modelId;
+      }
+    } else if (assignment) {
+      requested = assignment.modelId;
+    }
+    var route = lookupRoute(plan, requested);
+    if (!route) {
+      var unknown = { error: { message: "unknown model slug" } };
+      record({ status: 400, error: unknown.error.message, responseBody: unknown });
+      sendJson(res, 400, unknown);
+      return;
+    }
+    var botReasoning = botSettings && botModels.resolveReasoning(body && body.messages, route.model, botSettings);
+    if (botReasoning && !botReasoning.stale) {
+      route = Object.assign({}, route, { model: Object.assign({}, route.model, {
+        activeReasoning: botReasoning.reasoningEffort,
+        // Legacy fast mode disables thinking before the effort map runs.
+        // An explicit bot effort must win over that model-wide shortcut.
+        parameters: Array.isArray(route.model.parameters) ? route.model.parameters.filter(function (p) { return p && p.id !== "fast"; }) : [],
+      }) });
+      // A saved choice wins over an effort left on an inbound request. The
+      // normal provider maps and protocol converter then serialize it.
+      delete body.reasoning_effort;
+      delete body.reasoning;
+      delete body.thinking;
+      delete body.enable_thinking;
+      if (isRecord(body.output_config)) {
+        body.output_config = Object.assign({}, body.output_config);
+        delete body.output_config.effort;
+      }
+    }
+    fields.model = route.model.slug;
+    fields.providerId = route.provider.id;
+    fields.providerName = route.provider.name;
+    var oauthCredential = readOpenAIOAuthCredential(route.provider.id);
+    var isOpenAIOAuth = oauthCredential !== null;
+    var apiType = protocolConverters.resolveApiType(route.model, route.provider, isOpenAIOAuth);
+    body.model = route.model.slug;
+    if (Array.isArray(body.messages)) {
+      body.messages = toOpenAIMessages(body.messages);
+      body.messages = await enrichImageReads(body.messages);
+      body.messages = await enforceImageBudget(body.messages, {
+        extraWireBytes: outboundEnvelopeBytes(body) + WIRE_HEADROOM_BYTES,
+        // The compactor needs the uncut text to retain facts and reuse its
+        // stable prefix receipt. Apply the final text wire net afterward.
+        deferTextBudget: true,
+      });
+      // Normalize every outbound tool call id before the upstream sees it:
+      // repair (inside toOpenAIMessages) fills missing ids, sanitize then
+      // truncates to <= 64 chars and restricts the charset to [a-zA-Z0-9_-].
+      // Must run at the message-assembly point so both host-stream and the
+      // direct /v1/chat/completions path are covered.
+      body.messages = sanitizeToolCallIds(body.messages);
+    }
+    var conversationId = findConversationId(body);
+    var injectionContext = injectionObservedContext(req, body, conversationId);
+    var injectionConfig = injectionHardening.readInjectionConfig();
+    var injectionPre = injectionHardening.applyPreGeneration(body.messages, {
+      config: injectionConfig,
+      context: injectionContext,
+      opening: body && body.opening === true,
+    });
+    body.messages = injectionPre.messages;
+    injectionMetadata = injectionPre.injection;
+    // Pre-flight guard, on the wire array, AFTER injection prep: no outbound
+    // message array may carry an assistant tool_calls block that is not
+    // immediately followed by ALL of its role=tool results (incident
+    // 2026-09-11: an image enrichment pass had slotted a user message between
+    // two parallel tool results and the upstream 400'd "assistant message
+    // with 'tool_calls' must be followed by tool messages"). Runs before
+    // canonicalBody/outboundBody are captured, so every api type —
+    // chat-completions, responses, anthropic — serializes this same repaired
+    // array, and the remediation second call reuses the repaired history.
+    // Deliberately after applyPreGeneration: the debt classifier must judge
+    // the transcript as the host emitted it — a synthesized "did not
+    // complete" row (TOOL_CALL_INCOMPLETE_CONTENT, excluded from execution
+    // chronology there) is a wire-shape fix, not execution chronology.
+    // Deterministic; an already-valid array is returned untouched.
+    body.messages = repairOrphanedToolCalls(body.messages);
+    var injectionRuntime = {
+      config: injectionPre.config,
+      context: injectionContext,
+      canonicalMessages: Array.isArray(body.messages) ? body.messages.slice() : [],
+      stateKey: injectionPre.stateKey,
+      l2Eligible: Boolean(injectionPre.permission && injectionPre.permission.eligible),
+      injection: injectionMetadata,
+      startedMs: startedMs,
+      hostEvents: [],
+      hostEventContract: false,
+      activeReq: null,
+      abortController: new AbortController(),
+      signal: undefined,
+    };
+    injectionRuntime.signal = injectionRuntime.abortController.signal;
+    try { if (contextTruncate && body && body.openbot_internal_model !== true) contextTruncate.applyContextTruncation(body, route.model); } catch (e) {}
+    if (Array.isArray(body.messages)) {
+      omitTextToWireBudget(body.messages, MAX_REQUEST_WIRE_BYTES - outboundEnvelopeBytes(body) - WIRE_HEADROOM_BYTES);
+      injectionRuntime.canonicalMessages = body.messages.slice();
+    }
+    var canonicalBody = Object.assign({}, body, { messages: Array.isArray(body.messages) ? body.messages.slice() : [] });
+    applyMaxTokens(body, route.model, apiType);
+    applyMaps(body, {
+      modelId: route.model.slug,
+      baseUrl: route.provider.origin,
+      maxMode: false,
+      parameters: hopParameters(route.model),
+    });
+    var outboundBody = apiType === "responses" ? protocolConverters.chatToResponses(body) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(body) : body;
+    var __cacheOrigin = String((route.provider && route.provider.origin) || "");
+    var __cacheScope = conversationId || (injectionContext && injectionContext.observed && injectionContext.observed.botId) || "";
+    if (__cacheScope && body.openbot_internal_auxiliary === true) __cacheScope += "\u0000auxiliary";
+    if (__cacheScope && (isOpenAIOAuth || /api\.openai\.com/i.test(__cacheOrigin) || (/opencode\.ai/i.test(__cacheOrigin) && apiType === "responses"))) {
+      outboundBody.prompt_cache_key = stableCacheKey(route.provider.id, __cacheScope, "");
+    }
+    outboundBody.__openbot_api_type = apiType;
+    // Converted families rebuild the body from an allow-list, so the
+    // observable-identity mirror must be stamped on the converted document
+    // too (openUpstream strips it before the upstream ever sees it).
+    if (injectionContext.observed && injectionContext.observed.botId) outboundBody.openbotBotId = injectionContext.observed.botId;
+    if (injectionContext.observed && injectionContext.observed.chatType) outboundBody.openbotChatType = injectionContext.observed.chatType;
+    // Same for the wrap-stamped conversation identity: chat-completions
+    // keeps it on the passthrough body and the converters drop it, so the
+    // converted documents get the explicit mirrors here to stay in sync
+    // with the openbotBotId/openbotChatType mirrors above. openUpstream
+    // deletes these before the upstream sees the request.
+    if (injectionContext.observed && injectionContext.observed.conversationId) outboundBody.openbotConversationId = injectionContext.observed.conversationId;
+    if (injectionContext.observed && injectionContext.observed.epochId) outboundBody.openbotEpochId = injectionContext.observed.epochId;
+    noteWireBytes(outboundBody);
+    fields.requestBody = outboundBody;
+    fields.stream = body.stream === true;
+    fields.conversationId = conversationId || fields.conversationId;
+    var requestInbound = {
+      headers: req.headers || {},
+      providerId: route.provider.id,
+      providerOrigin: route.provider.origin,
+      openaiOAuth: isOpenAIOAuth,
+      chatgptAccountId: isOpenAIOAuth ? openAIOAuthAccountId(oauthCredential) : "",
+      openaiSessionKey: isOpenAIOAuth && __cacheScope ? stableCacheKey(route.provider.id, __cacheScope, "") : "",
+      opencodeSession: String(route.provider.id).indexOf("opencode") === 0
+        ? (conversationId ? opencodeSessionId(route.provider.id, __cacheScope) : stableCacheKey(route.provider.id, "", __cacheScope))
+        : undefined,
+    };
+    var key;
+    try {
+      key = await loadKey(route.provider.id, route.provider);
+    } catch (keyErr) {
+      var refreshFailure = { error: { message: keyErr.message } };
+      record({ status: 503, error: keyErr.message, responseBody: refreshFailure });
+      sendJson(res, 503, refreshFailure);
+      return;
+    }
+    if (!key) {
+      var noSecret = { error: { message: "no secret for this provider" } };
+      record({ status: 503, error: noSecret.error.message, responseBody: noSecret });
+      sendJson(res, 503, noSecret);
+      return;
+    }
+    var upstream = resolveUpstreamUrl(route.provider, isOpenAIOAuth, apiType);
+    fields.upstreamEndpoint = upstream;
+    var out;
+    if (body.stream === true) {
+      if (injectionConfig.mode !== "off") {
+        out = await pipeInjectedStreaming(upstream, outboundBody, key, res, requestInbound, apiType, injectionRuntime, route, canonicalBody);
+        injectionMetadata = injectionRuntime.injection;
+      } else {
+        out = await pipeOrBufferUpstream(upstream, outboundBody, key, res, requestInbound, apiType === "chat-completions" ? undefined : function (raw) {
+          var text = raw.toString("utf8");
+          return Buffer.from(apiType === "responses" ? protocolConverters.responsesSseToChat(text) : protocolConverters.anthropicSseToChat(text), "utf8");
+        });
+      }
+      record({
+        status: out.status,
+        error: upstreamResultError(out),
+        responseRaw: injectionConfig.mode === "off" && Buffer.isBuffer(out.raw) ? out.raw.toString("utf8") : undefined,
+        attempts: out.attempts,
+        attemptCount: out.attemptCount,
+        firstTokenMs: out.firstTokenMs,
+        injection: injectionMetadata,
+      });
+      return out.finishReason || finishReasonFromRaw(out.raw);
+    } else {
+      out = await postUpstream(upstream, outboundBody, key, requestInbound, apiType, res);
+      if (injectionConfig.mode !== "off") {
+        out = await processInjectedJson(out, apiType, injectionRuntime, res, requestInbound, route, key, upstream, canonicalBody);
+        injectionMetadata = injectionRuntime.injection;
+      } else {
+        out = convertBufferedResponse(out, apiType, false);
+      }
+      record({
+        status: out.status,
+        error: upstreamResultError(out),
+        responseRaw: injectionConfig.mode === "off" && Buffer.isBuffer(out.raw) ? out.raw.toString("utf8") : undefined,
+        attempts: out.attempts,
+        attemptCount: out.attemptCount,
+        firstTokenMs: out.firstTokenMs,
+        injection: injectionMetadata,
+      });
+      if (injectionConfig.mode === "off") {
+        send(res, out.status, out.raw, headerContentType(out.headers) || "application/json", retryAfterForwardHeaders(out.headers));
+      } else if (injectionRuntime.pendingResponse && !res.headersSent) {
+        var pendingResponse = injectionRuntime.pendingResponse;
+        send(res, pendingResponse.status, pendingResponse.raw, pendingResponse.contentType, pendingResponse.extraHeaders);
+      }
+      return out.finishReason || finishReasonFromRaw(out.raw);
+    }
+  } catch (err) {
+    var failed = err && err.upstreamError || { error: { message: "hop failed" } };
+    var failureStatus = err && err.httpStatus || 502;
+    record({
+      status: failureStatus,
+      error: errorMessageWithRetries(err, "hop failed"),
+      responseBody: failed,
+    });
+    if (!res.headersSent) {
+      sendJson(res, failureStatus, failed);
+    } else if (!res.writableEnded && !res.destroyed) {
+      // Propagate a broken stream as a transport error. Ending normally
+      // would make the host treat an incomplete reply as successful.
+      res.destroy();
+    }
+  }
+}
+
+function retrySuffix(out) {
+  // Recovered attempts are retained in attempts/attemptCount. A retry is
+  // not itself an error on an otherwise successful response.
+  if (out && out.status >= 200 && out.status < 300) return undefined;
+  var count = out && typeof out.hopRetries === "number" ? out.hopRetries : 0;
+  return count > 0 ? "upstream-retries=" + String(count) : undefined;
+}
+
+function upstreamResultError(out) {
+  var suffix = retrySuffix(out);
+  if (out.status < 400) return suffix;
+  try {
+    var body = JSON.parse(Buffer.isBuffer(out.raw) ? out.raw.toString("utf8") : out.raw);
+    var error = body && body.error;
+    var message = typeof error === "string" ? error : error && error.message;
+    if (typeof message === "string" && message.trim()) return message.trim() + (suffix ? " [" + suffix + "]" : "");
+  } catch (ignored) { /* Non-JSON provider errors retain their status. */ }
+  return suffix || "upstream HTTP " + out.status;
+}
+
+async function handleHopRequest(req, res) {
+  var pathname = pathnameOf(req);
+  try {
+    if (req.method === "GET" && pathname === "/healthz") {
+      sendJson(res, 200, { ok: true, service: "openbot" });
+      return true;
+    }
+    if (req.method === "POST" && pathname === "/v1/chat/completions") {
+      await handleCompletions(req, res);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    if (pathname === "/v1/chat/completions") {
+      recordHopSafe({
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        inboundEndpoint: "/v1/chat/completions",
+        status: 502,
+        error: errorMessageWithRetries(err, "hop failed"),
+        responseBody: { error: { message: "hop failed" } },
+      });
+    }
+    if (!res.headersSent) {
+      sendJson(res, 502, { error: { message: "hop failed" } });
+    }
+    return true;
+  }
+}
+
+exports.handleHopRequest = handleHopRequest;
+exports.finishReasonFromRaw = finishReasonFromRaw;
+exports.sendJson = sendJson;
+exports.readPauseState = readPauseState;
+exports.pausePath = pausePath;
+exports.pauseBotsPath = pauseBotsPath;
+exports.readPauseBotsState = readPauseBotsState;
+exports.isBotPaused = isBotPaused;
+exports.inboundClientMeta = inboundClientMeta;
+exports.detectClientName = detectClientName;
+exports.parseClientVersion = parseClientVersion;
+exports.findConversationId = findConversationId;
+// Test seam: the full observed-context construction (headers + body + host
+// prompt clues) without a live HTTP request.
+exports.injectionObservedContextForTests = injectionObservedContext;
+exports.opencodeSessionId = opencodeSessionId;
+exports.loadKey = loadKey;
+exports.noteFirstContent = noteFirstContent;
+exports.lookupRoute = lookupRoute;
+exports.completionsUrl = completionsUrl;
+exports.resolveUpstreamUrl = resolveUpstreamUrl;
+exports.hopParameters = hopParameters;
+exports.hopReasoning = hopReasoning;
+exports.applyMaxTokens = applyMaxTokens;
+exports.outboundEnvelopeBytes = outboundEnvelopeBytes;
+exports.looksLikeEventStream = looksLikeEventStream;
+exports.UPSTREAM_429_RETRY = UPSTREAM_429_RETRY;
+exports.UPSTREAM_5XX_RETRY = UPSTREAM_5XX_RETRY;
+exports.parseRetryAfterMs = parseRetryAfterMs;
+exports.delayBefore429RetryMs = delayBefore429RetryMs;
+exports.delayBefore5xxRetryMs = delayBefore5xxRetryMs;
+exports.canRetryUpstream429 = canRetryUpstream429;
+exports.canRetryUpstreamStatus = canRetryUpstreamStatus;
+exports.canRetryUpstreamError = canRetryUpstreamError;
+exports.isRetryableUpstreamStatus = isRetryableUpstreamStatus;
+exports.isRetryableUpstreamError = isRetryableUpstreamError;
+exports.classifyUpstreamRetry = classifyUpstreamRetry;
+exports.retryDelayMs = retryDelayMs;

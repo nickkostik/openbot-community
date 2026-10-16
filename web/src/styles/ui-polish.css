@@ -1,0 +1,231 @@
+/* ==========================================================================
+   Polish-round additions.
+   Three page agents work in parallel on this file. Append ONLY inside your own
+   section below, never above it and never in another section: the sections are
+   the merge boundary. Prefer reusing an existing token/class over a new rule.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Section: bots (owner: the Bots page change)
+   -------------------------------------------------------------------------- */
+
+/* PROPOSED-01 — denser bot rows. The identity column becomes one baseline row
+   (name + mono id + time) and vertical padding drops 14px -> 10px. The 32px
+   .bot-row__icon tile STAYS in every row (owner decision, spec 1.1): its 32px
+   height is exactly what the model trigger already contributes, so it costs no
+   row height. The id stays in the DOM because users quote it; below 900px only
+   the name is shown. */
+.bot-row--dense { padding: 10px var(--sp-5); }
+.bot-row--dense .bot-row__main {
+  flex-direction: row; align-items: baseline; gap: var(--sp-2);
+}
+.bot-row--dense .bot-row__main .bot-row__id {
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 0 1 auto;
+}
+.bot-row--dense .bot-row__main .bot-row__time { white-space: nowrap; }
+@media (max-width: 900px) {
+  .bot-row--dense .bot-row__main .bot-row__id { display: none; }
+}
+/* Mobile keeps a 44px row floor so the checkbox and switch stay tappable. */
+@media (max-width: 768px) {
+  .bot-row--dense { min-height: 44px; }
+  .bot-row--dense .bot-row__main { flex-wrap: wrap; }
+  /* The restored 32px tile takes 44px off the identity line. Measured at 520px
+     that pushed 16 of 24 rows onto a second line (53px -> 63.8px), so below the
+     mobile floor the timestamp is the next thing to go - the id already goes at
+     900px - and every row stays one line. Deleted rows keep their only visible
+     word ("Deleted"); they have room because their timestamp is short. */
+  .bot-row--dense:not(.is-deleted) .bot-row__time { display: none; }
+}
+
+/* PROPOSED-02 — select-all moves into the card head, so the 42px
+   "Select active bots" header row disappears. The input hides exactly like
+   .checkbox's does, and keeps the same focus-visible ring on the box. */
+.bot-select-all { position: relative; display: inline-flex; align-items: center; gap: var(--sp-2); cursor: pointer; }
+.bot-select-all input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: pointer;
+}
+.bot-select-all .label { font-size: var(--text-sm); color: var(--muted); }
+.bot-select-all input:focus-visible + .checkbox__box { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* PROPOSED-03 — batch toolbar: the count is one 24px text pill (same height as
+   .mode-pill), "Set model" + "Apply" are one group, a 1px hairline separates
+   the pause pair, and every control in the bar is 32px.
+   The bar is two children only: the count pinned LEFT and ONE action cluster
+   pinned RIGHT (margin-left: auto absorbs every spare pixel, so nothing ever
+   sits in the middle). The cluster owns the hairline, so the separator travels
+   with the actions instead of drifting to the end of a wrapped line. */
+.bot-batch-bar--grouped { justify-content: space-between; padding: 10px var(--sp-5); gap: var(--sp-3); }
+.bot-batch-count {
+  display: inline-flex; align-items: center; height: 24px; padding: 0 10px;
+  border-radius: var(--r-pill); background: var(--surface-3); color: var(--ink);
+  font-size: var(--text-sm); font-weight: 600; white-space: nowrap; flex: none;
+}
+.bot-batch-actions {
+  display: inline-flex; align-items: center; gap: var(--sp-3);
+  flex: none; margin-left: auto;
+}
+.bot-batch-group { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.bot-batch-sep { width: 1px; align-self: stretch; background: var(--hairline); flex: none; }
+@media (max-width: 768px) {
+  .bot-batch-bar .btn { min-height: 44px; }
+  /* Below the mobile floor the cluster shrinks into the space left of the count
+     instead of claiming a line of its own (basis 0 keeps it on the first line),
+     wrapping its two groups internally and always flush right, so the bar never
+     scrolls sideways. The hairline goes rather than strand at a line end. */
+  .bot-batch-actions { flex: 1 1 0; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+  .bot-batch-sep { display: none; }
+}
+
+/* PROPOSED-09 — under 768px the per-row model selector used to drop to a
+   full-width second line, which pushed the pause switch onto a third. Keep the
+   identity line intact and cap the trigger so the row still fits at 520px. */
+@media (max-width: 768px) {
+  .bot-row { flex-wrap: nowrap; }
+  .bot-row .bot-row__model { flex: 0 1 auto; }
+  .bot-row .bot-row__model .listbox { min-width: 0; }
+  .bot-row .listbox__trigger { max-width: 132px; }
+}
+
+/* --------------------------------------------------------------------------
+   Section: dashboard (owner: the Dashboard/Shell change)
+   -------------------------------------------------------------------------- */
+
+/* PROPOSED-05: the official mode switch is a strong, filled action (ink is the
+   documented "strong non-save" slot), not a red text link. Under 768px it sits
+   in a .row, so it needs an explicit touch target. */
+@media (max-width: 768px) {
+  .hero-mode .row .btn--ink { min-height: 44px; }
+}
+
+/* PROPOSED-06 (owner-corrected): centre ONLY the QR code. .card__body is a
+   column flexbox (.stack) with align-items:stretch, and .qr-code has a fixed
+   200px width, so align-self is the single declaration that centres it. The URL
+   row, "Copy URL", the notice and the button row stay exactly as on main, and
+   the encode-error fallback (.qr-code-fallback) stays left-aligned with them. */
+.qr-code { align-self: center; }
+
+/* PROPOSED-06 (owner-corrected): "Stop" keeps the destructive signal but reads
+   as a real button. ghost-danger paints colour only and leaves the base
+   button's border transparent, so it rendered as bare red text. The geometry
+   below is .btn--secondary-sm's (styles.css:460) so Stop is the same height and
+   the same 1px border as "Refresh URL"; only the colour differs. Never orange
+   (reserved for the primary save CTA). */
+.btn--outline-danger {
+  height: 28px; padding: 0 10px; font-size: var(--text-sm); font-weight: 500;
+  background: var(--surface);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--hairline-strong));
+}
+.btn--outline-danger:hover:not(:disabled) { background: var(--danger-tint); }
+
+/* --------------------------------------------------------------------------
+   Section: models (owner: the Models page change)
+   -------------------------------------------------------------------------- */
+
+/* PROPOSED-07 (Models): one control size and one border weight for the provider
+   card head. The Listbox trigger is 32px with a --hairline-strong border while
+   the five actions beside it were 28px ghost-sm with a --hairline border — the
+   "some bigger, some smaller" report. The actions are raised to the picker's
+   32px/picker border; Remove stays ghost-danger so it is distinct by colour
+   only, never by size. Copy is unified in Models.tsx, not here. */
+.models-head-actions {
+  display: flex; align-items: center; gap: var(--sp-2);
+  flex-wrap: wrap; min-width: 0;
+}
+.models-head-actions .btn { border-color: var(--hairline-strong); }
+
+/* PROPOSED-08 (Models): the key state becomes an 8px dot inside the provider
+   selector instead of a standalone "Key saved" badge in the action cluster. The
+   words survive in the trigger's accessible name (Listbox keyState prop) and, in
+   the warning case, in the visible notice. Same --success/--surface pairing as
+   .health-dot--ok, so no new colour enters the system. */
+.listbox__status { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-left: auto; }
+.listbox__status--ok { background: var(--success); }
+.listbox__status--warn { background: var(--warning); }
+.listbox__trigger--with-status { padding-right: 30px; }
+
+/* PROPOSED-08, correction pass (the owner's alignment finding). Measured at
+   1280: the dot sat at left 492.83 on the 73-character provider and at 394 on
+   the other three rows, i.e. 98.83px of spread — the failure. Cause: the row's
+   sublabel (the origin URL) is a flex item with the default min-width:auto, so a
+   long URL beside a long name set the flex line to 441px inside a 350px row. The
+   row overflowed, and `.listbox__badges { margin-left:auto }` — the alignment the
+   spec relies on — resolved against the overflowing line, not against the row.
+   Let the sublabel yield and leave the name at its natural flex settings: the
+   row then always fits, and the badges/check keep their column from row one.
+   Row height and the trailing slot are untouched, so the dot column stays a
+   single column by construction. Measured on four providers of 6-73 characters,
+   the dot lands at the same left on every row (394.00 at 1280, 448.00 at 520).
+   Dry-run against the alternative `flex: 1 1 0` on the name: it also aligns, but
+   collapses a 73-character name to 0px, so it loses the name entirely. Without
+   min-width:0 the sublabel holds its 694px max-content, overflows the 350px row
+   to 441px, and pushes that row's dot to 492.83 — the rejection being fixed. */
+.models-provider-picker .listbox__option .cell-sub {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* PROPOSED-07, correction pass (the owner's "must not wrap" finding). Measured
+   at 1280: the trigger sat at top 130 while all five actions sat at top 148.39,
+   i.e. two lines, and likewise at 1152 (130 / 148.39) and 1024 (130 / 157.08) —
+   the failure. Cause: the provider block's base size was its max-content width
+   (the origin URL rendered on three lines inside a 555.08px block), so it never
+   gave the head the ~567px the action cluster needs. The spec names this block as
+   the part that gives: drop the 360px floor to min-width:0 and the flex basis to
+   0 so it absorbs exactly the leftover width, and truncate the origin on one line
+   — the ellipsis is the intended place for the pressure to go. */
+.card__head > .models-provider-picker { flex: 1 1 0; min-width: 0; }
+.models-provider-picker .origin-line {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The cluster itself never wraps and never shrinks while the desktop rule
+   applies; below the documented 768px mobile floor the card head already wraps
+   (`.card__head { flex-wrap: wrap }` at 768px) and the cluster must wrap with
+   it: five 32px actions are 558.92px wide, so at 520px an unwrapped cluster
+   ran Remove out to right 587.92 inside a 494px head and clipped it against the
+   card edge (the document never scrolled; the button was simply cut off).
+   Stacking is allowed below the floor. Wrapping puts
+   Fetch/Refresh/Edit/Replace on one line and Remove on the next, all inside the
+   card at every width measured (520, 640, 767, 768). */
+.models-head-actions { flex: none; flex-wrap: nowrap; max-width: 100%; }
+@media (max-width: 768px) {
+  .models-head-actions { flex-wrap: wrap; }
+}
+
+/* --------------------------------------------------------------------------
+   Section: settings (owner: the settings delivery-follow-up change)
+   -------------------------------------------------------------------------- */
+
+/* The card is now a product sentence, one switch and one Save. Its only muted
+   microcopy is the sub-line under the switch: 12px --muted, the same pairing as
+   .card__hint in styles.css, without that class's 4px top margin (the switch
+   group already owns the gap). */
+.delivery-card__hint { font-size: var(--text-sm); color: var(--muted); }
+
+/* One action, and it is the primary save CTA: pinned to the right edge like the
+   Recording settings card's Save. The row is the button alone, so it never
+   wraps; below the 768px mobile floor .card__body already gives the card its
+   full width and the button stays inside it. */
+.delivery-card__actions { display: flex; justify-content: flex-end; }
+
+/* Model and effort remain visible together on the Bots page. */
+.bot-row__controls { display: grid; grid-template-columns: minmax(160px, 240px) minmax(140px, 200px); gap: var(--sp-3); flex: 0 1 440px; min-width: 0; }
+.bot-row__controls .bot-row__model, .bot-row__reasoning { display: flex; flex-direction: column; align-items: stretch; min-width: 0; gap: 4px; }
+.bot-control-label { color: var(--muted); font-size: var(--text-xs); }
+.bot-row__controls .listbox { min-width: 0; }
+.bot-row__controls .listbox__trigger { width: 100%; max-width: none; }
+.bot-reasoning-modal { width: min(600px, calc(100vw - 32px)); }
+.bot-reasoning-models { max-height: 280px; overflow-y: auto; border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 12px; }
+.bot-reasoning-models > div + div { margin-top: 12px; }
+.bot-reasoning-models strong { color: var(--muted); font-size: var(--text-xs); }
+.bot-reasoning-models label { display: flex; align-items: center; gap: 8px; padding: 6px 0; overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  .bot-row--dense { flex-wrap: wrap; }
+  .bot-row__controls { order: 1; flex: 1 1 100%; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .bot-row__controls .bot-row__model { flex: initial; }
+  .bot-row__controls .listbox__trigger { max-width: none; }
+  .bot-batch-group { flex-wrap: wrap; }
+}

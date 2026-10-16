@@ -1,0 +1,185 @@
+/* Log channel pairing: hop + custom-host as one turn. Namespaced to
+   .log-pair / .log-channel so other stylesheet work can proceed. */
+
+.log-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.log-channel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.88px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.log-channel--upstream,
+.log-channel--harness,
+.log-channel--official {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.88px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.log-channel--upstream {
+  background: var(--info-tint);
+  color: var(--info);
+}
+
+.log-channel--harness {
+  background: var(--neutral-tint);
+  color: var(--ink);
+}
+
+.log-channel--official {
+  background: var(--neutral-tint);
+  color: var(--body);
+}
+
+.log-channel__hint {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.log-pair__intro {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--body);
+}
+
+.log-pair__layer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  min-width: 0;
+}
+
+.log-pair__layer-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mini-row .log-pair {
+  flex: none;
+}
+
+table.data td .log-pair {
+  white-space: normal;
+}
+
+/* Logs storage overview: hairline card row, no shadows (DESIGN.md). */
+
+.logs-stats__row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+}
+
+.logs-stats__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.logs-stats__item .k {
+  color: var(--muted);
+}
+
+.logs-stats__item .v {
+  font-weight: 600;
+}
+
+.logs-stats__spacer {
+  flex: 1 1 auto;
+}
+
+.logs-stats__note {
+  display: block;
+  padding: 0 16px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Requests / Events tabs. */
+
+.logs-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+}
+
+.logs-tab {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 5px 14px;
+  border-radius: var(--r-pill);
+}
+
+.logs-tab.is-active {
+  background: var(--neutral-tint);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Event severity pills reuse the notice palette. */
+
+.log-sev {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.88px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.log-sev--INFO {
+  background: var(--info-tint);
+  color: var(--info);
+}
+
+.log-sev--WARN {
+  background: var(--warning-tint);
+  color: var(--warning);
+}
+
+.log-sev--ERROR {
+  background: var(--danger-tint);
+  color: var(--danger-strong);
+}

@@ -1,0 +1,997 @@
+#!/usr/bin/env bash
+# OpenBot one-line installer. Run this on the Grok Bot Computer, not on a Mac.
+set -euo pipefail
+
+HOST="${OPENBOT_HOST_MAIN:-}"
+if [[ -z "$HOST" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    HOST="$(python3 - <<'PYHOST'
+import pathlib, sys
+candidates = ['/opt/sand/sand-host/host-main.cjs', '/home/box/sand-host/host-main.cjs']
+running = set()
+try:
+    for directory in pathlib.Path('/proc').iterdir():
+        if not directory.name.isdigit():
+            continue
+        try:
+            args = directory.joinpath('cmdline').read_bytes().decode(errors='replace').split('\x00')[:-1]
+            if args and pathlib.Path(args[0]).name == 'node' and args[-1] in candidates:
+                running.add(args[-1])
+        except OSError:
+            pass
+except OSError:
+    pass
+if len(running) > 1:
+    print('OpenBot: multiple native hosts are running; set OPENBOT_HOST_MAIN explicitly.', file=sys.stderr)
+    sys.exit(1)
+print(next(iter(running)) if running else next((p for p in candidates if pathlib.Path(p).is_file()), candidates[-1]))
+PYHOST
+)"
+  elif [[ -f /opt/sand/sand-host/host-main.cjs ]]; then
+    HOST=/opt/sand/sand-host/host-main.cjs
+  else
+    HOST=/home/box/sand-host/host-main.cjs
+  fi
+fi
+DATA="${OPENBOT_SAND_DATA:-/home/box/sand-data}"
+DEST="${OPENBOT_DEST:-$DATA/openbot}"
+DEFAULT_REPOSITORY="nickkostik/openbot-community"
+INSTALL_SOURCE_FILE="$DATA/openbot-install-source.json"
+NODE_VERSION="${OPENBOT_NODE_VERSION:-v22.23.3}"
+NODE_DIST="${OPENBOT_NODE_DIST:-https://nodejs.org/dist/$NODE_VERSION}"
+
+BOT_RESULT_FILE="${OPENBOT_BOT_RESULT:-$DATA/openbot-install-result.json}"
+BOT_LOG_FILE="${OPENBOT_BOT_LOG:-$DATA/openbot-install.log}"
+BOT_PID_FILE="${OPENBOT_BOT_PID:-$DATA/openbot-install.pid}"
+bot_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+bot_epoch_ms() { date +%s%3N; }
+bot_write_state() {
+  local status="$1" started="$2" finished="$3" url="$4" qr="$5" error="$6" tail_text="$7" stage="$8" summary="$9" rolled_back="${10:-}" download_source="${11:-${OPENBOT_DOWNLOAD_SOURCE:-}}" tmp="${BOT_RESULT_FILE}.$$"
+  mkdir -p "$(dirname "$BOT_RESULT_FILE")"
+  OPENBOT_INSTALL_COMMIT="${OPENBOT_INSTALL_COMMIT:-}" node -e 'const fs=require("fs");const [file,status,startedAt,finishedAt,url,qrPath,error,logTail,stage,summary,downloadMs,deployMs,restartMs,totalMs,rolledBack,downloadSource]=process.argv.slice(1);let result={};try{result=JSON.parse(fs.readFileSync(file,"utf8"));}catch{};result.status=status;result.startedAt=startedAt;if(finishedAt)result.finishedAt=finishedAt;else delete result.finishedAt;if(url)result.url=url;else delete result.url;if(qrPath)result.qrPath=qrPath;else delete result.qrPath;if(error)result.error=error;else delete result.error;if(logTail)result.logTail=logTail;else delete result.logTail;if(stage)result.progress={stage,summary:summary||"",updatedAt:new Date().toISOString()};if(process.env.OPENBOT_INSTALL_COMMIT)result.commit=process.env.OPENBOT_INSTALL_COMMIT;if(downloadSource)result.downloadSource=downloadSource;else delete result.downloadSource;if(rolledBack==="true")result.rolled_back=true;else delete result.rolled_back;if(process.env.OPENBOT_HOST_BOUNCE)result.hostBounce=process.env.OPENBOT_HOST_BOUNCE;else delete result.hostBounce;result.timings={downloadMs:Number(downloadMs)||0,deployMs:Number(deployMs)||0,restartMs:Number(restartMs)||0,totalMs:Number(totalMs)||0};fs.writeFileSync(file,JSON.stringify(result,null,2)+"\n");' "$tmp" "$status" "$started" "$finished" "$url" "$qr" "$error" "$tail_text" "$stage" "$summary" "${BOT_DOWNLOAD_MS:-0}" "${BOT_DEPLOY_MS:-0}" "${BOT_RESTART_MS:-0}" "${BOT_TOTAL_MS:-0}" "$rolled_back" "$download_source"
+  mv -f "$tmp" "$BOT_RESULT_FILE"
+}
+bot_write_running_result() {
+  bot_write_state running "$1" '' '' '' '' '' starting 'Installation worker started.'
+}
+bot_write_result() {
+  bot_write_state "$1" "$2" "$3" "$4" "$5" "$6" "$7" "${BOT_PROGRESS_STAGE:-}" "${BOT_PROGRESS_SUMMARY:-}"
+}
+bot_write_progress() {
+  BOT_PROGRESS_STAGE="$1" BOT_PROGRESS_SUMMARY="$2" bot_write_state running "${BOT_STARTED_AT:-$(bot_now)}" '' '' '' '' '' "$1" "$2"
+}
+bot_mark_stage() {
+  local stage="$1" summary="$2" now="$(bot_epoch_ms)"
+  if [[ -n "${BOT_STAGE_STARTED_MS:-}" ]]; then
+    local elapsed=$((now - BOT_STAGE_STARTED_MS))
+    case "${BOT_PROGRESS_STAGE:-}" in
+      downloading) BOT_DOWNLOAD_MS="$elapsed" ;;
+      deploying) BOT_DEPLOY_MS="$elapsed" ;;
+      restarting) BOT_RESTART_MS="$elapsed" ;;
+    esac
+  fi
+  BOT_STAGE_STARTED_MS="$now"
+  BOT_PROGRESS_STAGE="$stage"
+  BOT_PROGRESS_SUMMARY="$summary"
+  bot_write_progress "$stage" "$summary"
+}
+bot_pid_running() {
+  local pid="$(tr -d '[:space:]' <"$BOT_PID_FILE" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  ps -p "$pid" -o args= 2>/dev/null | grep -F -- '--bot-mode-worker' >/dev/null
+}
+bot_print_status() {
+  local brief=0
+  [[ "${2:-}" == "--brief" ]] && brief=1
+  if [[ ! -f "$BOT_RESULT_FILE" ]]; then
+    printf '%s\n' '===== OPENBOT BOT RESULT =====' 'OPENBOT_STATUS=not-installed' "OPENBOT_RESULT_FILE=$BOT_RESULT_FILE" 'OPENBOT_BOT_INSTRUCTION=No detached OpenBot installation has been recorded yet. Run install.sh --bot-mode to start one.' '===== END OPENBOT BOT RESULT ====='
+    return 0
+  fi
+  BOT_LOG_FILE="$BOT_LOG_FILE" BOT_PENDING_BOUNCE_FILE="$DATA/openbot-pending-bounce.json" OPENBOT_BOT_STATUS_BRIEF="$brief" node -e 'const fs=require("fs");const file=process.argv[1];let v;try{v=JSON.parse(fs.readFileSync(file,"utf8"));}catch{console.log("===== OPENBOT BOT RESULT =====\nOPENBOT_STATUS=failed\nOPENBOT_ERROR=Result file is not valid JSON.\nOPENBOT_RESULT_FILE="+file+"\n===== END OPENBOT BOT RESULT =====");process.exit(0);}const age=v.status==="running"&&v.startedAt?Date.now()-Date.parse(v.startedAt):0;const logPath=process.env.BOT_LOG_FILE||"the install log";const brief=process.env.OPENBOT_BOT_STATUS_BRIEF==="1";const lines=["===== OPENBOT BOT RESULT =====","OPENBOT_STATUS="+(v.status||"failed")];if(v.progress?.stage)lines.push("OPENBOT_PROGRESS_STAGE="+v.progress.stage);if(v.url)lines.push("OPENBOT_URL="+v.url);if(v.qrPath)lines.push("OPENBOT_QR_PATH="+v.qrPath);const pb=process.env.BOT_PENDING_BOUNCE_FILE||"";let hb="";try{if(pb&&fs.statSync(pb).isFile())hb="pending";}catch{}if(!hb&&v.hostBounce)hb=v.hostBounce==="pending"?"done":v.hostBounce;if(hb)lines.push("OPENBOT_HOST_BOUNCE="+hb);if(brief){if(v.status==="running"&&age>180000){lines.push("OPENBOT_WARNING=Installation exceeded 3 minutes; stop polling.");lines.push("OPENBOT_LOG_FILE="+logPath);let tail=v.logTail;try{tail=tail||fs.readFileSync(logPath,"utf8").split(/\r?\n/).slice(-20).join("\n");}catch{}if(tail)lines.push("OPENBOT_LOG_TAIL="+tail.replace(/\n/g,"\\n"));}if(v.status==="running")lines.push("OPENBOT_BOT_INSTRUCTION="+(age>180000?"Send the log tail to the user and stop polling.":"Relay the current stage to the user; poll --bot-status --brief no more than once more after 30-60 seconds."));else if(v.status==="success")lines.push("OPENBOT_BOT_INSTRUCTION=Send OPENBOT_URL and attach OPENBOT_QR_PATH as an image using the installed SendToUser tool."+(hb==="pending"?" The Grok Bot host restarts itself once it is idle, after your turn; do not rerun the install for it.":""));else lines.push("OPENBOT_BOT_INSTRUCTION=Tell the user the installation failed and include the log path "+logPath+".");lines.push("===== END OPENBOT BOT RESULT =====");console.log(lines.join("\n"));process.exit(0);}lines.splice(2,0,"OPENBOT_RESULT_FILE="+file);if(v.startedAt)lines.push("OPENBOT_STARTED_AT="+v.startedAt);if(v.finishedAt)lines.push("OPENBOT_FINISHED_AT="+v.finishedAt);if(v.progress?.summary)lines.push("OPENBOT_PROGRESS_SUMMARY="+v.progress.summary);if(v.commit)lines.push("OPENBOT_COMMIT="+v.commit);if(v.downloadSource)lines.push("OPENBOT_DOWNLOAD_SOURCE="+v.downloadSource);if(v.timings)for(const k of ["downloadMs","deployMs","restartMs","totalMs"])if(Number.isFinite(v.timings[k]))lines.push("OPENBOT_TIMING_"+k.replace(/Ms$/,"").toUpperCase()+"_MS="+v.timings[k]);if(age>180000)lines.push("OPENBOT_WARNING=Installation exceeded 3 minutes; include the log tail and stop polling. Check "+logPath+".");if(v.error)lines.push("OPENBOT_ERROR="+v.error);if(v.logTail)lines.push("OPENBOT_LOG_TAIL="+v.logTail.replace(/\n/g,"\\n"));if(v.status==="running")lines.push("OPENBOT_BOT_INSTRUCTION="+(age>180000?"Send the log tail to the user and stop polling.":"Run install.sh --bot-status --brief again in 30-60 seconds; relay OPENBOT_PROGRESS_STAGE and OPENBOT_PROGRESS_SUMMARY to the user before the next poll, with no extra verification."+(hb==="pending"?" A deferred Grok Bot host restart is scheduled for after this turn; do not rerun the installer for it.":"")));if(v.status==="success")lines.push("OPENBOT_BOT_INSTRUCTION=OpenBot is installed (commit "+(v.commit||"unknown")+"). Send OPENBOT_URL="+(v.url||"")+" to the user and attach OPENBOT_QR_PATH="+(v.qrPath||"")+" as an image using the installed SendToUser tool; do not expose secrets."+(hb==="pending"?" The Grok Bot host is scheduled to restart itself once it is idle; that happens after your turn, so this report is not interrupted and the install must not be rerun.":""));if(v.status==="failed")lines.push("OPENBOT_BOT_INSTRUCTION=Tell the user the installation failed; summarize OPENBOT_ERROR and OPENBOT_LOG_TAIL, include the log path "+logPath+", and retry install.sh --bot-mode. Do not claim success.");lines.push("===== END OPENBOT BOT RESULT =====");console.log(lines.join("\n"));' "$BOT_RESULT_FILE"
+}
+# Applies an armed deferred host bounce (openbot-pending-bounce.json) once
+# the host is idle. Detached on purpose: the caller — the update worker or the
+# bot itself — must never wait for the host to exit, because that host is the
+# process running the caller's turn.
+bot_finalize_running() {
+  local file="$DATA/openbot-finalize.pid"
+  [[ -f "$file" ]] || return 1
+  local pid="$(tr -d '[:space:]' <"$file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+spawn_finalize_host() {
+  local data="$1" host="$2" log="$3" cli="$4"
+  local pid_file="$data/openbot-finalize.pid"
+  [[ -f "$cli" ]] || return 0
+  local args=(--experimental-strip-types "$cli" finalize-host --host-main "$host" --sand-data "$data"
+    --wait-idle-ms "${OPENBOT_FINALIZE_IDLE_MS:-90000}"
+    --busy-wait-ms "${OPENBOT_FINALIZE_BUSY_MS:-300000}"
+    --max-wait-ms "${OPENBOT_FINALIZE_MAX_WAIT_MS:-1800000}")
+  if command -v setsid >/dev/null 2>&1; then
+    (setsid nohup node "${args[@]}" 9>&- </dev/null >>"$log" 2>&1) &
+  else
+    (nohup node "${args[@]}" 9>&- </dev/null >>"$log" 2>&1) &
+  fi
+  printf '%s\n' "$!" >"${pid_file}.tmp"
+  mv -f "${pid_file}.tmp" "$pid_file"
+}
+bot_worker_exit() {
+  local code="$?"
+  trap - EXIT
+  cleanup_install_staging
+  if [[ "${BOT_WORKER_DONE:-0}" != "1" ]]; then
+    BOT_TOTAL_MS="$(( $(bot_epoch_ms) - ${BOT_START_EPOCH_MS:-$(bot_epoch_ms)} ))"
+    bot_write_result failed "${BOT_STARTED_AT:-$(bot_now)}" "$(bot_now)" '' '' "${BOT_FAILURE_ERROR:-OpenBot detached installation exited with code $code.}" "$(tail -n 20 "$BOT_LOG_FILE" 2>/dev/null || true)" || true
+  fi
+  # A failed update can still have rewritten the host file and armed the
+  # bounce before it failed. Apply it (detached) so the box is not stranded on
+  # the previous payload while files on disk say otherwise. The pidfile guards
+  # against a second finalizer, and this only runs when a marker exists.
+  if [[ -f "$DATA/openbot-pending-bounce.json" ]] && ! bot_finalize_running; then
+    spawn_finalize_host "$DATA" "$HOST" "$BOT_LOG_FILE" "$DEST/src/cli.ts"
+  fi
+  rm -f "$BOT_PID_FILE"
+  exit "$code"
+}
+cleanup_install_staging() {
+  if [[ -n "${STAGING_DIR:-}" && "$STAGING_DIR" == "${DEST}.staging."* ]]; then
+    rm -rf "$STAGING_DIR"
+  fi
+  if [[ -n "${DOWNLOAD_TMP:-}" ]]; then
+    rm -rf "$DOWNLOAD_TMP"
+  fi
+}
+install_main() {
+local BOT_WORKER_MODE=0
+[[ "${1:-}" == "--bot-mode-worker" ]] && BOT_WORKER_MODE=1
+if [[ ! -f "$HOST" ]]; then
+  if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+    # Some Grok Bot Computers keep the host at a different path. Reconcile
+    # needs a real host file to back up and wrap, so an unusable --host-main
+    # is fatal there (the EXIT trap records the failure). A plain install
+    # keeps the long-standing refusal message.
+    echo "OpenBot: host main file is missing ($HOST); bot-mode cannot reconcile." >&2
+    exit 1
+  fi
+  echo "OpenBot installs on the Grok Bot Computer. Missing $HOST." >&2
+  echo "Do not run this script on a Mac. A laptop hop never sees a Bot turn." >&2
+  exit 1
+fi
+
+mkdir -p "$DATA"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo 'OpenBot: the Computer installer requires Python 3.' >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo 'OpenBot: the Computer installer requires flock for exclusive updates.' >&2
+  exit 1
+fi
+if [[ -L "$DATA/openbot-install.lock" ]]; then
+  echo 'OpenBot: install lock must not be a symlink.' >&2
+  exit 1
+fi
+exec 9>"$DATA/openbot-install.lock"
+if ! flock -n 9; then
+  echo 'OpenBot: another installation is in progress; no source changed.' >&2
+  exit 75
+fi
+
+ensure_node() {
+  local dest="${DATA}/node22"
+  if command -v node >/dev/null 2>&1; then
+    local major
+    major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+    if [[ "${major}" -ge 22 ]]; then
+      return 0
+    fi
+  fi
+  if [[ -x "${dest}/bin/node" ]] && [[ "$("${dest}/bin/node" -p "Number(process.versions.node.split('.')[0]) >= 22" 2>/dev/null || true)" == true ]]; then
+    export PATH="${dest}/bin:${PATH}"
+    return 0
+  fi
+  local os arch file
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}-${arch}" in
+    Linux-x86_64) file="linux-x64" ;;
+    Linux-aarch64 | Linux-arm64) file="linux-arm64" ;;
+    Darwin-arm64) file="darwin-arm64" ;;
+    Darwin-x86_64) file="darwin-x64" ;;
+    *)
+      echo "OpenBot needs Node 22+. This box has $(command -v node >/dev/null && node -v || echo none) on ${os} ${arch}." >&2
+      exit 1
+      ;;
+  esac
+  echo "OpenBot: fetching Node ${NODE_VERSION} into ${dest}" >&2
+  mkdir -p "${DATA}"
+  local tar expected actual sum_file
+  tar="$(mktemp)"
+  sum_file="${tar}.sha256"
+  curl --connect-timeout 10 --max-time 90 -fsSL -o "${tar}" "${NODE_DIST}/node-${NODE_VERSION}-${file}.tar.gz"
+  curl --connect-timeout 10 --max-time 20 -fsSL -o "$sum_file" "${NODE_DIST}/SHASUMS256.txt"
+  expected="$(awk -v name="node-${NODE_VERSION}-${file}.tar.gz" '$2 == name {print $1}' "$sum_file")"
+  actual="$(python3 - "$tar" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], 'rb') as source:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b''):
+        digest.update(chunk)
+    print(digest.hexdigest())
+PY
+)"
+  rm -f "$sum_file"
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$actual" != "$expected" ]]; then
+    rm -f "$tar"
+    echo 'OpenBot: Node archive checksum mismatch; existing Node preserved.' >&2
+    exit 1
+  fi
+  local node_stage node_previous="${DATA}/node22-previous"
+  node_stage="$(mktemp -d "${DATA}/.openbot-node.XXXXXX")"
+  if ! tar -xzf "${tar}" -C "$node_stage" --strip-components=1 ||
+    [[ "$("$node_stage/bin/node" -p "Number(process.versions.node.split('.')[0]) >= 22" 2>/dev/null || true)" != true ]]; then
+    rm -rf "$node_stage"
+    rm -f "$tar"
+    echo 'OpenBot: staged Node is invalid; existing Node preserved.' >&2
+    exit 1
+  fi
+  rm -rf "$node_previous"
+  [[ ! -e "$dest" ]] || mv -T "$dest" "$node_previous"
+  if ! mv -T "$node_stage" "$dest"; then
+    [[ ! -e "$node_previous" || -e "$dest" ]] || mv -T "$node_previous" "$dest"
+    rm -f "$tar"
+    exit 1
+  fi
+  rm -f "${tar}"
+  export PATH="${dest}/bin:${PATH}"
+}
+
+# Computer tarball installs have no .git. Stamp payload/version.json so hop can
+# send x-openbot-version. Prefer OPENBOT_COMMIT, then git in OPENBOT_SRC, then
+# the GitHub SHA for the default main tarball. A lookup miss stamps unknown.
+resolve_install_commit() {
+  if [[ -n "${OPENBOT_COMMIT:-}" ]]; then
+    if ! [[ "$OPENBOT_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      echo 'OpenBot: OPENBOT_COMMIT must be the actual archive commit.' >&2
+      return 1
+    fi
+    printf '%s' "${OPENBOT_COMMIT}"
+    return
+  fi
+  if [[ -n "${OPENBOT_SRC:-}" ]] && command -v git >/dev/null 2>&1; then
+    local src_sha="" src_root
+    src_root="$(git -C "${OPENBOT_SRC}" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$src_root" && "$(realpath -- "$src_root")" == "$(realpath -- "$OPENBOT_SRC")" ]]; then
+      src_sha="$(git -C "${OPENBOT_SRC}" rev-parse HEAD 2>/dev/null || true)"
+    fi
+    if [[ "${src_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      printf '%s' "${src_sha}"
+      return
+    fi
+  fi
+  if [[ -n "${OPENBOT_SRC:-}" ]]; then
+    node -e 'const fs=require("fs");try{const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).commit;process.stdout.write(typeof c==="string"&&/^[0-9a-fA-F]{7,40}$/.test(c)?c:"unknown");}catch{process.stdout.write("unknown");}' "$OPENBOT_SRC/payload/version.json"
+    return
+  fi
+  if [[ "${REPO_TARBALL}" == "${DEFAULT_TARBALL}" ]]; then
+    local api_sha
+    if command -v gh >/dev/null 2>&1; then
+      api_sha="$(gh api --hostname github.com "repos/$REPOSITORY/commits/$SOURCE_REF" --jq .sha 2>/dev/null || true)"
+      if [[ "${api_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        printf '%s' "$api_sha"
+        return
+      fi
+    fi
+    api_sha="$(
+      curl --connect-timeout 5 --max-time 10 --retry 0 -fsSL \
+          -H "Accept: application/vnd.github+json" \
+          -H "User-Agent: openbot-install" \
+          "https://api.github.com/repos/$REPOSITORY/commits/$SOURCE_REF" \
+        | node -e '
+          let s = "";
+          process.stdin.on("data", (d) => { s += d; });
+          process.stdin.on("end", () => {
+            try {
+              const row = JSON.parse(s);
+              if (row && typeof row.sha === "string") process.stdout.write(row.sha);
+            } catch (err) {}
+          });
+        '
+    )" || true
+    if [[ "${api_sha}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+      printf '%s' "${api_sha}"
+      return
+    fi
+  fi
+  printf '%s' "unknown"
+}
+
+stamp_payload_version() {
+  local dest="$1"
+  local commit="$2"
+  mkdir -p "${dest}/payload"
+  node -e '
+    const fs = require("fs");
+    const dest = process.argv[1];
+    const commit = process.argv[2] || "unknown";
+    fs.writeFileSync(dest, JSON.stringify({ commit }) + "\n");
+  ' "${dest}/payload/version.json" "${commit}"
+}
+
+ensure_node
+
+if ! command -v node >/dev/null; then
+  echo "OpenBot needs Node on this box." >&2
+  exit 1
+fi
+
+NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
+if [[ "$NODE_MAJOR" -lt 22 ]]; then
+  echo "OpenBot needs Node 22+. This box has $(node -v)." >&2
+  exit 1
+fi
+
+mkdir -p "$DATA"
+
+# Remember the selected fork outside the replaced source tree. Explicit source
+# settings win; a local Git checkout identifies its own repository. Corrupt
+# saved metadata is an error, never a reason to fetch the original project.
+init_install_source() {
+  local settings
+  settings="$(node - "$INSTALL_SOURCE_FILE" "$DEFAULT_REPOSITORY" <<'NODE'
+const fs = require('fs'), cp = require('child_process'), path = require('path');
+const [file, fallback] = process.argv.slice(2);
+function repo(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) || value.includes('..')) throw Error('Invalid OpenBot repository (expected owner/repository).');
+  return value;
+}
+function ref(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value) || value.includes('..') || value.endsWith('/')) throw Error('Invalid OpenBot source ref.');
+  return value;
+}
+function url(value) {
+  if (!value) return '';
+  const parsed = new URL(value);
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw Error('Archive URL must be HTTP(S) without credentials, query or fragment.');
+  return parsed.href;
+}
+function remoteRepository(value) {
+  if (typeof value !== 'string') return '';
+  return /^(?:git\+)?https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(value)?.[1] || /^git@github\.com:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(value)?.[1] || '';
+}
+try {
+  const data = path.resolve(process.env.OPENBOT_SAND_DATA || '/home/box/sand-data');
+  const dest = path.resolve(process.env.OPENBOT_DEST || path.join(data, 'openbot'));
+  if (dest === path.parse(dest).root || dest === data || data.startsWith(dest + path.sep)) throw Error('Install destination must be a source directory outside the data root itself.');
+  let saved = {};
+  try {
+    const info = fs.lstatSync(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 16384) throw Error('Source metadata must be a bounded regular file.');
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch { throw Error('Saved source metadata is not valid JSON.'); }
+    if (saved.schemaVersion !== 1) throw Error('Unsupported source metadata.');
+    repo(saved.repository); ref(saved.ref); url(saved.tarball); url(saved.archiveTarball);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  let checkout = '';
+  if (process.env.OPENBOT_SRC) {
+    const src = fs.realpathSync(process.env.OPENBOT_SRC);
+    try {
+      if (fs.realpathSync(cp.execFileSync('git', ['-C', src, 'rev-parse', '--show-toplevel'], {encoding:'utf8', stdio:['ignore','pipe','ignore']}).trim()) === src) checkout = remoteRepository(cp.execFileSync('git', ['-C', src, 'remote', 'get-url', 'origin'], {encoding:'utf8', stdio:['ignore','pipe','ignore']}).trim());
+    } catch {}
+    if (!checkout) {
+      let pkg;
+      try { pkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8')); }
+      catch { throw Error('Source package.json is not valid JSON.'); }
+      checkout = remoteRepository(typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url);
+    }
+  }
+  const repository = repo(process.env.OPENBOT_REPOSITORY || checkout || saved.repository || fallback);
+  const sourceRef = ref(process.env.OPENBOT_REF || (repository === saved.repository ? saved.ref : '') || 'main');
+  const custom = !process.env.OPENBOT_SRC && !process.env.OPENBOT_REPOSITORY;
+  const tarball = url(process.env.OPENBOT_TARBALL || (custom ? saved.tarball : '') || '');
+  const archive = url(process.env.OPENBOT_ARCHIVE_TARBALL || (custom ? saved.archiveTarball : '') || '');
+  process.stdout.write([repository, sourceRef, tarball || '-', archive || '-'].join('\n'));
+} catch (error) { console.error('OpenBot: source selection failed: ' + error.message); process.exitCode = 1; }
+NODE
+)" || return 1
+  local fields
+  mapfile -t fields <<<"$settings"
+  REPOSITORY="${fields[0]}"
+  SOURCE_REF="${fields[1]}"
+  DEFAULT_TARBALL="https://codeload.github.com/$REPOSITORY/tar.gz/refs/heads/$SOURCE_REF"
+  REPO_TARBALL="$DEFAULT_TARBALL"
+  [[ "${fields[2]}" == '-' ]] || REPO_TARBALL="${fields[2]}"
+  DEFAULT_ARCHIVE_TARBALL="https://github.com/$REPOSITORY/archive/refs/heads/$SOURCE_REF.tar.gz"
+  ARCHIVE_TARBALL="$DEFAULT_ARCHIVE_TARBALL"
+  [[ "${fields[3]}" == '-' ]] || ARCHIVE_TARBALL="${fields[3]}"
+  CUSTOM_TARBALL="${fields[2]}"
+  CUSTOM_ARCHIVE_TARBALL="${fields[3]}"
+}
+init_install_source
+
+if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+  bot_mark_stage downloading 'Fetching the OpenBot release into staging.'
+fi
+COMMIT="$(resolve_install_commit)"
+export OPENBOT_INSTALL_COMMIT="$COMMIT"
+
+DEPLOY_DIR="$DEST"
+mkdir -p "$(dirname "$DEST")"
+STAGING_DIR="$(mktemp -d "${DEST}.staging.XXXXXX")"
+DEPLOY_DIR="$STAGING_DIR"
+REUSING_EXISTING=0
+copy_source() {
+  local source="$1"
+  # Copy source, not a checkout's .git, credentials, snapshots or dependencies.
+  # Reading into a sibling stage also supports OPENBOT_SRC equal to DEST.
+  local members=() name
+  for name in src payload ui skills web scripts docs recovery/hooks package.json package-lock.json install.sh uninstall.sh LICENSE AGENTS.md DESIGN.md README.md README.zh-CN.md tsconfig.json vite.config.ts; do
+    [[ ! -e "$source/$name" ]] || members+=("$name")
+  done
+  tar -C "$source" --exclude=.git --exclude=.agents --exclude=node_modules --exclude=__pycache__ \
+    --exclude='.env' --exclude='.env.*' --exclude='*.key' --exclude='*.pem' \
+    --exclude='*.gpg' --exclude='*.db' --exclude='*.db-*' --exclude='*secrets*.json' \
+    --exclude=auth.json --exclude=gateway.json --exclude=recovery-snapshots \
+    -cf - "${members[@]}" | tar -xf - -C "$DEPLOY_DIR"
+}
+if [[ -n "${OPENBOT_SRC:-}" ]]; then
+  copy_source "$OPENBOT_SRC"
+  OPENBOT_DOWNLOAD_SOURCE=local-source
+  export OPENBOT_DOWNLOAD_SOURCE
+else
+  TMP="$(mktemp -d)"
+  DOWNLOAD_TMP="$TMP"
+  DOWNLOAD_SOURCE=""
+  DOWNLOAD_ERRORS=()
+  archive_root() {
+    # Validate before extraction, including symlinks and multi-root archives.
+    # Python is already a runtime prerequisite for the recovery hooks.
+    python3 - "$1" <<'PY'
+import pathlib, sys, tarfile
+try:
+    roots, count, size = set(), 0, 0
+    with tarfile.open(sys.argv[1], 'r:gz') as archive:
+        for member in archive:
+            name = pathlib.PurePosixPath(member.name)
+            count += 1
+            size += member.size
+            if (not name.parts or name.is_absolute() or '..' in name.parts or
+                not (member.isfile() or member.isdir()) or count > 50000 or
+                size > 256 * 1024 * 1024):
+                raise ValueError('unsupported archive member')
+            roots.add(name.parts[0])
+            if len(roots) != 1:
+                raise ValueError('archive must contain one source directory')
+    if not roots:
+        raise ValueError('empty archive')
+    print(roots.pop())
+except Exception:
+    print('OpenBot: invalid source archive; no files extracted.', file=sys.stderr)
+    sys.exit(1)
+PY
+  }
+  extract_archive() {
+    local root
+    root="$(archive_root "$1")" || return 1
+    rm -rf "$TMP/extracted"
+    mkdir -p "$TMP/extracted"
+    tar -xzf "$1" -C "$TMP/extracted" || return 1
+    RELEASE_ROOT="$TMP/extracted/$root"
+    [[ -f "$RELEASE_ROOT/package.json" ]]
+  }
+  download_source() {
+    local source="$1" url="$2" attempt http_code curl_code detail archive
+    archive="$TMP/$source.tar.gz"
+    for attempt in 1 2 3; do
+      curl_code=0
+      http_code="$(curl -sS -L -o "$archive" -w '%{http_code}' --connect-timeout 15 --max-time 90 "$url" 2>"$TMP/$source.err")" || curl_code=$?
+      if [[ "$curl_code" -eq 0 && "$http_code" =~ ^2[0-9][0-9]$ ]] && extract_archive "$archive"; then
+        DOWNLOAD_SOURCE="$source"
+        return 0
+      fi
+      detail="HTTP ${http_code:-000}"
+      [[ -s "$TMP/$source.err" ]] && detail="$detail: $(tr '\n' ' ' <"$TMP/$source.err")"
+      echo "OpenBot: download source=$source attempt=$attempt failed ($detail)." >&2
+      DOWNLOAD_ERRORS+=("$source=${http_code:-000}")
+      [[ "${http_code:-000}" == 403 || "${http_code:-000}" == 429 ]] && break
+      [[ "${http_code:-000}" =~ ^5[0-9][0-9]$ || "$curl_code" -ne 0 ]] || break
+      sleep 2
+    done
+    return 1
+  }
+  TARBALL="$REPO_TARBALL"
+  if [[ "$COMMIT" != "unknown" && "$REPO_TARBALL" == "$DEFAULT_TARBALL" ]]; then
+    TARBALL="https://codeload.github.com/$REPOSITORY/tar.gz/$COMMIT"
+    # Both download routes must name the same commit, never main on fallback.
+    if [[ "$ARCHIVE_TARBALL" == "$DEFAULT_ARCHIVE_TARBALL" ]]; then
+      ARCHIVE_TARBALL="https://github.com/$REPOSITORY/archive/$COMMIT.tar.gz"
+    fi
+  fi
+  if [[ "$CUSTOM_TARBALL" == '-' ]] && command -v gh >/dev/null 2>&1; then
+    local gh_ref="$COMMIT"
+    [[ "$gh_ref" != unknown ]] || gh_ref="$SOURCE_REF"
+    if gh api --hostname github.com "repos/$REPOSITORY/tarball/$gh_ref" >"$TMP/github-api.tar.gz" 2>"$TMP/github-api.err" && extract_archive "$TMP/github-api.tar.gz"; then
+      DOWNLOAD_SOURCE=github-api
+    fi
+  fi
+  if [[ -z "$DOWNLOAD_SOURCE" ]] && ! download_source codeload "$TARBALL"; then
+    if [[ "$REPO_TARBALL" == "$DEFAULT_TARBALL" || -n "${OPENBOT_ARCHIVE_TARBALL:-}" ]]; then
+      download_source github-archive "$ARCHIVE_TARBALL" || true
+    fi
+  fi
+  if [[ -z "$DOWNLOAD_SOURCE" ]]; then
+    if [[ -d "$DEST" && -f "$DEST/package.json" ]]; then
+      echo 'OpenBot: download failed; reused existing install.' >&2
+      DOWNLOAD_SOURCE=existing-install
+      BOT_FAILURE_ERROR="download failed; reused existing install"
+      BOT_PROGRESS_SUMMARY="download failed; reused existing install"
+      REUSING_EXISTING=1
+      rm -rf "$STAGING_DIR"
+      DEPLOY_DIR="$DEST"
+      COMMIT="$(node -e 'const fs=require("fs");try{const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).commit;process.stdout.write(typeof c==="string"&&/^[0-9a-fA-F]{7,40}$/.test(c)?c:"unknown");}catch{process.stdout.write("unknown");}' "$DEST/payload/version.json")"
+      export OPENBOT_INSTALL_COMMIT="$COMMIT"
+    else
+      DOWNLOAD_FAILURE_ERROR="OpenBot download failed: ${DOWNLOAD_ERRORS[*]}"
+      echo "$DOWNLOAD_FAILURE_ERROR" >&2
+      if [[ "${DOWNLOAD_ERRORS[*]}" =~ =[1-9][0-9][0-9] ]]; then
+        BOT_FAILURE_ERROR="$DOWNLOAD_FAILURE_ERROR"
+      else
+        unset BOT_FAILURE_ERROR
+      fi
+      exit 1
+    fi
+  fi
+  OPENBOT_DOWNLOAD_SOURCE="$DOWNLOAD_SOURCE"
+  export OPENBOT_DOWNLOAD_SOURCE
+  if [[ "${OPENBOT_TEST_DOWNLOAD_ONLY:-}" == "1" ]]; then
+    BOT_TOTAL_MS="$(( $(bot_epoch_ms) - ${BOT_START_EPOCH_MS:-$(bot_epoch_ms)} ))"
+    BOT_PROGRESS_STAGE=download BOT_PROGRESS_SUMMARY="${BOT_PROGRESS_SUMMARY:-Download source selected: $DOWNLOAD_SOURCE.}" bot_write_state success "${BOT_STARTED_AT:-$(bot_now)}" "$(bot_now)" '' '' '' '' download "${BOT_PROGRESS_SUMMARY:-Download source selected: $DOWNLOAD_SOURCE.}"
+    BOT_WORKER_DONE=1
+    exit 0
+  fi
+  if [[ "$REUSING_EXISTING" == "0" ]]; then
+    copy_source "$RELEASE_ROOT"
+  fi
+  rm -rf "$TMP"
+fi
+
+if [[ "$REUSING_EXISTING" == "0" ]]; then
+  stamp_payload_version "$DEPLOY_DIR" "$COMMIT"
+fi
+
+cd "$DEPLOY_DIR"
+if [[ "$REUSING_EXISTING" == "0" ]]; then
+  node -e 'const fs=require("fs"),path=require("path");function walk(p){for(const name of fs.readdirSync(p)){const file=path.join(p,name),info=fs.lstatSync(file);if(info.isSymbolicLink())throw Error("Source package must not contain symlinks.");if(info.isDirectory())walk(file);}}walk(process.cwd());'
+  node --experimental-strip-types --check src/cli.ts
+  node --check payload/runtime.cjs
+  node --check payload/hop-server.cjs
+fi
+
+# Vendored pngjs/jpeg-js keep image compression available offline. The local
+# engine additionally needs its exact parser dependencies, so vendored image
+# libraries alone cannot skip dependency installation. Prefer the lockfile
+# via npm ci --omit=dev, then retry the configured mirror. Missing compression
+# can degrade images; missing required parsers must refuse release activation.
+# OPENBOT_SKIP_NPM_INSTALL=1 skips the npm step (tests and offline mirrors).
+payload_vendor_compression_present() {
+  [[ -f "$DEPLOY_DIR/payload/vendor/pngjs/package.json" && -f "$DEPLOY_DIR/payload/vendor/jpeg-js/package.json" ]]
+}
+
+warn_npm_install_failed() {
+  {
+    printf '%s\\n' '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+    printf '%s\\n' 'WARN: OpenBot could not npm-install the compression libraries.'
+    printf '%s\\n' "      Reason: $1"
+    if payload_vendor_compression_present; then
+      printf '%s\\n' '      Bundled libs in payload/vendor/ cover this: image compression stays available.'
+    else
+      printf '%s\\n' '      No bundled libs found: image compression is DISABLED. The hop still'
+      printf '%s\\n' '      routes, but oversized images degrade to omit placeholders.'
+      printf '%s\\n' '      Remediation: give the box npm registry access (or set a mirror),'
+      printf '%s\\n' '      then re-run this installer.'
+    fi
+    printf '%s\\n' '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+  } >&2
+}
+
+if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+  if [[ "${OPENBOT_DOWNLOAD_SOURCE:-}" == "existing-install" ]]; then
+    bot_mark_stage deploying 'download failed; reused existing install'
+  else
+    bot_mark_stage deploying 'Release downloaded; preparing runtime dependencies.'
+  fi
+fi
+runtime_dependencies_present() {
+  node -e 'const fs=require("fs"),path=require("path");const root=process.cwd(),required=JSON.parse(fs.readFileSync("package.json","utf8")).dependencies||{};for(const name of ["acorn","eslint-scope"]){if(!required[name])continue;try{const file=require.resolve(name+"/package.json",{paths:[root]});if(JSON.parse(fs.readFileSync(file,"utf8")).version!==required[name])process.exit(1);require(require.resolve(name,{paths:[root]}));}catch{process.exit(1);}}'
+}
+if [[ "${OPENBOT_SKIP_NPM_INSTALL:-}" != "1" && "$REUSING_EXISTING" == "0" ]] && { ! payload_vendor_compression_present || ! runtime_dependencies_present; }; then
+  NPM_FLAGS=(--omit=dev --no-audit --no-fund --loglevel=error)
+  [[ "$BOT_WORKER_MODE" == "1" ]] && NPM_FLAGS+=(--prefer-offline)
+  local npm_command=install
+  [[ ! -f package-lock.json ]] || npm_command=ci
+  if ! command -v npm >/dev/null 2>&1; then
+    warn_npm_install_failed "npm is not on PATH"
+  elif ! npm "$npm_command" "${NPM_FLAGS[@]}" >/dev/null 2>&1 &&
+    ! npm "$npm_command" "${NPM_FLAGS[@]}" --registry=https://registry.npmmirror.com >/dev/null 2>&1; then
+    warn_npm_install_failed "the default npm registry and registry.npmmirror.com both failed"
+  fi
+  if ! runtime_dependencies_present; then
+    echo 'OpenBot: required local-engine parser dependencies are unavailable; previous release preserved.' >&2
+    exit 1
+  fi
+fi
+if [[ "$REUSING_EXISTING" == "0" ]]; then
+  staging_swap() {
+    local previous="$DATA/openbot-previous"
+    (
+      set -euo pipefail
+      local old_release_moved=0
+      staging_swap_exit() {
+        local code="$?"
+        trap - EXIT
+        if [[ "$code" -ne 0 && "$old_release_moved" -eq 1 && ! -e "$DEST" && -e "$previous" ]]; then
+          if mv -T "$previous" "$DEST" || mv -T "$previous" "$DEST"; then
+            bot_write_state failed "${BOT_STARTED_AT:-$(bot_now)}" "$(bot_now)" '' '' 'Staging switch failed; the previous release was rolled back successfully.' '' swapping 'Staging switch failed; rolled back to the previous release.' true || true
+          else
+            bot_write_state failed "${BOT_STARTED_AT:-$(bot_now)}" "$(bot_now)" '' '' 'Staging switch failed and the rollback could not restore the previous release.' '' swapping 'Staging switch failed; rollback was attempted but did not complete.' true || true
+          fi
+        fi
+        exit "$code"
+      }
+      trap staging_swap_exit EXIT
+      rm -rf "$previous"
+      if [[ -e "$DEST" || -L "$DEST" ]]; then
+        mv -T "$DEST" "$previous"
+        old_release_moved=1
+      fi
+      mv -T "$STAGING_DIR" "$DEST"
+      trap - EXIT
+    )
+  }
+  if ! staging_swap; then
+    # The swap function has already persisted the rollback result. Do not let
+    # the worker EXIT trap overwrite it or continue into reconcile/tunnel.
+    BOT_WORKER_DONE=1
+    exit 1
+  fi
+  cd "$DEST"
+  DEPLOY_DIR="$DEST"
+  if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+    bot_mark_stage restarting 'Staging is warm; switching the new release into place.'
+  fi
+fi
+
+rollback_release() {
+  local previous="$DATA/openbot-previous"
+  [[ "$REUSING_EXISTING" == 0 && -d "$previous" && ! -e "$STAGING_DIR" ]] || return 0
+  if mv -T "$DEST" "$STAGING_DIR" && mv -T "$previous" "$DEST"; then
+    echo 'OpenBot: activation failed; previous source release restored.' >&2
+    if [[ "$BOT_WORKER_MODE" == 1 ]]; then
+      bot_write_state failed "$BOT_STARTED_AT" "$(bot_now)" '' '' 'Activation failed; previous source release restored.' '' restarting 'Activation failed; rolled back to the previous source release.' true
+      BOT_WORKER_DONE=1
+    fi
+  else
+    echo 'OpenBot: source rollback failed; inspect the retained release directories.' >&2
+  fi
+}
+
+# Update path: an old guard daemon (pidfile lock) would otherwise keep running
+# the previous release's code, so new guard logic (e.g. hop health patrol)
+# never takes effect. Stop it unconditionally here with the freshly swapped-in
+# cli.ts (new code always knows `guard --stop`): on a custom box the daemon is
+# restarted below from the new tree; on an official box this also clears a
+# leftover daemon from a previous custom install. First installs have no
+# pidfile and skip silently. Failures never abort the install (set -euo
+# pipefail is neutralized with || true).
+stop_old_guard_for_update() {
+  local pidfile="$DATA/openbot-guard.pid"
+  [[ -f "$pidfile" ]] || return 0
+  local pid
+  pid="$(tr -d '[:space:]' <"$pidfile" 2>/dev/null || true)"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    rm -f "$pidfile" || true
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pidfile" || true
+    return 0
+  fi
+  if [[ ! -f "$HOST" ]]; then
+    # The daemon pid is live but the recorded host path is unusable on this
+    # box, so the cli-based stop would refuse. Killing the recorded pid and
+    # clearing the pidfile is the same outcome without depending on $HOST.
+    kill "$pid" 2>/dev/null || true
+    rm -f "$pidfile" || true
+    return 0
+  fi
+  node --experimental-strip-types src/cli.ts guard --stop 9>&- \
+    --host-main "$HOST" --sand-data "$DATA" >/dev/null 2>&1 || true
+}
+
+# Update path: a standalone hop-server (payload/hop-server.cjs, pidfile
+# openbot-hop.pid) is only restarted for the UI service by reconcile's
+# reloadService (uiPid); a live standalone hop keeps serving old code.
+# Stop it here so cli.ts install below brings up the new tree. The argv check
+# (hop-server must appear) guards against killing a recycled pid, otherwise
+# only the stale pidfile is removed. Unified UI mode has no standalone hop
+# and skips automatically. All failures are silent.
+stop_stale_hop_for_update() {
+  local pidfile="$DATA/openbot-hop.pid"
+  [[ -f "$pidfile" ]] || return 0
+  local pid
+  pid="$(tr -d '[:space:]' <"$pidfile" 2>/dev/null || true)"
+  if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    rm -f "$pidfile" || true
+    return 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pidfile" || true
+    return 0
+  fi
+  local args=""
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    args="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+  else
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  fi
+  if [[ "$args" == *"hop-server"* ]]; then
+    kill "$pid" 2>/dev/null || true
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt 50 ]]; do
+      sleep 0.1 2>/dev/null || true
+      waited=$((waited + 1))
+    done
+    rm -f "$pidfile" || true
+  else
+    rm -f "$pidfile" || true
+  fi
+  return 0
+}
+
+# Guard first (it patrols hop health and could otherwise restart the hop),
+# then the standalone hop. Both are no-ops on a first install.
+if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+  bot_write_progress restarting 'Release is active; stopping old workers and reconciling once.'
+fi
+stop_old_guard_for_update || true
+stop_stale_hop_for_update || true
+
+# Bot-mode is a self-upgrade: this worker was started by a bot turn that runs
+# inside the host process (host-main.cjs). A payload change rewrites the host
+# file, and the default path then SIGTERMs that host from inside the very turn
+# that asked for the upgrade, so the bot goes silent before it can report the
+# result. OPENBOT_DEFER_HOST_BOUNCE=1 makes reconcile arm a pending marker
+# instead; the finalizer spawned after a successful tunnel applies it once the
+# host is idle. A CLI-direct install (a human shell, not a host child) keeps
+# the immediate bounce and its previous output byte for byte.
+OPENBOT_HOST_BOUNCE="disabled"
+if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+  BOT_RECONCILE_JSON="$DATA/openbot-reconcile.json"
+  if OPENBOT_DEFER_HOST_BOUNCE=1 node --experimental-strip-types src/cli.ts install 9>&- \
+    --host-main "$HOST" --sand-data "$DATA" --json >"$BOT_RECONCILE_JSON"; then
+    OPENBOT_HOST_BOUNCE="$(node -e '
+      const fs = require("fs");
+      try {
+        const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        process.stdout.write(value && value.hostBounce === "deferred" ? "pending" : "disabled");
+      } catch (err) {
+        process.stdout.write("disabled");
+      }
+    ' "$BOT_RECONCILE_JSON")"
+  else
+    echo "OpenBot: reconcile failed during the detached update." >&2
+    rollback_release
+    exit 1
+  fi
+  export OPENBOT_HOST_BOUNCE
+else
+  if ! node --experimental-strip-types src/cli.ts install --host-main "$HOST" --sand-data "$DATA" 9>&-; then
+    rollback_release
+    exit 1
+  fi
+fi
+if [[ "$REUSING_EXISTING" == 0 ]]; then
+  node - "$INSTALL_SOURCE_FILE" "$REPOSITORY" "$SOURCE_REF" "$COMMIT" "$OPENBOT_DOWNLOAD_SOURCE" "$CUSTOM_TARBALL" "$CUSTOM_ARCHIVE_TARBALL" <<'NODE'
+const fs=require('fs');
+const [file,repository,ref,commit,download,tarball,archive]=process.argv.slice(2);
+const value={schemaVersion:1,repository,ref,commit,sourceType:download==='local-source'?'local':tarball!=='-'?'tarball':'github'};
+if(tarball!=='-')value.tarball=tarball;
+if(archive!=='-')value.archiveTarball=archive;
+const temporary=file+'.'+process.pid;
+try { fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temporary,file); }
+finally { try {fs.unlinkSync(temporary);} catch(error) {if(error.code!=='ENOENT')throw error;} }
+NODE
+fi
+if [[ "$BOT_WORKER_MODE" == "1" ]]; then
+  bot_mark_stage tunnel 'The host is ready; ensuring the tunnel stays available.'
+fi
+
+# Start the in-project guard daemon when the box is custom so drift heals
+# without an external scheduler. It never starts on official, never writes the
+# official mode token, and never reconciles an official desired state. A live
+# daemon makes a second start a no-op (pidfile lock), so re-running install
+# stays idempotent. nohup + detached stdio keep the daemon alive after this
+# script exits.
+#
+# The patrol interval is passed explicitly. Without it every install reset the
+# daemon to the default, so a box tuned to a faster (or slower) patrol silently
+# lost that setting. Precedence, highest first: OPENBOT_GUARD_INTERVAL (minutes),
+# the value persisted in $DATA/openbot-guard-interval, the CLI default. One
+# minute is the point of the patrol: it reads two files, and the drift window it
+# closes is the time the box sits on stock Grok after a repair is due.
+guard_interval_arg() {
+  local interval="${OPENBOT_GUARD_INTERVAL:-}"
+  if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+    interval=""
+    if [[ -f "$DATA/openbot-guard-interval" ]]; then
+      interval="$(tr -d '[:space:]' <"$DATA/openbot-guard-interval" 2>/dev/null || true)"
+    fi
+  fi
+  if [[ "$interval" =~ ^[0-9]+$ ]] && [[ "$interval" -ge 1 ]]; then
+    printf '%s' "$interval"
+  fi
+}
+if [[ "$(tr -d '[:space:]' <"$DATA/openbot-mode" 2>/dev/null)" == "custom" ]]; then
+  GUARD_INTERVAL="$(guard_interval_arg)"
+  if [[ -n "$GUARD_INTERVAL" ]]; then
+    nohup node --experimental-strip-types src/cli.ts guard --daemon 9>&- \
+      --host-main "$HOST" --sand-data "$DATA" --interval "$GUARD_INTERVAL" </dev/null >/dev/null 2>&1 &
+  else
+    nohup node --experimental-strip-types src/cli.ts guard --daemon 9>&- \
+      --host-main "$HOST" --sand-data "$DATA" </dev/null >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null || true
+fi
+
+if [[ "${1:-}" == "--bot-mode-worker" ]]; then
+  BOT_QR_PATH="${OPENBOT_BOT_QR_PATH:-/tmp/openbot-install-qr.png}"
+  BOT_RESULT="$(mktemp)"
+  BOT_URL=""
+  BOT_TUNNEL_ERROR=""
+  for BOT_ATTEMPT in 1 2 3; do
+    bot_write_progress tunnel "Tunnel attempt ${BOT_ATTEMPT}/3."
+    # --host-main/--sand-data are explicit like every other cli call in this
+    # file: the CLI defaults to /home/box/..., so a box installed anywhere
+    # else would have its tunnel reconcile refuse with host-missing.
+    if OPENBOT_TUNNEL=cloudflare node --experimental-strip-types src/cli.ts tunnel on --json 9>&- \
+      --host-main "$HOST" --sand-data "$DATA" >"$BOT_RESULT"; then
+      BOT_URL="$(node -e '
+        const fs = require("fs");
+        try {
+          const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+          const url = value?.snapshot?.tunnel?.url;
+          if (typeof url === "string" && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(url)) process.stdout.write(url);
+        } catch {}
+      ' "$BOT_RESULT")"
+      if [[ -n "$BOT_URL" ]]; then
+        break
+      fi
+      BOT_TUNNEL_ERROR="Tunnel command succeeded but returned no trycloudflare URL."
+    else
+      BOT_TUNNEL_ERROR="Tunnel attempt ${BOT_ATTEMPT} failed."
+    fi
+    sleep 2
+  done
+
+  if [[ -z "$BOT_URL" ]]; then
+    rm -f "$BOT_RESULT"
+    echo "OpenBot bot-mode could not obtain a Cloudflare Tunnel URL after 3 attempts." >&2
+    echo "${BOT_TUNNEL_ERROR:-Check $DATA/openbot-tunnel.log and retry with: openbot tunnel on}" >&2
+    echo "The local control page may still be available at http://127.0.0.1:9280." >&2
+    # The host file was already rewritten and the bounce armed; a failed
+    # tunnel must not strand the box on the previous payload. The EXIT trap
+    # covers this too; doing it here keeps the log line next to the failure.
+    if [[ -f "$DATA/openbot-pending-bounce.json" ]] && ! bot_finalize_running; then
+      spawn_finalize_host "$DATA" "$HOST" "$BOT_LOG_FILE" "$DEST/src/cli.ts"
+    fi
+    exit 1
+  fi
+
+  if ! node --experimental-strip-types src/cli.ts qrcode --text "$BOT_URL" --out "$BOT_QR_PATH" >/dev/null; then
+    rm -f "$BOT_RESULT"
+    echo "OpenBot bot-mode obtained $BOT_URL but could not write QR PNG to $BOT_QR_PATH." >&2
+    echo "Retry with OPENBOT_BOT_QR_PATH set to a writable path." >&2
+    if [[ -f "$DATA/openbot-pending-bounce.json" ]] && ! bot_finalize_running; then
+      spawn_finalize_host "$DATA" "$HOST" "$BOT_LOG_FILE" "$DEST/src/cli.ts"
+    fi
+    exit 1
+  fi
+  rm -f "$BOT_RESULT"
+  BOT_TOTAL_MS="$(( $(bot_epoch_ms) - ${BOT_START_EPOCH_MS:-$(bot_epoch_ms)} ))"
+  # The payload change rewrote the host file but deliberately did not SIGTERM
+  # the host: that host is running the bot turn that asked for this upgrade.
+  # Hand the bounce to a detached finalizer, which applies it once the host is
+  # idle. This runs before the success write so the result file records
+  # hostBounce=pending; the worker still returns immediately and the bot
+  # reports the URL/QR first.
+  if [[ -f "$DATA/openbot-pending-bounce.json" ]] && ! bot_finalize_running; then
+    spawn_finalize_host "$DATA" "$HOST" "$BOT_LOG_FILE" "$DEST/src/cli.ts"
+    export OPENBOT_HOST_BOUNCE=pending
+  fi
+
+  # Only promise a host restart when one is actually scheduled: with no wrap
+  # change (first install, official box, or an unchanged payload) the host file
+  # was not touched at all and saying otherwise would be wrong. "done" cannot
+  # come from this path (reconcile reports deferred or none here); it is kept
+  # for the same wording used by --bot-status.
+  BOT_BOUNCE_NOTE=""
+  case "${OPENBOT_HOST_BOUNCE:-disabled}" in
+    pending|done)
+      BOT_BOUNCE_NOTE=" The Grok Bot host restarts itself once it is idle; that restart is scheduled for after your turn, so your report is not interrupted and no rerun is needed."
+      ;;
+    *)
+      BOT_BOUNCE_NOTE=" This upgrade did not change the host file, so nothing restarts and no action is needed."
+      ;;
+  esac
+  cat <<EOF
+
+===== OPENBOT BOT RESULT =====
+OPENBOT_URL=$BOT_URL
+OPENBOT_QR_PATH=$BOT_QR_PATH
+OPENBOT_COMMIT=$COMMIT
+OPENBOT_HOST_BOUNCE=${OPENBOT_HOST_BOUNCE:-disabled}
+OPENBOT_BOT_INSTRUCTION=OpenBot is installed (commit $COMMIT). Send OPENBOT_URL=$BOT_URL to the user and attach OPENBOT_QR_PATH=$BOT_QR_PATH as an image using the installed SendToUser tool; do not expose secrets.$BOT_BOUNCE_NOTE
+===== END OPENBOT BOT RESULT =====
+EOF
+  # Success is the completion signal consumed by status pollers. Publish it
+  # after the final log record, so readers cannot observe success with an
+  # empty/incomplete receipt while the detached worker is still printing.
+  BOT_PROGRESS_STAGE=qr BOT_PROGRESS_SUMMARY='Tunnel is ready; QR code generated.' bot_write_state success "$BOT_STARTED_AT" "$(bot_now)" "$BOT_URL" "$BOT_QR_PATH" "" "" qr 'Tunnel is ready; QR code generated.'
+  BOT_WORKER_DONE=1
+fi
+
+}
+if [[ "${1:-}" == "--bot-status" ]]; then
+  bot_print_status "$@"
+  exit 0
+fi
+if [[ "${1:-}" == "--bot-finalize" ]]; then
+  # Manual fallback for the deferred host bounce: ask for it now and return
+  # immediately. It is still gated on the host being idle, so a bot turn that
+  # calls this never kills itself.
+  if [[ ! -f "$DATA/openbot-pending-bounce.json" ]]; then
+    printf '%s\n' '===== OPENBOT BOT RESULT =====' 'OPENBOT_STATUS=not-installed' 'OPENBOT_HOST_BOUNCE=disabled' 'OPENBOT_BOT_INSTRUCTION=No deferred Grok Bot host restart is pending; nothing to do.' '===== END OPENBOT BOT RESULT ====='
+    exit 0
+  fi
+  if ! bot_finalize_running; then
+    spawn_finalize_host "$DATA" "$HOST" "$BOT_LOG_FILE" "$DEST/src/cli.ts"
+  fi
+  printf '%s\n' '===== OPENBOT BOT RESULT =====' 'OPENBOT_STATUS=started' 'OPENBOT_HOST_BOUNCE=pending' 'OPENBOT_BOT_INSTRUCTION=The Grok Bot host will restart once it is idle; this command returns immediately and must not be waited on. Report any installed URL and QR to the user now.' '===== END OPENBOT BOT RESULT ====='
+  exit 0
+fi
+if [[ "${1:-}" == "--bot-mode" ]]; then
+  mkdir -p "$DATA"
+  if bot_pid_running; then
+    printf '%s\n' '===== OPENBOT BOT RESULT =====' 'OPENBOT_STATUS=started' "OPENBOT_RESULT_FILE=$BOT_RESULT_FILE" "OPENBOT_LOG_FILE=$BOT_LOG_FILE" 'OPENBOT_BOT_INSTRUCTION=SendToUser now: installation has started and should finish in about 15-60 seconds. Then poll --bot-status --brief at most twice, 30-60 seconds apart; do not run extra verification.' '===== END OPENBOT BOT RESULT ====='
+    exit 0
+  fi
+  rm -f "$BOT_PID_FILE"
+  BOT_STARTED_AT="$(bot_now)"
+  BOT_START_EPOCH_MS="$(bot_epoch_ms)"
+  export BOT_RESULT_FILE BOT_LOG_FILE BOT_PID_FILE BOT_STARTED_AT BOT_START_EPOCH_MS
+  bot_write_running_result "$BOT_STARTED_AT"
+  # The worker runs this same file in a child shell. It needs the config
+  # variables (HOST, DATA, ...) that install_main reads, the bot_* helper
+  # functions, and BOT_WORKER_DONE=1 semantics inside bot_worker_exit.
+  export HOST DATA DEST DEFAULT_REPOSITORY INSTALL_SOURCE_FILE NODE_DIST NODE_VERSION
+  export -f bot_now bot_epoch_ms bot_write_state bot_write_running_result bot_write_result bot_write_progress bot_mark_stage bot_pid_running bot_print_status bot_worker_exit bot_finalize_running spawn_finalize_host cleanup_install_staging install_main
+  (setsid nohup bash -euo pipefail -c 'trap bot_worker_exit EXIT; BOT_WORKER_DONE=0; install_main --bot-mode-worker' </dev/null >>"$BOT_LOG_FILE" 2>&1) &
+  printf '%s\n' "$!" >"${BOT_PID_FILE}.tmp"
+  mv -f "${BOT_PID_FILE}.tmp" "$BOT_PID_FILE"
+  printf '%s\n' '===== OPENBOT BOT RESULT =====' 'OPENBOT_STATUS=started' "OPENBOT_RESULT_FILE=$BOT_RESULT_FILE" "OPENBOT_LOG_FILE=$BOT_LOG_FILE" 'OPENBOT_BOT_INSTRUCTION=SendToUser now: installation has started and should finish in about 15-60 seconds. Then poll --bot-status --brief at most twice, 30-60 seconds apart; do not run extra verification.' '===== END OPENBOT BOT RESULT ====='
+  exit 0
+fi
+if [[ "${1:-}" == "--bot-mode-worker" ]]; then
+  # Foreground worker runs (direct --bot-mode-worker invocation) previously
+  # had no EXIT trap, so any failure left the result file at running. Attach
+  # the same trap the detached child uses so every failure path records
+  # status=failed before the process exits.
+  BOT_STARTED_AT="$(bot_now)"
+  BOT_START_EPOCH_MS="$(bot_epoch_ms)"
+  export BOT_RESULT_FILE BOT_LOG_FILE BOT_PID_FILE BOT_STARTED_AT BOT_START_EPOCH_MS
+  trap bot_worker_exit EXIT
+else
+  trap cleanup_install_staging EXIT
+fi
+install_main "$@"

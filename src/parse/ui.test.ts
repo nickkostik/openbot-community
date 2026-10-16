@@ -1,0 +1,660 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { catalogAfterSave, parseUiProviderSave } from "./ui.ts";
+import { boxPathsFrom } from "../supervisor/paths.ts";
+import { parseUpstreamOrigin } from "./argv.ts";
+import { HIGH_AGENT_MAX_TOKENS, type Catalog } from "../domain/types.ts";
+import { makeModel } from "../domain/model.ts";
+import { parseModelId, parseModelSlug } from "../supervisor/plan.ts";
+import { parseProviderId } from "../supervisor/secrets.ts";
+
+function paths() {
+  return boxPathsFrom({ repoRoot: "/tmp/openbot", sandData: "/tmp/openbot-data" });
+}
+
+function zhipuCatalog(): Catalog {
+  const providerId = parseProviderId("zhipu");
+  const modelId = parseModelId("zhipu:glm-5.3-flash");
+  return {
+    providers: [
+      {
+        id: providerId,
+        name: "Zhipu",
+        origin: parseUpstreamOrigin("https://open.bigmodel.cn/api/paas/v4"),
+        maxTokensDefault: HIGH_AGENT_MAX_TOKENS,
+        mapFile: "provider-maps.cjs",
+      },
+    ],
+    models: [makeModel({ id: modelId, providerId, slug: parseModelSlug("glm-5.3-flash") })],
+    bindings: [{ conversation: { kind: "wildcard" }, modelId }],
+  };
+}
+
+function twoProviderCatalog(): Catalog {
+  const catalog = zhipuCatalog();
+  const openaiId = parseProviderId("openai");
+  const gpt = parseModelId("openai:gpt-4.1");
+  return {
+    providers: [
+      ...catalog.providers,
+      {
+        id: openaiId,
+        name: "OpenAI",
+        origin: parseUpstreamOrigin("https://api.openai.com/v1"),
+        maxTokensDefault: HIGH_AGENT_MAX_TOKENS,
+        mapFile: "provider-maps.cjs",
+      },
+    ],
+    models: [...catalog.models, makeModel({ id: gpt, providerId: openaiId, slug: parseModelSlug("gpt-4.1") })],
+    bindings: catalog.bindings,
+  };
+}
+
+test("UI custom save keeps the secret off DesiredState", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "custom",
+      name: "Zhipu",
+      origin: "https://open.bigmodel.cn/api/paas/v4",
+      modelSlug: "glm-5.3-flash",
+      secret: "sk-live",
+    },
+    paths(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  assert.equal("secret" in parsed.desired, false);
+  if (parsed.desired.kind === "custom") {
+    const binding = parsed.desired.catalog.bindings[0];
+    assert.ok(binding);
+    assert.equal("apiKey" in binding, false);
+    assert.equal("hopBaseUrl" in binding, false);
+    const model = parsed.desired.catalog.models[0];
+    assert.equal(model?.contextTokens, 128000);
+    assert.equal(model?.maxOutputTokens, HIGH_AGENT_MAX_TOKENS);
+    assert.equal(model?.activeReasoning, "default");
+    assert.deepEqual(model?.modalities, ["text"]);
+    assert.equal(parsed.desired.expose.kind, "loopback");
+  }
+  assert.equal(parsed.secret?.bytes, "sk-live");
+});
+
+test("upsert-provider keeps an existing origin in the catalog", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-provider",
+      name: "OpenAI",
+      origin: "https://api.openai.com/v1",
+      modelSlug: "gpt-4.1",
+      secret: "sk-openai",
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 2);
+  assert.equal(parsed.desired.catalog.models.length, 2);
+  const used = parsed.desired.catalog.bindings[0];
+  assert.equal(used?.modelId, "openai:gpt-4.1");
+});
+
+test("upsert-provider with an empty model slug saves a zero-model provider", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-provider",
+      name: "OpenAI",
+      origin: "https://api.openai.com/v1",
+      modelSlug: "",
+      secret: "sk-openai",
+    },
+    paths(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 1);
+  assert.equal(parsed.desired.catalog.providers[0]?.id, "openai");
+  assert.equal(parsed.desired.catalog.models.length, 0);
+  assert.equal(parsed.desired.catalog.bindings.length, 0);
+  assert.equal(parsed.secret?.bytes, "sk-openai");
+});
+
+test("upsert-provider stores context, output, reasoning levels, and modalities", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-provider",
+      name: "OpenAI",
+      origin: "https://api.openai.com/v1",
+      modelSlug: "gpt-4.1",
+      secret: "sk-openai",
+      contextTokens: 200000,
+      maxOutputTokens: 8192,
+      reasoningLevels: ["none", "low", "high"],
+      modalities: ["text", "image"],
+    },
+    paths(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  const model = parsed.desired.catalog.models[0];
+  assert.equal(model?.contextTokens, 200000);
+  assert.equal(model?.maxOutputTokens, 8192);
+  assert.deepEqual(model?.reasoningLevels, ["default", "none", "low", "high"]);
+  assert.equal(model?.activeReasoning, "default");
+  assert.deepEqual(model?.modalities, ["text", "image"]);
+});
+
+test("upsert-model updates limits without dropping the wildcard", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-model",
+      providerId: "zhipu",
+      slug: "glm-5.3-flash",
+      contextTokens: 96000,
+      maxOutputTokens: 4096,
+      reasoningLevels: ["low", "high"],
+      modalities: ["text", "video"],
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  const model = parsed.desired.catalog.models[0];
+  assert.equal(model?.contextTokens, 96000);
+  assert.equal(model?.maxOutputTokens, 4096);
+  assert.deepEqual(model?.reasoningLevels, ["default", "low", "high"]);
+  assert.equal(model?.activeReasoning, "default");
+  assert.deepEqual(model?.modalities, ["text", "video"]);
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "zhipu:glm-5.3-flash");
+});
+
+test("upsert-model adds a new slug without switching the wildcard", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-model",
+      providerId: "zhipu",
+      slug: "glm-5.3",
+      contextTokens: 200000,
+      maxOutputTokens: 65536,
+      reasoningLevels: ["none", "low", "medium", "high"],
+      modalities: ["text", "image"],
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.models.length, 2);
+  const added = parsed.desired.catalog.models.find((row) => row.slug === "glm-5.3");
+  assert.equal(added?.contextTokens, 200000);
+  assert.equal(added?.maxOutputTokens, 65536);
+  assert.deepEqual(added?.reasoningLevels, ["default", "none", "low", "medium", "high"]);
+  assert.deepEqual(added?.modalities, ["text", "image"]);
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "zhipu:glm-5.3-flash");
+});
+
+test("use-model switches the wildcard without dropping providers", () => {
+  const parsed = parseUiProviderSave({ kind: "use-model", modelId: "openai:gpt-4.1" }, paths(), twoProviderCatalog());
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 2);
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("use-model records the selected reasoning level", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "use-model", modelId: "openai:gpt-4.1", reasoning: "high" },
+    paths(),
+    twoProviderCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  const model = parsed.desired.catalog.models.find((row) => row.id === "openai:gpt-4.1");
+  assert.equal(model?.activeReasoning, "high");
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("use-model records Off as none when default is already listed", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "use-model", modelId: "zhipu:glm-5.3-flash", reasoning: "none" },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.models[0]?.activeReasoning, "none");
+});
+
+test("use-model ignores a reasoning level the model does not list", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "use-model", modelId: "zhipu:glm-5.3-flash", reasoning: "xhigh" },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.models[0]?.activeReasoning, "default");
+});
+
+test("official does not request a catalog wipe", () => {
+  const parsed = parseUiProviderSave({ kind: "official" }, paths(), zhipuCatalog());
+  assert.equal(parsed.desired.kind, "official");
+  assert.equal(parsed.catalogWrite, undefined);
+});
+
+test("official keeps a saved Cloudflare expose", () => {
+  const parsed = parseUiProviderSave({ kind: "official" }, paths(), zhipuCatalog(), {
+    expose: { kind: "cloudflare-quick" },
+  });
+  assert.equal(parsed.desired.kind, "official");
+  if (parsed.desired.kind !== "official") {
+    return;
+  }
+  assert.equal(parsed.desired.expose.kind, "cloudflare-quick");
+});
+
+test("set-expose on custom stays custom", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "set-expose", expose: "cloudflare" },
+    paths(),
+    zhipuCatalog(),
+    { mode: "custom" },
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.expose.kind, "cloudflare-quick");
+});
+
+test("set-expose on official stays official", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "set-expose", expose: "off" },
+    paths(),
+    zhipuCatalog(),
+    { mode: "official", expose: { kind: "cloudflare-quick" } },
+  );
+  assert.equal(parsed.desired.kind, "official");
+  if (parsed.desired.kind !== "official") {
+    return;
+  }
+  assert.equal(parsed.desired.expose.kind, "loopback");
+});
+
+test("remove last provider becomes official", () => {
+  const parsed = parseUiProviderSave({ kind: "remove-provider", providerId: "zhipu" }, paths(), zhipuCatalog());
+  assert.equal(parsed.desired.kind, "official");
+  assert.equal(parsed.catalogWrite?.providers.length, 0);
+});
+
+test("remove one provider keeps the other and rebinds if needed", () => {
+  const parsed = parseUiProviderSave({ kind: "remove-provider", providerId: "zhipu" }, paths(), twoProviderCatalog());
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 1);
+  assert.equal(parsed.desired.catalog.providers[0]?.id, "openai");
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("set-secret stays custom and never puts the key on DesiredState", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "set-secret", providerId: "zhipu", secret: "sk-rotated" },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  assert.equal(parsed.secret?.bytes, "sk-rotated");
+  assert.equal("secret" in parsed.desired, false);
+});
+
+test("upsert-model records On Chat now as activeReasoning", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "upsert-model",
+      providerId: "zhipu",
+      slug: "glm-5.3-flash",
+      contextTokens: 96000,
+      maxOutputTokens: 4096,
+      reasoningLevels: ["default", "none", "low", "high"],
+      activeReasoning: "high",
+      modalities: ["text"],
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  const model = parsed.desired.catalog.models[0];
+  assert.equal(model?.activeReasoning, "high");
+  assert.deepEqual(model?.reasoningLevels, ["default", "none", "low", "high"]);
+});
+
+test("catalogAfterSave returns the desired custom catalog after use-model", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "use-model", modelId: "openai:gpt-4.1", reasoning: "high" },
+    paths(),
+    twoProviderCatalog(),
+  );
+  const next = catalogAfterSave(parsed, twoProviderCatalog());
+  const model = next.models.find((row) => row.id === "openai:gpt-4.1");
+  assert.equal(model?.activeReasoning, "high");
+  assert.equal(next.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("catalogAfterSave keeps the plan catalog on official", () => {
+  const parsed = parseUiProviderSave({ kind: "official" }, paths(), zhipuCatalog());
+  const disk = zhipuCatalog();
+  const next = catalogAfterSave(parsed, disk);
+  assert.equal(next.models[0]?.id, disk.models[0]?.id);
+  assert.equal(next.bindings[0]?.modelId, disk.bindings[0]?.modelId);
+});
+
+test("update-provider keeps the provider id and rewrites name and origin", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "update-provider",
+      providerId: "zhipu",
+      name: "Zhipu GLM",
+      origin: "https://open.bigmodel.cn/api/paas/v4/new",
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 1);
+  assert.equal(parsed.desired.catalog.providers[0]?.id, "zhipu");
+  assert.equal(parsed.desired.catalog.providers[0]?.name, "Zhipu GLM");
+  assert.equal(parsed.desired.catalog.providers[0]?.origin, "https://open.bigmodel.cn/api/paas/v4/new");
+  assert.equal(parsed.desired.catalog.models[0]?.id, "zhipu:glm-5.3-flash");
+  assert.equal(parsed.secret, undefined);
+});
+
+test("a removed preset provider stays a routable generic catalog row", () => {
+  // Old installs saved DeepSeek before preset curation. The save parser must
+  // keep that row usable: editing another provider must not drop it, and the
+  // catalog handed to the hop is unchanged.
+  const disk = zhipuCatalog();
+  const deepseekId = parseProviderId("deepseek");
+  const deepseekModelId = parseModelId("deepseek:deepseek-v4-flash");
+  const catalog: Catalog = {
+    providers: [
+      ...disk.providers,
+      {
+        id: deepseekId,
+        name: "DeepSeek",
+        origin: parseUpstreamOrigin("https://api.deepseek.com"),
+        maxTokensDefault: HIGH_AGENT_MAX_TOKENS,
+        mapFile: "provider-maps.cjs",
+      },
+    ],
+    models: [
+      ...disk.models,
+      makeModel({ id: deepseekModelId, providerId: deepseekId, slug: parseModelSlug("deepseek-v4-flash") }),
+    ],
+    bindings: disk.bindings,
+  };
+  const parsed = parseUiProviderSave(
+    { kind: "use-model", modelId: "deepseek:deepseek-v4-flash" },
+    paths(),
+    catalog,
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") return;
+  assert.equal(parsed.desired.catalog.providers.some((row) => row.id === deepseekId), true);
+  assert.equal(parsed.desired.catalog.models.some((row) => row.id === deepseekModelId), true);
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, deepseekModelId);
+  assert.equal(parsed.secret, undefined);
+});
+
+test("update-provider writes a secret when one is sent", () => {
+  const parsed = parseUiProviderSave(
+    {
+      kind: "update-provider",
+      providerId: "zhipu",
+      name: "Zhipu",
+      origin: "https://open.bigmodel.cn/api/paas/v4",
+      secret: "sk-rotated",
+    },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  assert.equal(parsed.secret?.bytes, "sk-rotated");
+  assert.equal("secret" in parsed.desired, false);
+});
+
+test("remove-model needs modelId", () => {
+  assert.throws(
+    () => parseUiProviderSave({ kind: "remove-model" }, paths(), zhipuCatalog()),
+    /OpenBot: remove-model needs modelId/,
+  );
+});
+
+test("remove-model throws for an unknown model", () => {
+  assert.throws(
+    () => parseUiProviderSave({ kind: "remove-model", modelId: "zhipu:missing" }, paths(), zhipuCatalog()),
+    /OpenBot: unknown model/,
+  );
+});
+
+function zhipuTwoModelCatalog(): Catalog {
+  const providerId = parseProviderId("zhipu");
+  const flash = parseModelId("zhipu:glm-5.3-flash");
+  const full = parseModelId("zhipu:glm-5.3");
+  return {
+    providers: zhipuCatalog().providers,
+    models: [
+      makeModel({ id: flash, providerId, slug: parseModelSlug("glm-5.3-flash") }),
+      makeModel({ id: full, providerId, slug: parseModelSlug("glm-5.3") }),
+    ],
+    bindings: [{ conversation: { kind: "wildcard" }, modelId: flash }],
+  };
+}
+
+test("remove-model drops one slug and keeps the provider", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "zhipu:glm-5.3" },
+    paths(),
+    zhipuTwoModelCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 1);
+  assert.equal(parsed.desired.catalog.providers[0]?.id, "zhipu");
+  assert.equal(parsed.desired.catalog.models.length, 1);
+  assert.equal(parsed.desired.catalog.models[0]?.id, "zhipu:glm-5.3-flash");
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "zhipu:glm-5.3-flash");
+  assert.equal(parsed.secret, undefined);
+  assert.equal(parsed.catalogWrite, undefined);
+  const binding = parsed.desired.catalog.bindings[0];
+  assert.ok(binding);
+  assert.equal("apiKey" in binding, false);
+  assert.equal("secret" in parsed.desired, false);
+});
+
+test("remove last model of the last provider stays custom with an empty list", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "zhipu:glm-5.3-flash" },
+    paths(),
+    zhipuCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 1);
+  assert.equal(parsed.desired.catalog.providers[0]?.id, "zhipu");
+  assert.equal(parsed.desired.catalog.models.length, 0);
+  assert.equal(parsed.desired.catalog.bindings.length, 0);
+  assert.equal(parsed.catalogWrite, undefined);
+  assert.equal(parsed.secret, undefined);
+});
+
+test("remove active model rebinds wildcard to another model on the same provider", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "zhipu:glm-5.3-flash" },
+    paths(),
+    zhipuTwoModelCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "zhipu:glm-5.3");
+  assert.equal(parsed.desired.catalog.models.length, 1);
+});
+
+test("remove active model rebinds to another provider when none remain here", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "zhipu:glm-5.3-flash" },
+    paths(),
+    twoProviderCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 2);
+  assert.equal(parsed.desired.catalog.models.length, 1);
+  assert.equal(parsed.desired.catalog.models[0]?.id, "openai:gpt-4.1");
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("remove a non-active model keeps the wildcard", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "openai:gpt-4.1" },
+    paths(),
+    twoProviderCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.equal(parsed.desired.catalog.providers.length, 2);
+  assert.equal(parsed.desired.catalog.models.length, 1);
+  assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "zhipu:glm-5.3-flash");
+});
+
+test("remove last model of one provider keeps that provider with zero models", () => {
+  const parsed = parseUiProviderSave(
+    { kind: "remove-model", modelId: "openai:gpt-4.1" },
+    paths(),
+    twoProviderCatalog(),
+  );
+  assert.equal(parsed.desired.kind, "custom");
+  if (parsed.desired.kind !== "custom") {
+    return;
+  }
+  assert.ok(parsed.desired.catalog.providers.some((row) => row.id === "openai"));
+  assert.equal(parsed.desired.catalog.models.some((row) => row.providerId === "openai"), false);
+});
+
+test("protocol survives switching reasoning and saving another model", () => {
+  const input = zhipuCatalog();
+  const first = input.models[0]!;
+  const catalog = { ...input, models: [{ ...first, apiType: "responses" as const }] };
+  const switched = parseUiProviderSave({ kind: "use-model", modelId: first.id, reasoning: "high" }, paths(), catalog);
+  assert.equal(switched.desired.kind, "custom");
+  if (switched.desired.kind !== "custom") throw new Error("custom expected");
+  assert.equal(switched.desired.catalog.models[0]?.apiType, "responses");
+  const changed = parseUiProviderSave({ kind: "upsert-model", providerId: first.providerId, slug: first.slug, apiType: "anthropic" }, paths(), switched.desired.catalog);
+  if (changed.desired.kind !== "custom") throw new Error("custom expected");
+  assert.equal(changed.desired.catalog.models[0]?.apiType, "anthropic");
+});
+
+
+test("published limits survive model switching and reasoning changes without expanding generation caps", () => {
+  const catalog = zhipuCatalog();
+  const first = catalog.models[0]!;
+  const limits = { contextTokens: 1000000, maxOutputTokens: 393216, providerKey: "direct", sourceUrl: "https://models.dev/api.json", outputModalities: ["text"] };
+  const updated = parseUiProviderSave({ kind: "upsert-model", providerId: first.providerId, slug: first.slug, catalogLimits: limits }, paths(), catalog);
+  assert.equal(updated.desired.kind, "custom");
+  if (updated.desired.kind !== "custom") throw new Error("Expected custom mode");
+  const switched = parseUiProviderSave({ kind: "use-model", modelId: first.id, reasoning: "high" }, paths(), updated.desired.catalog);
+  assert.equal(switched.desired.kind, "custom");
+  if (switched.desired.kind !== "custom") throw new Error("Expected custom mode");
+  assert.deepEqual(switched.desired.catalog.models.find(m => m.id === first.id)?.catalogLimits, limits);
+  assert.equal(switched.desired.catalog.models.find(m => m.id === first.id)?.maxOutputTokens, first.maxOutputTokens);
+});
+
+test("adding another account preserves every model, binding and current mode", () => {
+  const previous = twoProviderCatalog();
+  for (const mode of ["custom", "official"] as const) {
+    const result = parseUiProviderSave({ kind: "add-provider", familyId: "openai", name: "OpenAI", origin: "https://api.openai.com/v1", apiType: "responses", secret: "sk-second" }, paths(), previous, { mode });
+    assert.equal(result.createdProviderId, "openai-2");
+    assert.equal(result.secret?.providerId, "openai-2");
+    assert.equal(result.desired.kind, mode);
+    const next = catalogAfterSave(result, previous);
+    assert.deepEqual(next.models, previous.models);
+    assert.deepEqual(next.bindings, previous.bindings);
+    assert.deepEqual(next.providers.slice(0, previous.providers.length), previous.providers);
+    assert.equal(next.providers.at(-1)?.apiType, "responses");
+    assert.doesNotMatch(JSON.stringify(result.desired), /sk-second/);
+  }
+});
+
+test("separate accounts reserve orphaned credential slots and accept the same display name", () => {
+  const previous = twoProviderCatalog();
+  const result = parseUiProviderSave({ kind: "add-provider", familyId: "openai", name: "OpenAI", origin: "https://api.openai.com/v1", secret: "sk-third" }, paths(), previous,
+    { mode: "custom", reservedProviderIds: ["openai", "openai-2"] });
+  assert.equal(result.createdProviderId, "openai-3");
+  const next = catalogAfterSave(result, previous);
+  assert.equal(next.providers.filter(provider => provider.name === "OpenAI").length, 2);
+  const fourth = parseUiProviderSave({ kind: "add-provider", familyId: "openai", name: "OpenAI", origin: "https://api.openai.com/v1", secret: "sk-fourth" }, paths(), next,
+    { reservedProviderIds: ["openai", "openai-2", "openai-3"] });
+  assert.equal(fourth.createdProviderId, "openai-4");
+});
+
+test("adding a first account does not activate a made-up model or change explicit mode", () => {
+  for (const mode of [undefined, "official", "custom"] as const) {
+    const result = parseUiProviderSave({ kind: "add-provider", familyId: "nvidia", name: "NVIDIA", origin: "https://integrate.api.nvidia.com/v1", secret: "fixture" }, paths(), undefined, { mode });
+    assert.equal(result.desired.kind, mode ?? "official");
+    assert.equal(result.catalogWrite?.models.length, 0);
+    assert.equal(result.catalogWrite?.bindings.length, 0);
+  }
+});
+
+test("new Go accounts enforce the direct endpoint and Alibaba accounts require Coding Plan keys", () => {
+  const go = { kind: "add-provider", familyId: "opencode-go", name: "OpenCode Go", origin: "https://opencode.ai/zen/go/v1", secret: "fixture-go" };
+  assert.equal(parseUiProviderSave(go, paths(), zhipuCatalog()).createdProviderId, "opencode-go");
+  for (const origin of ["https://n5.example/v1", "https://opencode.ai/zen/v1", "https://other.example/zen/go/v1"]) {
+    assert.throws(() => parseUiProviderSave({ ...go, origin }, paths(), zhipuCatalog()), /Go accounts must use/);
+  }
+  const alibaba = { kind: "add-provider", familyId: "alibaba-token-plan", name: "Alibaba", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", secret: "sk-sp-plan-fixture" };
+  assert.equal(parseUiProviderSave(alibaba, paths(), zhipuCatalog()).createdProviderId, "alibaba-token-plan");
+  assert.throws(() => parseUiProviderSave({ ...alibaba, secret: "sk-payg-fixture" }, paths(), zhipuCatalog()), /not a pay-as-you-go key/);
+});
+
+test("new account API rejects credentials, query strings and fragments in the base URL", () => {
+  const account = { kind: "add-provider", familyId: "custom", name: "Custom account", origin: "https://provider.example/v1", secret: "fixture-key" };
+  for (const origin of ["https://user:password@provider.example/v1", "https://provider.example/v1?token=fixture", "https://provider.example/v1#fragment"]) {
+    assert.throws(() => parseUiProviderSave({ ...account, origin }, paths(), zhipuCatalog()), /must not contain/);
+  }
+});

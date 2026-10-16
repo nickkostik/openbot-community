@@ -1,0 +1,380 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { type Catalog, type SecretBytes } from "../domain/types.ts";
+import { type SecretStore } from "../supervisor/secrets.ts";
+import { fetchModelsForProvider, modelsUrl, normalizeProviderModels, OPENAI_CODEX_MODELS_URL, type FetchLike } from "./provider-models.ts";
+
+type ResponseStub = { readonly status: number; readonly ok: boolean; text(): Promise<string> };
+
+function jsonResponse(status: number, body: unknown): ResponseStub {
+  return { status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) };
+}
+
+function textResponse(status: number, text: string): ResponseStub {
+  return { status, ok: status >= 200 && status < 300, text: async () => text };
+}
+
+function makeCatalog(providers: { id: string; name: string; origin: string }[]): Catalog {
+  const catalog = {
+    providers: providers.map((provider) => ({
+      ...provider,
+      maxTokensDefault: 65536,
+      mapFile: "provider-maps.cjs",
+    })),
+    models: [],
+    bindings: [],
+  };
+  return catalog as unknown as Catalog;
+}
+
+function makeSecrets(entries: Record<string, string>): SecretStore {
+  const providers: { [id: string]: SecretBytes } = {};
+  for (const [id, value] of Object.entries(entries)) {
+    providers[id] = value as SecretBytes;
+  }
+  return { providers };
+}
+
+test("modelsUrl reuses the hop base-URL normalization", () => {
+  assert.equal(modelsUrl("https://api.openai.com/v1"), "https://api.openai.com/v1/models");
+  assert.equal(modelsUrl("https://open.bigmodel.cn/api/paas/v4"), "https://open.bigmodel.cn/api/paas/v4/models");
+  assert.equal(modelsUrl("https://example.com/v4"), "https://example.com/v4/models");
+  assert.equal(modelsUrl("https://example.com/chat/completions"), "https://example.com/chat/completions/models");
+  assert.equal(modelsUrl("https://example.com"), "https://example.com/v1/models");
+  assert.equal(modelsUrl("https://example.com/"), "https://example.com/v1/models");
+});
+
+test("normalizeProviderModels rejects a body that is not a model list", () => {
+  assert.equal(normalizeProviderModels({ foo: 1 }), undefined);
+  assert.equal(normalizeProviderModels([]), undefined);
+  assert.equal(normalizeProviderModels("nope"), undefined);
+});
+
+test("normalizeProviderModels drops entries without an id as skipped", () => {
+  const result = normalizeProviderModels({
+    data: [
+      { id: "glm-5.3", name: "GLM 5.3" },
+      { name: "no id" },
+      "not an object",
+      { id: "glm-5.3" },
+    ],
+  });
+  assert.ok(result);
+  assert.equal(result.models.length, 1);
+  assert.equal(result.models[0]?.id, "glm-5.3");
+  assert.equal(result.skipped, 3);
+  assert.deepEqual(result.skippedReasons, ["missing-id", "not-an-object", "duplicate-id"]);
+});
+
+test("normalizeProviderModels maps modalities and reasoning levels to the allowed sets", () => {
+  const result = normalizeProviderModels({
+    data: [
+      {
+        id: "m",
+        input_modalities: ["text", "image", "weird"],
+        reasoningLevels: ["high", "low", "bogus", "high"],
+      },
+    ],
+  });
+  assert.ok(result);
+  const model = result.models[0];
+  assert.ok(model);
+  assert.deepEqual(model.modalities, ["text", "image"]);
+  assert.deepEqual(model.reasoningLevels, ["default", "none", "low", "high"]);
+});
+
+test("normalizeProviderModels reads nested reasoning.supported_efforts", () => {
+  const result = normalizeProviderModels({
+    data: [
+      {
+        id: "deepseek-v4-flash",
+        reasoning: { mandatory: false, supported_efforts: ["xhigh", "high"] },
+      },
+    ],
+  });
+  assert.ok(result);
+  assert.deepEqual(result.models[0]?.reasoningLevels, ["default", "none", "high", "xhigh"]);
+});
+
+test("normalizeProviderModels reads nested reasoning_options", () => {
+  const result = normalizeProviderModels({
+    data: [
+      {
+        id: "glm-5.3-flash",
+        reasoning_options: [
+          { type: "toggle" },
+          { type: "effort", values: ["low", "high", "max"] },
+        ],
+      },
+    ],
+  });
+  assert.ok(result);
+  assert.deepEqual(result.models[0]?.reasoningLevels, ["default", "none", "low", "high", "max"]);
+});
+
+test("normalizeProviderModels drops a poisoned max_completion_tokens above the ceiling", () => {
+  // Regression: commandcode reported 943718 (a context-window figure) in a
+  // max-completion field; it must not land in the fetched row.
+  const result = normalizeProviderModels({
+    data: [{ id: "meta/muse-spark", top_provider: { max_completion_tokens: 943718 } }],
+  });
+  assert.ok(result);
+  assert.equal(result.models[0]?.maxOutputTokens, null);
+});
+
+test("normalizeProviderModels falls through to a sane max_completion_tokens candidate", () => {
+  const result = normalizeProviderModels({
+    data: [{ id: "m", top_provider: { max_completion_tokens: 943718 }, max_completion_tokens: 65536 }],
+  });
+  assert.ok(result);
+  assert.equal(result.models[0]?.maxOutputTokens, 65536);
+});
+
+test("normalizeProviderModels keeps a max-output value at the ceiling boundary", () => {
+  const result = normalizeProviderModels({
+    data: [{ id: "m", max_completion_tokens: 131072 }],
+  });
+  assert.ok(result);
+  assert.equal(result.models[0]?.maxOutputTokens, 131072);
+});
+
+test("fetch-models succeeds and forwards the stored secret server-side", async () => {
+  const catalog = makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://open.bigmodel.cn/api/paas/v4" }]);
+  const store = makeSecrets({ zhipu: "sk-live" });
+  let requestedUrl = "";
+  let requestedAuth = "";
+  const fetchFn: FetchLike = async (url, init) => {
+    requestedUrl = url;
+    requestedAuth = init?.headers?.Authorization ?? "";
+    return jsonResponse(200, {
+      data: [
+        { id: "glm-5.3", name: "GLM 5.3", context_length: 128000 },
+        { id: "glm-4.5" },
+        { name: "missing id" },
+      ],
+    });
+  };
+  const result = await fetchModelsForProvider({ providerId: "zhipu", catalog, secretStore: store, fetchFn });
+  assert.equal(result.status, 200);
+  assert.equal(requestedUrl, "https://open.bigmodel.cn/api/paas/v4/models");
+  assert.equal(requestedAuth, "Bearer sk-live");
+  const body = result.body as {
+    ok: boolean;
+    providerId: string;
+    source: string;
+    skipped: number;
+    skippedReasons: string[];
+    models: { id: string; name: string | null; contextLength: number | null; modalities: string[] }[];
+  };
+  assert.equal(body.ok, true);
+  assert.equal(body.providerId, "zhipu");
+  assert.equal(body.source, "provider");
+  assert.equal(body.skipped, 1);
+  assert.deepEqual(body.skippedReasons, ["missing-id"]);
+  assert.equal(body.models.length, 2);
+  assert.equal(body.models[0]?.id, "glm-5.3");
+  assert.equal(body.models[0]?.contextLength, 128000);
+  assert.equal(body.models[0]?.modalities.length, 0);
+});
+
+test("OpenAI OAuth fetch-models uses the Codex models endpoint and credential headers", async () => {
+  const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
+  const secret = JSON.stringify({ kind: "openai-oauth", accessToken: "oauth-access", refreshToken: "refresh", expiresAt: 9999999999, chatgptAccountId: "acct-123" });
+  let requestedUrl = "";
+  let requestedHeaders: Record<string, string> = {};
+  const fetchFn: FetchLike = async (url, init) => {
+    requestedUrl = url;
+    requestedHeaders = init?.headers ?? {};
+    return jsonResponse(200, { models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }] });
+  };
+  const result = await fetchModelsForProvider({ providerId: "openai", catalog, secretStore: makeSecrets({ openai: secret }), fetchFn });
+  assert.equal(result.status, 200);
+  assert.equal(requestedUrl, OPENAI_CODEX_MODELS_URL);
+  assert.equal(requestedHeaders.Authorization, "Bearer oauth-access");
+  assert.equal(requestedHeaders["chatgpt-account-id"], "acct-123");
+  assert.equal(requestedHeaders.originator, "codex-tui");
+  const body = result.body as { models: { id: string; name: string | null }[] };
+  assert.deepEqual(body.models, [{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextLength: null, maxOutputTokens: null, modalities: [], reasoningLevels: [] }]);
+});
+
+test("native OpenAI identity-only listings receive documented Sol capabilities", async () => {
+  const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
+  const result = await fetchModelsForProvider({ providerId: "openai", catalog, secretStore: makeSecrets({ openai: "sk-fixture" }), fetchFn: async () => jsonResponse(200, { data: [{ id: "gpt-6.1-sol" }] }) });
+  assert.equal(result.status, 200);
+  const model = (result.body as any).models[0];
+  assert.equal(model.contextLength, 1_050_000);
+  assert.deepEqual(model.reasoningLevels, ["default", "low", "medium", "high", "xhigh", "max"]);
+});
+
+test("Codex descriptors retain their advertised context and supported efforts", async () => {
+  const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
+  const credential = JSON.stringify({ kind: "openai-oauth", accessToken: "fixture-access", refreshToken: "fixture-refresh" });
+  const result = await fetchModelsForProvider({ providerId: "openai", catalog, secretStore: makeSecrets({ openai: credential }), fetchFn: async () => jsonResponse(200, { models: [{ slug: "gpt-6-astra", context_window: 272000, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }, { effort: "xhigh" }, { effort: "max" }] }] }) });
+  assert.equal(result.status, 200);
+  assert.equal((result.body as any).models[0].contextLength, 272000);
+  assert.equal((result.body as any).models[0].reasoningLevels.includes("none"), false);
+  const normalized = normalizeProviderModels({ models: [{ slug: "model-x", supported_reasoning_levels: [{ effort: "high" }, { effort: "xhigh" }, { effort: "max" }] }] })!;
+  assert.ok(normalized.models[0]?.reasoningLevels.includes("max"));
+});
+
+test("fetch-models reuses a stable OpenCode session across requests", async () => {
+  const catalog = makeCatalog([{ id: "opencode", name: "OpenCode", origin: "https://opencode.ai/zen/v1" }]);
+  const sessions: string[] = [];
+  const fetchFn: FetchLike = async (_url, init) => {
+    sessions.push(init?.headers?.["x-opencode-session"] ?? "");
+    return jsonResponse(200, { data: [{ id: "big-pickle" }] });
+  };
+  const input = { providerId: "opencode", catalog, secretStore: makeSecrets({ opencode: "zen-key" }), fetchFn };
+  assert.equal((await fetchModelsForProvider(input)).status, 200);
+  assert.equal((await fetchModelsForProvider(input)).status, 200);
+  assert.equal(sessions.length, 2);
+  assert.ok(sessions[0]);
+  assert.equal(sessions[0], sessions[1]);
+});
+
+test("fetch-models returns 404 provider-not-found", async () => {
+  const result = await fetchModelsForProvider({
+    providerId: "missing",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({}),
+  });
+  assert.equal(result.status, 404);
+  assert.deepEqual(result.body, { error: { kind: "provider-not-found", message: "provider not found" } });
+});
+
+test("fetch-models returns 409 no-secret when the provider has no key", async () => {
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({}),
+  });
+  assert.equal(result.status, 409);
+  assert.deepEqual(result.body, { error: { kind: "no-secret", message: "no API key stored for this provider" } });
+});
+
+test("fetch-models maps upstream 401 to unauthorized", async () => {
+  const fetchFn: FetchLike = async () => jsonResponse(401, { error: { message: "bad key" } });
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 401);
+  assert.deepEqual(result.body, {
+    error: { kind: "unauthorized", message: "provider rejected the API key", upstreamStatus: 401 },
+  });
+});
+
+test("fetch-models maps upstream 404 to not-supported", async () => {
+  const fetchFn: FetchLike = async () => jsonResponse(404, {});
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, {
+    error: { kind: "not-supported", message: "provider does not expose a model list", upstreamStatus: 404 },
+  });
+});
+
+test("fetch-models maps a network failure to unreachable without upstreamStatus", async () => {
+  const fetchFn: FetchLike = async () => {
+    throw new Error("connect ECONNREFUSED");
+  };
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, { error: { kind: "unreachable", message: "provider is unreachable" } });
+});
+
+test("fetch-models maps an upstream 503 to unreachable with upstreamStatus", async () => {
+  const fetchFn: FetchLike = async () => jsonResponse(503, {});
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, {
+    error: { kind: "unreachable", message: "upstream returned HTTP 503", upstreamStatus: 503 },
+  });
+});
+
+test("fetch-models maps a 200 non-list body to parse-error", async () => {
+  const fetchFn: FetchLike = async () => jsonResponse(200, { something: "else" });
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, { error: { kind: "parse-error", message: "provider response is not a model list" } });
+});
+
+test("fetch-models maps a 200 non-JSON body to parse-error", async () => {
+  const fetchFn: FetchLike = async () => textResponse(200, "<html>not json</html>");
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "https://example.com/v1" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+    fetchFn,
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, { error: { kind: "parse-error", message: "provider returned a non-JSON body" } });
+});
+
+test("fetch-models maps an unexpected failure to 500 internal", async () => {
+  const result = await fetchModelsForProvider({
+    providerId: "zhipu",
+    catalog: makeCatalog([{ id: "zhipu", name: "Zhipu", origin: "" }]),
+    secretStore: makeSecrets({ zhipu: "sk-live" }),
+  });
+  assert.equal(result.status, 500);
+  const body = result.body as { error: { kind: string } };
+  assert.equal(body.error.kind, "internal");
+});
+
+test("second OAuth family discovers its own catalog with token and account headers", async () => {
+  const catalog = makeCatalog([{ id: "openai-2", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
+  const secret = JSON.stringify({ kind: "openai-oauth", accessToken: "account-two-access", refreshToken: "account-two-refresh", expiresAt: 1900000000, chatgptAccountId: "account-two" });
+  const result = await fetchModelsForProvider({ providerId: "openai-2", catalog, secretStore: makeSecrets({ "openai-2": secret }), fetchFn: async (url, init) => {
+    assert.equal(url, OPENAI_CODEX_MODELS_URL);
+    assert.equal(init?.headers?.Authorization, "Bearer account-two-access");
+    assert.equal(init?.headers?.["chatgpt-account-id"], "account-two");
+    return jsonResponse(200, { models: [{ slug: "gpt-6.1-sol", context_window: 272000 }] });
+  } });
+  assert.equal(result.status, 200);
+  const body = result.body as { models: { id: string; contextLength: number; reasoningLevels: string[] }[] };
+  assert.equal(body.models[0]?.contextLength, 272000);
+  assert.ok(body.models[0]?.reasoningLevels.includes("max"));
+});
+
+test("an expired imported login refreshes before listing models and preserves the rotated account header", async () => {
+  const catalog = makeCatalog([{ id: "openai-2", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
+  const secret = JSON.stringify({ kind: "openai-oauth", accessToken: "expired-access", refreshToken: "fixture-refresh", expiresAt: 0 });
+  let refreshed = false;
+  const result = await fetchModelsForProvider({ providerId: "openai-2", catalog, secretStore: makeSecrets({ "openai-2": secret }),
+    refreshOAuth: async id => {
+      assert.equal(id, "openai-2"); refreshed = true;
+      return JSON.stringify({ kind: "openai-oauth", accessToken: "fresh-access", refreshToken: "next-refresh", expiresAt: 1900000000, chatgptAccountId: "rotated-account" });
+    }, fetchFn: async (_url, init) => {
+      assert.equal(refreshed, true);
+      assert.equal(init?.headers?.Authorization, "Bearer fresh-access");
+      assert.equal(init?.headers?.["chatgpt-account-id"], "rotated-account");
+      return jsonResponse(200, { models: [{ slug: "gpt-6.1-sol" }] });
+    } });
+  assert.equal(result.status, 200);
+  const failed = await fetchModelsForProvider({ providerId: "openai-2", catalog, secretStore: makeSecrets({ "openai-2": secret }),
+    refreshOAuth: async () => { throw new Error("sensitive-refresh-fixture"); }, fetchFn: async () => { throw new Error("must not fetch after failed refresh"); } });
+  assert.equal(failed.status, 401);
+  assert.doesNotMatch(JSON.stringify(failed), /sensitive-refresh-fixture/);
+});

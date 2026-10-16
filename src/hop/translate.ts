@@ -1,0 +1,199 @@
+import { HIGH_AGENT_MAX_TOKENS } from "../domain/types.ts";
+
+export type JsonSchema = {
+  readonly type: "object";
+  readonly properties: Record<string, unknown>;
+  readonly required?: readonly string[];
+  readonly [key: string]: unknown;
+};
+
+export type HostTool = {
+  readonly name?: string;
+  readonly description?: string;
+  readonly parameters?: unknown;
+  readonly function?: {
+    readonly name?: string;
+    readonly description?: string;
+    readonly parameters?: unknown;
+  };
+  readonly type?: string;
+};
+
+export type OpenAiFunctionTool = {
+  readonly type: "function";
+  readonly function: {
+    readonly name: string;
+    readonly description: string;
+    readonly parameters: JsonSchema;
+  };
+};
+
+function isGptModelId(modelId: string | undefined): boolean {
+  return typeof modelId === "string" && modelId.toLowerCase().includes("gpt");
+}
+
+function closeObjectSchemas(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      closeObjectSchemas(item);
+    }
+    return value;
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  if (value.type === "object") {
+    value.additionalProperties = false;
+    if (isRecord(value.properties) && Object.keys(value.properties).length > 0) {
+      value.properties.additionalProperties = false;
+    }
+  }
+  for (const child of Object.values(value)) {
+    closeObjectSchemas(child);
+  }
+  return value;
+}
+
+function closeGptToolSchemas(tools: OpenAiFunctionTool[], modelId: string | undefined): OpenAiFunctionTool[] {
+  if (!isGptModelId(modelId)) {
+    return tools;
+  }
+  return tools.map((tool) => ({
+    ...tool,
+    function: {
+      ...tool.function,
+      parameters: closeObjectSchemas(structuredClone(tool.function.parameters)) as JsonSchema,
+    },
+  }));
+}
+
+export type HostToolCallPart = {
+  readonly type: "tool-call";
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: Record<string, unknown>;
+};
+
+export type FinishReason = "stop" | "tool-calls" | "length";
+
+const EMPTY_SCHEMA: JsonSchema = { type: "object", properties: {} };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function asJsonSchema(value: unknown, preserveSchema = false): JsonSchema {
+  if (!isRecord(value)) {
+    return EMPTY_SCHEMA;
+  }
+  if (isRecord(value.jsonSchema)) {
+    return asJsonSchema(value.jsonSchema, preserveSchema);
+  }
+  const properties = isRecord(value.properties) ? value.properties : {};
+  const required = Array.isArray(value.required)
+    ? value.required.filter((item): item is string => typeof item === "string")
+    : undefined;
+  if (preserveSchema) {
+    return required
+      ? { ...value, type: "object", properties, required }
+      : { ...value, type: "object", properties };
+  }
+  return required ? { type: "object", properties, required } : { type: "object", properties };
+}
+
+export function unwrapJsonSchemaTools(tools: readonly HostTool[], modelId?: string): OpenAiFunctionTool[] {
+  const out: OpenAiFunctionTool[] = [];
+  for (const tool of tools) {
+    if (!tool || tool.type === "provider-defined") {
+      continue;
+    }
+    const fn = tool.function ?? tool;
+    const name = tool.name ?? fn.name;
+    if (!name) {
+      continue;
+    }
+    out.push({
+      type: "function",
+      function: {
+        name,
+        description: tool.description ?? fn.description ?? "",
+        parameters: asJsonSchema(tool.parameters ?? fn.parameters, isGptModelId(modelId)),
+      },
+    });
+  }
+  return closeGptToolSchemas(out, modelId);
+}
+
+export function mapToolCalls(openAiCalls: readonly unknown[]): HostToolCallPart[] {
+  const out: HostToolCallPart[] = [];
+  for (const [index, raw] of openAiCalls.entries()) {
+    if (!isRecord(raw)) {
+      continue;
+    }
+    const fn = isRecord(raw.function) ? raw.function : {};
+    const name = typeof fn.name === "string" ? fn.name : "";
+    let args: Record<string, unknown> = {};
+    if (typeof fn.arguments === "string") {
+      try {
+        const parsed: unknown = JSON.parse(fn.arguments);
+        if (isRecord(parsed)) {
+          args = parsed;
+        }
+      } catch {
+        args = {};
+      }
+    } else if (isRecord(fn.arguments)) {
+      args = fn.arguments;
+    } else if (isRecord(raw.args)) {
+      args = raw.args;
+    }
+    const id = typeof raw.id === "string" ? raw.id : `call_${String(index)}`;
+    out.push({ type: "tool-call", toolCallId: id, toolName: name, args });
+  }
+  return out;
+}
+
+export function messageContentText(content: unknown): string {
+  if (content == null) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const bits: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      bits.push(part);
+      continue;
+    }
+    if (isRecord(part) && typeof part.text === "string") {
+      bits.push(part.text);
+    }
+  }
+  return bits.join("");
+}
+
+export function mapFinishReason(reason: string | undefined, toolCallCount = 0): FinishReason {
+  const n = toolCallCount > 0 ? toolCallCount : 0;
+  if (reason === "length") {
+    return "length";
+  }
+  if (n > 0) {
+    return "tool-calls";
+  }
+  if (reason === "tool_calls" || reason === "tool-calls" || reason === "function_call") {
+    return "tool-calls";
+  }
+  return "stop";
+}
+
+export function defaultMaxTokens(requested: number | undefined, cap: number = HIGH_AGENT_MAX_TOKENS): number {
+  const limit = Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : HIGH_AGENT_MAX_TOKENS;
+  if (requested != null && Number.isFinite(requested) && requested > 0) {
+    return Math.min(Math.floor(requested), limit);
+  }
+  return limit;
+}

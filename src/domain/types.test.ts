@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  HIGH_AGENT_MAX_TOKENS,
+  LOOPBACK,
+  LOOPBACK_HOP,
+  OPENBOT_MARKER,
+  SERVICE_PORT,
+  align,
+  hopBaseUrl,
+  type CustomBox,
+  type OfficialBox,
+} from "./types.ts";
+import { parseAbsPath } from "../supervisor/paths.ts";
+
+const secretsPath = parseAbsPath("/home/box/sand-data/secrets.json");
+
+test("hopBaseUrl is derived from loopback, not stored on Binding", () => {
+  assert.equal(hopBaseUrl(LOOPBACK_HOP), "http://127.0.0.1:9280/v1");
+});
+
+test("HIGH_AGENT_MAX_TOKENS is not 8192", () => {
+  assert.equal(HIGH_AGENT_MAX_TOKENS, 65536);
+});
+
+test("align names needs-reinstall when custom is desired and wrap is stock", () => {
+  const desired: CustomBox = {
+    kind: "custom",
+    wrap: { kind: "marked", marker: OPENBOT_MARKER },
+    hopListen: { kind: "adopt-or-start", host: LOOPBACK, port: SERVICE_PORT },
+    uiListen: { kind: "loopback", host: LOOPBACK, port: SERVICE_PORT },
+    secretsPath,
+    hop: LOOPBACK_HOP,
+    catalog: { providers: [], models: [], bindings: [] },
+    expose: { kind: "loopback" },
+  };
+  const a = align(desired, { kind: "stock-unmarked" });
+  assert.equal(a.kind, "needs-reinstall");
+});
+
+test("align is ok when official is desired and wrap is stock", () => {
+  const desired: OfficialBox = {
+    kind: "official",
+    wrap: { kind: "stock" },
+    hopListen: { kind: "stop-owned" },
+    uiListen: { kind: "loopback", host: LOOPBACK, port: SERVICE_PORT },
+    secretsPath,
+    expose: { kind: "loopback" },
+  };
+  const a = align(desired, { kind: "stock-unmarked" });
+  assert.equal(a.kind, "ok");
+});
+
+test("official box has no catalog and no hop", () => {
+  const official: OfficialBox = {
+    kind: "official",
+    wrap: { kind: "stock" },
+    hopListen: { kind: "stop-owned" },
+    uiListen: { kind: "loopback", host: LOOPBACK, port: SERVICE_PORT },
+    secretsPath,
+    expose: { kind: "loopback" },
+  };
+  assert.equal(official.kind, "official");
+  assert.equal("catalog" in official ? official.catalog : undefined, undefined);
+  assert.equal("hop" in official ? official.hop : undefined, undefined);
+});
+
+test("align is ok when official is desired and wrap is a logging tap", () => {
+  const desired: OfficialBox = {
+    kind: "official",
+    wrap: { kind: "stock" },
+    hopListen: { kind: "stop-owned" },
+    uiListen: { kind: "loopback", host: LOOPBACK, port: SERVICE_PORT },
+    secretsPath,
+    expose: { kind: "loopback" },
+  };
+  const a = align(desired, { kind: "openbot-marked", marker: OPENBOT_MARKER });
+  assert.equal(a.kind, "ok");
+});

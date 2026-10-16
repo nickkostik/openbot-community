@@ -1,0 +1,742 @@
+"use strict";
+
+var fs = require("fs");
+var crypto = require("node:crypto");
+var {
+  MAX_IMAGE_BYTES,
+  sniffImageMime,
+  dataUrlFromBuffer,
+  experimentalContentRaw,
+  imageEntryFromAny,
+} = require("./image-read.cjs");
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// --- Host image part -> OpenAI image_url ------------------------------------
+//
+// Grok Bot's host may attach an image part with an unspecified field shape.
+// Probe tolerantly: the `image` field (the observed attachment shape is
+// `{type:"image", image:<dataURL|raw bytes>, mimeType}`), then raw base64
+// (`data`/`base64`, with a `mime`/`mimeType` field or sniffed from magic
+// bytes), a `url` (http(s) or data: URI, used as-is), or a local `path`/`file`
+// (read from disk, mime sniffed). On success we emit a standard
+// `{ type: "image_url", image_url: { url } }` content part; on any failure we
+// fall back to the old `"[image]"` placeholder so a broken image never fails
+// the request.
+
+function isHttpUrl(value) {
+  return typeof value === "string" && /^https?:\/\//i.test(value);
+}
+
+function isDataUrl(value) {
+  return typeof value === "string" && /^data:/i.test(value);
+}
+
+function tryReadImageFile(filePath) {
+  var stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err) {
+    return "";
+  }
+  if (!stat.isFile() || stat.size > MAX_IMAGE_BYTES) return "";
+  var buf;
+  try {
+    buf = fs.readFileSync(filePath);
+  } catch (err) {
+    return "";
+  }
+  if (buf.length > MAX_IMAGE_BYTES) return "";
+  var mime = sniffImageMime(buf);
+  if (!mime) return "";
+  return dataUrlFromBuffer(buf, mime);
+}
+
+function imageUrlFromPart(part) {
+  if (!isRecord(part)) return "";
+  var mimeHint = typeof part.mimeType === "string" ? part.mimeType : (typeof part.mime_type === "string" ? part.mime_type : (typeof part.mime === "string" ? part.mime : ""));
+  // 1. payload fields, most specific first. Each may be a data: URI, bare
+  //    base64, raw bytes (Buffer/TypedArray), a nested record, or an array.
+  var payloads = [part.image, part.data, part.base64];
+  for (var i = 0; i < payloads.length; i++) {
+    if (payloads[i] === undefined || payloads[i] === null) continue;
+    var entry = imageEntryFromAny(payloads[i], mimeHint);
+    if (entry) return entry.url;
+  }
+  // 2. url: http(s) or data: URI, used as-is (URL objects via toString()).
+  var url = part.url;
+  if (typeof URL !== "undefined" && url instanceof URL) {
+    try {
+      url = url.toString();
+    } catch (err) {
+      url = "";
+    }
+  }
+  if (typeof url === "string" && (isHttpUrl(url) || isDataUrl(url))) return url;
+  // 3. local path/file -> read from disk.
+  var filePath = typeof part.path === "string" && part.path ? part.path : (typeof part.file === "string" ? part.file : "");
+  if (filePath) {
+    return tryReadImageFile(filePath);
+  }
+  return "";
+}
+
+function toolCallIdOf(value) {
+  if (!isRecord(value)) {
+    return "";
+  }
+  if (typeof value.tool_call_id === "string" && value.tool_call_id.trim()) {
+    return value.tool_call_id;
+  }
+  if (typeof value.toolCallId === "string" && value.toolCallId.trim()) {
+    return value.toolCallId;
+  }
+  return "";
+}
+
+function toolNameOf(value) {
+  if (!isRecord(value)) {
+    return "";
+  }
+  if (typeof value.toolName === "string" && value.toolName) {
+    return value.toolName;
+  }
+  if (typeof value.tool_name === "string" && value.tool_name) {
+    return value.tool_name;
+  }
+  if (isRecord(value.function) && typeof value.function.name === "string") {
+    return value.function.name;
+  }
+  if (typeof value.name === "string" && value.name && value.type !== "text") {
+    return value.name;
+  }
+  return "";
+}
+
+function argsJson(value) {
+  if (!isRecord(value)) {
+    return "{}";
+  }
+  var args = value.args;
+  if (args == null && isRecord(value.function)) {
+    args = value.function.arguments;
+  }
+  if (typeof args === "string") {
+    return args || "{}";
+  }
+  if (args == null) {
+    return "{}";
+  }
+  try {
+    return JSON.stringify(args);
+  } catch (err) {
+    return "{}";
+  }
+}
+
+function resultText(part) {
+  if (!isRecord(part)) {
+    return "";
+  }
+  var result = part.result !== undefined ? part.result : part.output;
+  if (typeof result === "string") {
+    return result;
+  }
+  if (result !== undefined) {
+    try {
+      return JSON.stringify(result);
+    } catch (err) {
+      return String(result);
+    }
+  }
+  if (typeof part.content === "string") {
+    return part.content;
+  }
+  try {
+    return JSON.stringify(part);
+  } catch (err) {
+    return "";
+  }
+}
+
+function asOpenAiToolCall(part, index) {
+  var id = toolCallIdOf(part);
+  if (!id && isRecord(part) && typeof part.id === "string" && part.id) {
+    id = part.id;
+  }
+  if (!id) {
+    id = "call_" + String(index);
+  }
+  return {
+    id: id,
+    type: "function",
+    function: {
+      name: toolNameOf(part),
+      arguments: argsJson(part),
+    },
+  };
+}
+
+function contentToText(content) {
+  if (content == null) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return JSON.stringify(content);
+  }
+  var bits = [];
+  for (var i = 0; i < content.length; i++) {
+    var p = content[i];
+    if (p == null) {
+      continue;
+    }
+    if (typeof p === "string") {
+      bits.push(p);
+    } else if (p.type === "text") {
+      bits.push(p.text || "");
+    } else if (p.type === "image") {
+      bits.push(imageUrlFromPart(p) || "[image]");
+    } else if (p.type === "image_url") {
+      bits.push(isRecord(p.image_url) && typeof p.image_url.url === "string" ? p.image_url.url : "[image]");
+    } else if (p.type === "tool-result") {
+      bits.push(resultText(p));
+    } else if (p.type === "tool-call") {
+      continue;
+    } else {
+      bits.push(JSON.stringify(p));
+    }
+  }
+  return bits.join("\n");
+}
+
+function userContent(text, images) {
+  if (!images.length) return text;
+  var content = [];
+  if (text) content.push({ type: "text", text: text });
+  for (var i = 0; i < images.length; i++) {
+    content.push(images[i]);
+  }
+  return content;
+}
+
+function reasoningFieldOf(message) {
+  if (!isRecord(message)) {
+    return "";
+  }
+  var keys = ["reasoning_content", "reasoning", "thinking"];
+  for (var i = 0; i < keys.length; i++) {
+    var value = message[keys[i]];
+    if (typeof value === "string" && value) {
+      return value;
+    }
+  }
+  // Host/harness assistant turns often store thinking as content parts
+  // ({ type: "reasoning"|"thinking", text }) from openai-stream. Fold those
+  // into reasoning_content so think-mode upstreams (DeepSeek/OpenCode) get
+  // the required round-trip instead of a JSON dump in content.
+  if (Array.isArray(message.content)) {
+    var bits = [];
+    for (var c = 0; c < message.content.length; c++) {
+      var part = message.content[c];
+      if (!isRecord(part)) continue;
+      if (part.type !== "reasoning" && part.type !== "thinking") continue;
+      var text = typeof part.text === "string" ? part.text : typeof part.thinking === "string" ? part.thinking : typeof part.textDelta === "string" ? part.textDelta : "";
+      if (text) bits.push(text);
+    }
+    if (bits.length) return bits.join("");
+  }
+  return "";
+}
+
+function convertParts(role, message, index) {
+  var content = Array.isArray(message.content) ? message.content : [message.content];
+  var texts = [];
+  var calls = [];
+  var results = [];
+  var images = [];
+  for (var i = 0; i < content.length; i++) {
+    var p = content[i];
+    if (p == null) {
+      continue;
+    }
+    if (typeof p === "string") {
+      texts.push(p);
+      continue;
+    }
+    if (!isRecord(p)) {
+      continue;
+    }
+    if (p.type === "text") {
+      texts.push(typeof p.text === "string" ? p.text : "");
+      continue;
+    }
+    if (p.type === "image") {
+      var imageUrl = imageUrlFromPart(p);
+      if (imageUrl) {
+        images.push({ type: "image_url", image_url: { url: imageUrl } });
+      } else {
+        texts.push("[image]");
+      }
+      continue;
+    }
+    if (p.type === "image_url") {
+      // Already-OpenAI image content (e.g. a second toOpenAIMessages pass on
+      // the runtime->hop leg) must be preserved, not flattened into text.
+      var existingUrl = isRecord(p.image_url) && typeof p.image_url.url === "string" ? p.image_url.url : "";
+      if (existingUrl) {
+        images.push({ type: "image_url", image_url: { url: existingUrl } });
+      } else {
+        texts.push("[image]");
+      }
+      continue;
+    }
+    if (role === "assistant" && (p.type === "reasoning" || p.type === "thinking")) {
+      // Folded via reasoningFieldOf; do not dump into content text.
+      continue;
+    }
+    if (p.type === "tool-call") {
+      calls.push(asOpenAiToolCall(p, calls.length));
+      continue;
+    }
+    if (p.type === "tool-result") {
+      results.push(p);
+      continue;
+    }
+    texts.push(JSON.stringify(p));
+  }
+
+  var out = [];
+  var text = texts.join("\n");
+  var existingCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  var toolCalls = calls.length ? calls : existingCalls;
+  // Harness experimental content is carried verbatim onto tool rows (Layer C):
+  // the runtime leg's first conversion must keep it so the hop-side pass can
+  // map it to image content. Message-level values attach to the first tool
+  // row only, so one value is never injected twice.
+  var carriedMessageExperimental = false;
+
+  if (role === "assistant" || toolCalls.length) {
+    var assistant = { role: "assistant", content: text };
+    var reasoningPart = reasoningFieldOf(message);
+    if (reasoningPart) {
+      assistant.reasoning_content = reasoningPart;
+    }
+    if (toolCalls.length) {
+      assistant.tool_calls = toolCalls;
+    }
+    out.push(assistant);
+  } else if (role === "tool" && results.length === 0) {
+    var row = { role: "tool", content: text };
+    var id = toolCallIdOf(message);
+    if (id) {
+      row.tool_call_id = id;
+    }
+    var carriedHere = experimentalContentRaw(message);
+    if (carriedHere !== undefined) {
+      row.experimental_content = carriedHere;
+    }
+    out.push(row);
+  } else if (role !== "tool" && (text || results.length === 0)) {
+    out.push({ role: role, content: userContent(text, images) });
+  }
+
+  for (var r = 0; r < results.length; r++) {
+    var part = results[r];
+    var toolRow = {
+      role: "tool",
+      content: resultText(part),
+    };
+    var toolId = toolCallIdOf(part) || toolCallIdOf(message);
+    if (toolId) {
+      toolRow.tool_call_id = toolId;
+    }
+    var carried = experimentalContentRaw(part);
+    if (carried === undefined && !carriedMessageExperimental) {
+      carried = experimentalContentRaw(message);
+      carriedMessageExperimental = true;
+    }
+    if (carried !== undefined) {
+      toolRow.experimental_content = carried;
+    }
+    out.push(toolRow);
+  }
+
+  if (out.length === 0) {
+    out.push({ role: role === "tool" ? "tool" : role || "user", content: userContent(text, images) });
+  }
+  return out;
+}
+
+function convertOne(message, index) {
+  if (!isRecord(message)) {
+    return [{ role: "user", content: String(message || "") }];
+  }
+  var role = message.role;
+  if (role === "function") {
+    role = "tool";
+  }
+  if (role !== "system" && role !== "user" && role !== "assistant" && role !== "tool") {
+    role = "user";
+  }
+
+  if (Array.isArray(message.content)) {
+    return convertParts(role, message, index);
+  }
+  if (isRecord(message.content) && (message.content.type === "tool-result" || message.content.type === "tool-call")) {
+    return convertParts(role, {
+      role: role,
+      content: [message.content],
+      tool_calls: message.tool_calls,
+      toolCallId: message.toolCallId,
+      tool_call_id: message.tool_call_id,
+      experimental_content: message.experimental_content,
+      experimentalContent: message.experimentalContent,
+      experimental_contents: message.experimental_contents,
+      experimentalContents: message.experimentalContents,
+      reasoning_content: message.reasoning_content,
+      reasoning: message.reasoning,
+      thinking: message.thinking,
+    }, index);
+  }
+
+  var text = contentToText(message.content);
+  var row = { role: role, content: text };
+  if (role === "assistant") {
+    var reasoningRow = reasoningFieldOf(message);
+    if (reasoningRow) {
+      row.reasoning_content = reasoningRow;
+    }
+  }
+  if (role === "tool") {
+    var id = toolCallIdOf(message);
+    if (id) {
+      row.tool_call_id = id;
+    }
+    var carried = experimentalContentRaw(message);
+    if (carried !== undefined) {
+      row.experimental_content = carried;
+    }
+  }
+  if (role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+    row.tool_calls = message.tool_calls;
+  }
+  return [row];
+}
+
+function callIdsFromAssistant(row) {
+  var ids = [];
+  if (!row || !Array.isArray(row.tool_calls)) {
+    return ids;
+  }
+  for (var i = 0; i < row.tool_calls.length; i++) {
+    var call = row.tool_calls[i];
+    if (call && typeof call.id === "string" && call.id) {
+      ids.push(call.id);
+    }
+  }
+  return ids;
+}
+
+function repairToolCallIds(messages) {
+  var pending = [];
+  for (var i = 0; i < messages.length; i++) {
+    var row = messages[i];
+    if (!row) {
+      continue;
+    }
+    if (row.role === "assistant") {
+      pending = callIdsFromAssistant(row).slice();
+      continue;
+    }
+    if (row.role !== "tool") {
+      continue;
+    }
+    if (typeof row.tool_call_id === "string" && row.tool_call_id.trim()) {
+      var at = pending.indexOf(row.tool_call_id);
+      if (at >= 0) {
+        pending.splice(at, 1);
+      }
+      continue;
+    }
+    row.tool_call_id = pending.shift() || "call_" + String(i);
+  }
+  return messages;
+}
+
+// Upstream providers reject tool call ids that are too long (64 is the most
+// strict known ceiling, e.g. meta/muse-spark) or that contain characters
+// outside the safe [a-zA-Z0-9_-] set. We deterministically remap any offending
+// id to a stable hash-derived value so that:
+//   - assistant.tool_calls[i].id  and  the following role=tool .tool_call_id
+//     keep pointing at the same (remapped) id, preserving pairing;
+//   - the same original id maps to the same new id within a request AND across
+//     requests (a long id that reappears in a later turn maps identically).
+// Short, safe ids are kept verbatim. Nothing other than tool call ids changes.
+
+var TOOL_CALL_ID_SAFE_RE = /^[a-zA-Z0-9_-]+$/;
+var TOOL_CALL_ID_MAX = 64;
+var TOOL_CALL_ID_PREFIX = "call_";
+
+function sanitizedToolCallId(id, cache, salt) {
+  if (typeof id !== "string" || id === "") {
+    return id;
+  }
+  if (id.length <= TOOL_CALL_ID_MAX && TOOL_CALL_ID_SAFE_RE.test(id)) {
+    return id;
+  }
+  if (Object.prototype.hasOwnProperty.call(cache, id)) {
+    return cache[id];
+  }
+  var digest = crypto.createHash("sha256").update(String(salt || "") + id).digest(); // 32 bytes
+  // Base36 of the digest (little-endian base conversion); keeps the value
+  // within [a-z0-9] and deterministic, no external dependency.
+  var num = 0n;
+  for (var i = digest.length - 1; i >= 0; i--) {
+    num = (num << 8n) | BigInt(digest[i]);
+  }
+  var chars = "0123456789abcdefghijklmnopqrstuvwxyz";
+  var encoded = "";
+  while (num > 0n) {
+    encoded = chars[Number(num % 36n)] + encoded;
+    num /= 36n;
+  }
+  var body = encoded.slice(0, TOOL_CALL_ID_MAX - TOOL_CALL_ID_PREFIX.length);
+  var result = TOOL_CALL_ID_PREFIX + body;
+  cache[id] = result;
+  return result;
+}
+
+function sanitizeToolCallIds(messages) {
+  if (!Array.isArray(messages)) {
+    return messages;
+  }
+  // A fixed namespace prefix keeps the hash stable across calls within a
+  // request, across requests in the same conversation, and across restarts of
+  // the hop service: a long id that reappears in a later turn maps identically.
+  // A random per-call salt would break that cross-turn stability.
+  var salt = "openbot:tool-call-id:";
+  var cache = {};
+  for (var i = 0; i < messages.length; i++) {
+    var row = messages[i];
+    if (!row) {
+      continue;
+    }
+    if (row.role === "assistant" && Array.isArray(row.tool_calls)) {
+      for (var j = 0; j < row.tool_calls.length; j++) {
+        var call = row.tool_calls[j];
+        if (call && typeof call === "object") {
+          var id = call.id;
+          if (typeof id === "string" && id) {
+            call.id = sanitizedToolCallId(id, cache, salt);
+          }
+        }
+      }
+    } else if (row.role === "tool") {
+      if (typeof row.tool_call_id === "string" && row.tool_call_id) {
+        row.tool_call_id = sanitizedToolCallId(row.tool_call_id, cache, salt);
+      }
+    }
+  }
+  return messages;
+}
+
+// Pre-flight adjacency repair, after every other pass has assembled the
+// outbound array. OpenAI-compatible upstreams reject the request with 400 when
+// an assistant message carrying tool_calls is not followed, before any other
+// role intervenes, by the role=tool results of ALL of its calls (incident
+// 2026-09-11: an enrichment pass had slotted a role=user image message between
+// two parallel tool results). The repair is deterministic and structural:
+//
+//   1. Results separated from their calls by an interloping row are moved
+//      forward so every tool_calls block is followed by its full result run
+//      (contiguous — a second tool row after the interloper is dragged along,
+//      not left behind to trip the validator on the way back).
+//   2. A call whose result does not exist ANYWHERE gets a synthesized
+//      role=tool result stating exactly that — never a fake success, never an
+//      invented payload ("[tool call did not complete: no result recorded]").
+//   3. A belated role=tool result found inside a later block's window is kept
+//      but dragged adjacent to its block; duplicate rows for one call id are
+//      collapsed to the first. A tool result whose call is nowhere in the
+//      array is left verbatim (its id was already normalized by
+//      repairToolCallIds) — the census only stops a second, synthesized
+//      result being added for a call whose result exists elsewhere.
+//
+// Already-valid arrays come out byte-identical (single output array, no
+// reallocation). Runs after sanitizeToolCallIds in the hop pipeline so the
+// repaired ids are the final ones; the guard is idempotent.
+//
+// The synthesized row carries this reserved content. Injection hardening's
+// debt classifier deliberately ignores it: execution chronology must come
+// from the host transcript, not from a row the hop itself added — treating
+// the sentinel as a real tool result would flip a "touch-no-tool" (not
+// owed) tail into "touch-then-tool" (owed) and spawn remediation calls.
+var TOOL_CALL_INCOMPLETE_CONTENT = "[tool call did not complete: no result recorded]";
+
+function repairOrphanedToolCalls(messages) {
+  if (!Array.isArray(messages)) return messages;
+
+  var callIdsOf = function (row) {
+    var ids = [];
+    if (row && Array.isArray(row.tool_calls)) {
+      for (var c = 0; c < row.tool_calls.length; c++) {
+        var call = row.tool_calls[c];
+        if (call && typeof call.id === "string" && call.id) ids.push(call.id);
+      }
+    }
+    return ids;
+  };
+
+  // Pass 1: whole-array census — every tool_call_id that has a call anywhere.
+  var answeredIds = Object.create(null);
+  for (var s = 0; s < messages.length; s++) {
+    var scan = messages[s];
+    if (scan && scan.role === "tool" && typeof scan.tool_call_id === "string" && scan.tool_call_id) {
+      answeredIds[scan.tool_call_id] = true;
+    }
+  }
+
+  var out = [];
+  var i = 0;
+  while (i < messages.length) {
+    var row = messages[i];
+    var ids = row && row.role === "assistant" ? callIdsOf(row) : [];
+    if (!ids.length) {
+      out.push(row);
+      i += 1;
+      continue;
+    }
+    // Collect everything up to the next assistant row: tool rows that belong
+    // to this block (wherever the producing pass left them) and the non-tool
+    // rows that were interleaved between them (injected user image messages,
+    // reminders, nudges). Scanning stops at the next assistant row, so rows
+    // of a later block are only pulled in when their id matches THIS block.
+    var collected = [];
+    var interlopers = [];
+    var seen = Object.create(null);
+    var j = i + 1;
+    while (j < messages.length) {
+      var m2 = messages[j];
+      if (m2 && m2.role === "assistant") break;
+      if (m2 && m2.role === "tool") {
+        collected.push(m2);
+        var cid = m2.tool_call_id;
+        if (typeof cid === "string" && cid) seen[cid] = true;
+        j += 1;
+        continue;
+      }
+      interlopers.push(m2);
+      j += 1;
+    }
+    // Deterministic result-run order: the call order of the assistant row.
+    var byId = Object.create(null);
+    for (var b = 0; b < collected.length; b++) {
+      var bid = collected[b].tool_call_id;
+      if (typeof bid === "string" && bid && byId[bid] === undefined) byId[bid] = collected[b];
+    }
+    var ordered = [];
+    for (var oi = 0; oi < ids.length; oi++) {
+      if (byId[ids[oi]]) ordered.push(byId[ids[oi]]);
+    }
+    // Belated rows in the scan window whose id is not one of this block's
+    // calls (kept, never silently dropped, but dragged here so the tool run
+    // stays contiguous for the upstream validator). A duplicate row for an
+    // id already ordered collapses away: only the first copy is referenced
+    // by byId, so later copies fall out here.
+    for (var be = 0; be < collected.length; be++) {
+      var bRow = collected[be];
+      var bId = bRow.tool_call_id;
+      if (byId[bId] === bRow) {
+        if (ordered.indexOf(bRow) < 0) ordered.push(bRow);
+      } else if (typeof bId !== "string" || !bId) {
+        ordered.push(bRow); // id-less row: keep it in the run verbatim
+      }
+      // else: duplicate row for an id already ordered — collapses away
+    }
+    // Calls with no result anywhere get an explicit did-not-complete row —
+    // never a synthesized success, never invented payload.
+    for (var m = 0; m < ids.length; m++) {
+      if (seen[ids[m]] || answeredIds[ids[m]]) continue;
+      ordered.push({
+        role: "tool",
+        tool_call_id: ids[m],
+        content: TOOL_CALL_INCOMPLETE_CONTENT,
+      });
+      answeredIds[ids[m]] = true;
+    }
+    out.push(row);
+    for (var p = 0; p < ordered.length; p++) out.push(ordered[p]);
+    for (var q = 0; q < interlopers.length; q++) out.push(interlopers[q]);
+    i = j;
+  }
+  return out;
+}
+
+function toOpenAIMessages(msgs) {
+  if (!Array.isArray(msgs)) {
+    return [{ role: "user", content: String(msgs || "") }];
+  }
+  var out = [];
+  for (var i = 0; i < msgs.length; i++) {
+    var rows = convertOne(msgs[i], i);
+    for (var j = 0; j < rows.length; j++) {
+      out.push(rows[j]);
+    }
+  }
+  // Generic outbound governance (all providers): drop empty assistant rows.
+  // An assistant message with empty/null content and no tool_calls carries
+  // no information (typically an upstream SSE accumulation leftover) and
+  // strict providers reject it with 400. Dropped, not rewritten: a
+  // placeholder string would pollute context, and null is just another
+  // rejectable shape. Rows WITH tool_calls are always kept -- null/empty
+  // content + tool_calls is the legal OpenAI tool-call turn shape.
+  // Safe for pairing: dropped rows have no tool_calls, so they contribute
+  // nothing to repairToolCallIds' pending-id queue; runs before repair so
+  // ghost rows are never counted.
+  out = dropEmptyAssistantMessages(out);
+  var repaired = repairToolCallIds(out);
+  // repairToolCallIds fills in missing ids based on assistant ordering; the
+  // sanitizer must run AFTER repair so that a repaired id (which may itself be
+  // a synthetic long fallback) is also normalized for length/charset.
+  var sanitized = sanitizeToolCallIds(repaired);
+  return sanitized.length ? sanitized : [{ role: "user", content: "" }];
+}
+
+function isEmptyContent(content) {
+  return content == null || content === "";
+}
+
+function dropEmptyAssistantMessages(messages) {
+  if (!Array.isArray(messages)) {
+    return messages;
+  }
+  var kept = [];
+  for (var i = 0; i < messages.length; i++) {
+    var row = messages[i];
+    if (
+      row &&
+      row.role === "assistant" &&
+      isEmptyContent(row.content) &&
+      !(typeof row.reasoning_content === "string" && row.reasoning_content) &&
+      !(typeof row.reasoning === "string" && row.reasoning) &&
+      !(typeof row.thinking === "string" && row.thinking) &&
+      (!Array.isArray(row.tool_calls) || row.tool_calls.length === 0)
+    ) {
+      continue;
+    }
+    kept.push(row);
+  }
+  return kept;
+}
+
+exports.toOpenAIMessages = toOpenAIMessages;
+exports.dropEmptyAssistantMessages = dropEmptyAssistantMessages;
+exports.repairToolCallIds = repairToolCallIds;
+exports.repairOrphanedToolCalls = repairOrphanedToolCalls;
+exports.TOOL_CALL_INCOMPLETE_CONTENT = TOOL_CALL_INCOMPLETE_CONTENT;
+exports.toolCallIdOf = toolCallIdOf;
+exports.sanitizeToolCallIds = sanitizeToolCallIds;

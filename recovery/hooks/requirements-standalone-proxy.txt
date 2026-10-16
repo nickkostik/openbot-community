@@ -1,0 +1,2 @@
+# Optional private transport only; ordinary OpenBot installation does not install this.
+mitmproxy==12.2.3

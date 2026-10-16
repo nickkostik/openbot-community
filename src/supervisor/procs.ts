@@ -1,0 +1,389 @@
+import fs from "node:fs";
+import net from "node:net";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  type AbsPath,
+  type ForeignPid,
+  type OwnedPid,
+  type PortObserved,
+  LOOPBACK,
+} from "../domain/types.ts";
+import { parseAbsPath, type BoxPaths } from "./paths.ts";
+
+export type FsDeps = {
+  read(path: AbsPath): string | undefined;
+  write(path: AbsPath, body: string, mode?: number): void;
+  copy(from: AbsPath, to: AbsPath): void;
+  remove(path: AbsPath): void;
+  exists(path: AbsPath): boolean;
+  mkdirp(path: AbsPath): void;
+  /**
+   * Atomic replace. Optional only for test doubles: the real implementation
+   * always provides it, and callers that need it (see the pending-bounce
+   * marker) fall back to a plain write when it is absent.
+   */
+  rename?(from: AbsPath, to: AbsPath): void;
+  /**
+   * Append without rewriting the file. Optional only for test doubles: the
+   * real implementation always provides it, and callers that share a file with
+   * another writer (the events channel, a running cloudflared's log) fall back
+   * to read-then-write when it is absent.
+   */
+  append?(path: AbsPath, body: string, mode?: number): void;
+};
+
+export type ProcDeps = {
+  port(host: string, port: number): Promise<boolean>;
+  readPidFile(path: AbsPath): number | undefined;
+  pidAlive(pid: number): boolean;
+  start(input: {
+    command?: string;
+    argv: readonly string[];
+    env: NodeJS.ProcessEnv;
+    log: AbsPath;
+    pidFile: AbsPath;
+    /**
+     * Whether the child's pid may be written to `pidFile` on its behalf.
+     * Defaults to true. False is for a child that publishes that same pidfile
+     * itself (the guard daemon): a pid written before the child runs makes the
+     * child read a live owner back -- itself -- and refuse to start, and it
+     * would overwrite the lock an already-running daemon holds.
+     */
+    writePidFile?: boolean;
+  }): OwnedPid;
+  stop(pid: OwnedPid): void;
+  hostPids(hostMain: AbsPath): OwnedPid[];
+  /**
+   * Re-proves that a recorded pid still runs the host entrypoint before a
+   * deferred SIGTERM, so a recycled pid is never signalled.
+   */
+  hostPidMatches?(pid: OwnedPid, hostMain: AbsPath): boolean;
+  /** Wall-clock start of a live pid, or undefined when the platform cannot say. */
+  pidStartMs?(pid: OwnedPid): number | undefined;
+  /** Finds a known OpenBot hop-server process even when its pidfile is missing. */
+  hopServerPids?(hopServer: AbsPath): OwnedPid[];
+  opengrokHopPids(): OwnedPid[];
+  term(pid: OwnedPid): void;
+  syntaxCheck(file: AbsPath): { ok: true } | { ok: false; stderr: string };
+};
+
+export function parseOwnedPid(raw: number): OwnedPid {
+  if (!Number.isInteger(raw) || raw <= 0) {
+    throw new Error("OpenBot: pid is not a positive integer");
+  }
+  return raw as OwnedPid;
+}
+
+export function parseForeignPid(raw: number): ForeignPid {
+  if (!Number.isInteger(raw) || raw <= 0) {
+    throw new Error("OpenBot: pid is not a positive integer");
+  }
+  return raw as ForeignPid;
+}
+
+export function nodeFs(): FsDeps {
+  return {
+    read(path) {
+      try {
+        return fs.readFileSync(path, "utf8");
+      } catch (err) {
+        if (isEnoent(err)) {
+          return undefined;
+        }
+        throw err;
+      }
+    },
+    write(path, body, mode = 0o644) {
+      fs.writeFileSync(path, body, { encoding: "utf8", mode });
+    },
+    append(path, body, mode = 0o644) {
+      fs.appendFileSync(path, body, { encoding: "utf8", mode });
+    },
+    copy(from, to) {
+      fs.copyFileSync(from, to);
+    },
+    remove(path) {
+      try {
+        fs.unlinkSync(path);
+      } catch (err) {
+        if (!isEnoent(err)) {
+          throw err;
+        }
+      }
+    },
+    exists(path) {
+      return fs.existsSync(path);
+    },
+    mkdirp(path) {
+      fs.mkdirSync(path, { recursive: true });
+    },
+    rename(from, to) {
+      fs.renameSync(from, to);
+    },
+  };
+}
+
+function isEnoent(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
+}
+
+export function portOpen(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (open: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(250);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+export function classifyPort(input: {
+  listening: boolean;
+  pidFile: number | undefined;
+  pidAlive: boolean;
+  host: string;
+  port: number;
+}): PortObserved {
+  if (!input.listening) {
+    return { kind: "absent" };
+  }
+  if (input.pidFile !== undefined && input.pidAlive) {
+    return {
+      kind: "ours",
+      pid: parseOwnedPid(input.pidFile),
+      host: LOOPBACK,
+      port: input.port,
+    };
+  }
+  return {
+    kind: "foreign",
+    pid: parseForeignPid(input.pidFile ?? 1),
+    host: input.host,
+    port: input.port,
+  };
+}
+
+export function isHostMainArgv(args: string, hostMain: string, selfPid: number, pid: number): boolean {
+  if (pid === selfPid) {
+    return false;
+  }
+  if (/\b(zsh|bash|sh|dash)\b/.test(args) && args.includes(" -c ")) {
+    return false;
+  }
+  const tokens = args.trim().split(/\s+/u);
+  if (!/(^|\/)node$/.test(tokens[0] ?? "")) return false;
+  const valueOptions = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "--conditions"]);
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token === "--") return tokens[i + 1] === hostMain;
+    // Checking/evaluating a file does not run the host. A guard's --host-main
+    // option after cli.ts is also not the Node entrypoint.
+    if (/^(?:-[epc]|--(?:eval|print|check)(?:=|$))/u.test(token)) return false;
+    if (valueOptions.has(token)) { i++; continue; }
+    if (token.startsWith("-")) continue;
+    return token === hostMain;
+  }
+  return false;
+}
+
+export function isOpengrokHopArgv(args: string, selfPid: number, pid: number): boolean {
+  if (pid === selfPid) {
+    return false;
+  }
+  if (/\b(zsh|bash|sh|dash)\b/.test(args) && args.includes(" -c ")) {
+    return false;
+  }
+  const tokens = args.trim().split(/\s+/u);
+  const hasPy = tokens.some((token) => /(^|\/)python(\d+(\.\d+)*)?$/.test(token));
+  const hasHop = tokens.some((token) => token.endsWith("hop-server.py"));
+  return hasPy && hasHop;
+}
+
+export function isHopServerArgv(args: string, hopServer: string, selfPid: number, pid: number): boolean {
+  if (pid === selfPid) {
+    return false;
+  }
+  if (/\b(zsh|bash|sh|dash)\b/.test(args) && args.includes(" -c ")) {
+    return false;
+  }
+  const tokens = args.trim().split(/\s+/u);
+  const hasNode = tokens.some((token) => /(^|\/)node$/.test(token));
+  const hasHop = tokens.some((token) => token === hopServer);
+  return hasNode && hasHop;
+}
+
+function eachPsLine(visit: (pid: number, args: string) => void): void {
+  const result = spawnSync("ps", ["-ax", "-o", "pid=,args="], { encoding: "utf8" });
+  if (result.status !== 0 && result.status !== 1) {
+    return;
+  }
+  for (const line of (result.stdout || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const splitAt = trimmed.search(/\s/u);
+    if (splitAt < 0) {
+      continue;
+    }
+    const pid = Number(trimmed.slice(0, splitAt));
+    const args = trimmed.slice(splitAt + 1).trim();
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    visit(pid, args);
+  }
+}
+
+/** Full argv of one process, or "" when it is gone. Linux reads /proc directly. */
+export function readPidArgs(pid: number): string {
+  try {
+    return fs
+      .readFileSync(`/proc/${String(pid)}/cmdline`, "utf8")
+      .split("\0")
+      .join(" ")
+      .trim();
+  } catch {
+    /* no /proc (macOS, Windows): fall back to ps */
+  }
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8" });
+  return (result.stdout || "").trim();
+}
+
+export function nodeProcs(): ProcDeps {
+  return {
+    port: portOpen,
+    readPidFile(path) {
+      try {
+        const raw = fs.readFileSync(path, "utf8").trim();
+        const pid = Number(raw);
+        if (!Number.isInteger(pid) || pid <= 0) {
+          return undefined;
+        }
+        return pid;
+      } catch (err) {
+        if (isEnoent(err)) {
+          return undefined;
+        }
+        throw err;
+      }
+    },
+    pidAlive(pid) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    start(input) {
+      const logFd = fs.openSync(input.log, "a");
+      const command = input.command ?? process.execPath;
+      const child = spawn(command, [...input.argv], {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: { ...process.env, ...input.env },
+      });
+      fs.closeSync(logFd);
+      // A failed spawn (missing binary → ENOENT, bad permissions → EACCES, …)
+      // arrives as an asynchronous 'error' event on the child. Without a
+      // listener that event is unhandled and terminates the whole service, so
+      // attach one here. The synchronous pid check below reports the failure to
+      // the caller; the listener only prevents the async event from crashing us.
+      child.on("error", () => {
+        /* reported synchronously below */
+      });
+      if (child.pid === undefined) {
+        throw new Error(`OpenBot: could not spawn ${command}`);
+      }
+      child.unref();
+      const pid = parseOwnedPid(child.pid);
+      if (input.writePidFile !== false) {
+        fs.writeFileSync(input.pidFile, `${String(pid)}\n`, { encoding: "utf8", mode: 0o644 });
+      }
+      return pid;
+    },
+    stop(pid) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    },
+    hostPids(hostMain) {
+      const pids: OwnedPid[] = [];
+      eachPsLine((pid, args) => {
+        if (isHostMainArgv(args, hostMain, process.pid, pid)) {
+          pids.push(parseOwnedPid(pid));
+        }
+      });
+      return pids;
+    },
+    hostPidMatches(pid, hostMain) {
+      const args = readPidArgs(pid);
+      if (args === "") {
+        return false;
+      }
+      return isHostMainArgv(args, hostMain, process.pid, pid);
+    },
+    pidStartMs(pid) {
+      // "etimes" is elapsed seconds (procps and BusyBox). A platform without
+      // it fails the spawn and reports "unknown", which only disables the
+      // already-restarted shortcut.
+      const result = spawnSync("ps", ["-p", String(pid), "-o", "etimes="], { encoding: "utf8" });
+      const seconds = Number((result.stdout || "").trim());
+      if (result.status !== 0 || !Number.isFinite(seconds) || seconds < 0) {
+        return undefined;
+      }
+      return Date.now() - Math.round(seconds * 1000);
+    },
+    hopServerPids(hopServer) {
+      const pids: OwnedPid[] = [];
+      eachPsLine((pid, args) => {
+        if (isHopServerArgv(args, hopServer, process.pid, pid)) {
+          pids.push(parseOwnedPid(pid));
+        }
+      });
+      return pids;
+    },
+    opengrokHopPids() {
+      const pids: OwnedPid[] = [];
+      eachPsLine((pid, args) => {
+        if (isOpengrokHopArgv(args, process.pid, pid)) {
+          pids.push(parseOwnedPid(pid));
+        }
+      });
+      return pids;
+    },
+    term(pid) {
+      // Best-effort like stop(): a pid that exited between the argv check and
+      // this call must not throw, or a finalizer would die before clearing the
+      // marker and retry the same kill on every tick.
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    },
+    syntaxCheck(file) {
+      const result = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
+      if (result.status === 0) {
+        return { ok: true };
+      }
+      return { ok: false, stderr: result.stderr || result.stdout || "node --check failed" };
+    },
+  };
+}
+
+export function writeTemp(fsDeps: FsDeps, dir: AbsPath, name: string, body: string): AbsPath {
+  const path = parseAbsPath(`${dir.replace(/\/$/u, "")}/${name}`);
+  fsDeps.write(path, body, 0o644);
+  return path;
+}
+
+export type { BoxPaths };

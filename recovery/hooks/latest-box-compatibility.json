@@ -1,0 +1,938 @@
+{
+  "schemaVersion": 1,
+  "reviewedSources": {
+    "9825ef2b1f949215df75e63610568cf143abad918a117f70d3a365997ae12f90": {
+      "version": "ddf72f7",
+      "clientVersion": "0.69.0-pre.23",
+      "strategy": "latest-host-with-box-ports",
+      "sharedClassPorts": {
+        "SandStructuredLogTelemetry": [
+          "reportMemorySynthesis",
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered"
+        ],
+        "VoiceSpeakPolicy": [
+          "theyJustSpoke",
+          "newsOwed"
+        ],
+        "MainLoopVoicePrompt": [
+          "replyNudge",
+          "callEndedNudge",
+          "midTurn"
+        ],
+        "OnePasswordBrokerService": [
+          "getStatus"
+        ],
+        "McpHostService": [
+          "boxServersTurn"
+        ],
+        "FileMemoryStore": [
+          "dreaming",
+          "explicitDir",
+          "generatedDir",
+          "refreshFile",
+          "tombstoneDir",
+          "evidenceDir",
+          "captureMemoryEvidence",
+          "recordMemoryEvidence",
+          "tombstonePath",
+          "originPath",
+          "hasOrigin",
+          "memoryOrigin",
+          "markOrigin",
+          "clearOrigins",
+          "isTombstoned",
+          "markTombstone",
+          "clearTombstone",
+          "prepareSynthesis",
+          "applySynthesis",
+          "hasMemories",
+          "readSpooledEvidence",
+          "clearSpooledEvidence",
+          "isTemporalReviewDue",
+          "markTemporalReview",
+          "readSynthesisState"
+        ],
+        "MemoryService": [
+          "synthesisService",
+          "enableMemorySynthesis",
+          "dispose",
+          "synthesisTargetForAgent",
+          "listSynthesisTargets"
+        ],
+        "SandAgentDb": [
+          "getRequestIds",
+          "recordRequestId",
+          "hasConnectorScopedSend",
+          "setConnectorScopedSend",
+          "getIntroductionPending",
+          "getIntroductionLanguage",
+          "setIntroductionPending",
+          "getServerIntroductionState",
+          "setServerIntroductionState",
+          "getOriginBuiltinListed",
+          "setOriginBuiltinListed",
+          "getWatchedSlackChannels",
+          "hasWatchedSlackChannel",
+          "addWatchedSlackChannel"
+        ],
+        "BoxHandoffService": [
+          "captureSnapshot",
+          "grabScreenshot"
+        ],
+        "HostMcpAuthCompletion": [
+          "waits",
+          "registerConnectCard"
+        ]
+      },
+      "addedRunnerGates": {
+        "playwrightPostActionWaitQuiet": false,
+        "cancelledToolCallOutcome": false,
+        "mcpArgumentUnmatchedRename": false,
+        "mcpArgumentRepairSinglePass": false,
+        "secureValues": false,
+        "appsPublish": false,
+        "cloudAgentPublishApp": false,
+        "automationSendToAgent": false,
+        "executorLeanPrompt": false,
+        "subagentDynamicTools": false,
+        "linkItems": false,
+        "automationTiming": false,
+        "generateVideo": false,
+        "formFillPlaywrightContext": false,
+        "needsAuthTurnHold": false,
+        "stdioSignInCard": false,
+        "computerUseCodeMode": false,
+        "runCodeReadOnlyReviewSkip": false,
+        "setUserAttribute": false,
+        "financialDataReminder": false,
+        "peerWakeApprovalReminder": false,
+        "subagentHistoryTools": false
+      },
+      "retainedRunnerGates": {
+        "sendMessageDeliveryOwed": true,
+        "playwrightRunCodeOnlySurface": false,
+        "playwrightRunCodeScriptFirst": false,
+        "playwrightSettle500": false,
+        "playwrightSettle250": false,
+        "playwrightSettle100": false,
+        "playwrightSettle50": false,
+        "computerSettle500": false,
+        "computerSettleUntilStable": false,
+        "playwrightSnapshotDiff": false,
+        "playwrightSnapshotNone": false,
+        "browserCoordinateActions": false,
+        "browserUseJev": false,
+        "updateStateSplit": false,
+        "documentSubagent": false,
+        "turnEndThroughAgent": true,
+        "voiceSkill": false
+      },
+      "sharedApiPorts": {
+        "withAutomationRunAnalytics": [
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportAutomationRun"
+        ],
+        "createNoopSandTelemetry": [
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered"
+        ],
+        "createBackendRelaySources": [
+          "requestDrain"
+        ],
+        "sandBrowserArmDeps": [
+          "playwrightSettleArm",
+          "playwrightSnapshotDiffArm",
+          "browserCoordinateActionsArm"
+        ],
+        "playwrightRunCodeToolDeps": [
+          "playwrightRuntime"
+        ]
+      },
+      "localGatewayReaders": [
+        "getSubagents",
+        "getAsyncTasks"
+      ]
+    },
+    "54cfee26f4aeb4ebb7fecce747a1087d916b03e42ab5e0fe198e10d29fb4c3a3": {
+      "version": "91a9d91",
+      "clientVersion": "0.70.0-pre.1",
+      "strategy": "latest-host-with-box-ports",
+      "sharedClassPorts": {
+        "SandStructuredLogTelemetry": [
+          "reportMemorySynthesis",
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "VoiceSpeakPolicy": [
+          "theyJustSpoke",
+          "newsOwed"
+        ],
+        "MainLoopVoicePrompt": [
+          "replyNudge",
+          "callEndedNudge",
+          "midTurn"
+        ],
+        "OnePasswordBrokerService": [
+          "getStatus"
+        ],
+        "McpHostService": [
+          "boxServersTurn"
+        ],
+        "FileMemoryStore": [
+          "dreaming",
+          "explicitDir",
+          "generatedDir",
+          "refreshFile",
+          "tombstoneDir",
+          "evidenceDir",
+          "captureMemoryEvidence",
+          "recordMemoryEvidence",
+          "tombstonePath",
+          "originPath",
+          "hasOrigin",
+          "memoryOrigin",
+          "markOrigin",
+          "clearOrigins",
+          "isTombstoned",
+          "markTombstone",
+          "clearTombstone",
+          "prepareSynthesis",
+          "applySynthesis",
+          "hasMemories",
+          "readSpooledEvidence",
+          "clearSpooledEvidence",
+          "isTemporalReviewDue",
+          "markTemporalReview",
+          "readSynthesisState"
+        ],
+        "MemoryService": [
+          "synthesisService",
+          "enableMemorySynthesis",
+          "dispose",
+          "synthesisTargetForAgent",
+          "listSynthesisTargets"
+        ],
+        "SandAgentDb": [
+          "getRequestIds",
+          "recordRequestId",
+          "hasConnectorScopedSend",
+          "setConnectorScopedSend",
+          "getIntroductionPending",
+          "getIntroductionLanguage",
+          "setIntroductionPending",
+          "getServerIntroductionState",
+          "setServerIntroductionState",
+          "getOriginBuiltinListed",
+          "setOriginBuiltinListed",
+          "getWatchedSlackChannels",
+          "hasWatchedSlackChannel",
+          "addWatchedSlackChannel"
+        ],
+        "BoxHandoffService": [
+          "captureSnapshot",
+          "grabScreenshot"
+        ],
+        "HostMcpAuthCompletion": [
+          "waits",
+          "registerConnectCard"
+        ],
+        "SandExperimentServiceCore": [
+          "offerUpdateStateSplit",
+          "offerVoiceSkill"
+        ]
+      },
+      "addedRunnerGates": {
+        "playwrightPostActionWaitQuiet": false,
+        "cancelledToolCallOutcome": false,
+        "mcpArgumentUnmatchedRename": false,
+        "mcpArgumentRepairSinglePass": false,
+        "secureValues": false,
+        "appsPublish": false,
+        "cloudAgentPublishApp": false,
+        "automationSendToAgent": false,
+        "executorLeanPrompt": false,
+        "subagentDynamicTools": false,
+        "linkItems": false,
+        "automationTiming": false,
+        "generateVideo": false,
+        "formFillPlaywrightContext": false,
+        "needsAuthTurnHold": false,
+        "stdioSignInCard": false,
+        "computerUseCodeMode": false,
+        "runCodeReadOnlyReviewSkip": false,
+        "setUserAttribute": false,
+        "financialDataReminder": false,
+        "peerWakeApprovalReminder": false,
+        "subagentHistoryTools": false,
+        "toolArgumentAliases": false,
+        "shopifyStoreSwitchCard": false
+      },
+      "retainedRunnerGates": {
+        "sendMessageDeliveryOwed": true,
+        "playwrightRunCodeOnlySurface": false,
+        "playwrightRunCodeScriptFirst": false,
+        "playwrightSettle500": false,
+        "playwrightSettle250": false,
+        "playwrightSettle100": false,
+        "playwrightSettle50": false,
+        "computerSettle500": false,
+        "computerSettleUntilStable": false,
+        "playwrightSnapshotDiff": false,
+        "playwrightSnapshotNone": false,
+        "browserCoordinateActions": false,
+        "browserUseJev": false,
+        "updateStateSplit": false,
+        "documentSubagent": false,
+        "turnEndThroughAgent": true,
+        "voiceSkill": false
+      },
+      "retainedExtensions": [
+        "inferenceExtension"
+      ],
+      "restoredExperiments": [
+        "grok_bot_update_state_split_v2",
+        "grok_bot_voice_skill"
+      ],
+      "sharedApiPorts": {
+        "withAutomationRunAnalytics": [
+          "reportSubagentRevival",
+          "reportShellRevival",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportAutomationRun"
+        ],
+        "createNoopSandTelemetry": [
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "createBackendRelaySources": [
+          "requestDrain"
+        ],
+        "sandBrowserArmDeps": [
+          "playwrightSettleArm",
+          "playwrightSnapshotDiffArm",
+          "browserCoordinateActionsArm"
+        ],
+        "playwrightRunCodeToolDeps": [
+          "playwrightRuntime"
+        ]
+      },
+      "localGatewayReaders": [
+        "getSubagents",
+        "getAsyncTasks"
+      ],
+      "localGatewayActions": [
+        "runAgentAutomationNow",
+        "nudgeVoiceCall"
+      ]
+    },
+    "abd6c01cf864e96cc051375bc667d49eb7bb652346ad9dea8b490ef779dff377": {
+      "version": "91efc0d",
+      "clientVersion": "0.70.0-pre.7",
+      "strategy": "latest-host-with-box-ports",
+      "sharedClassPorts": {
+        "SandStructuredLogTelemetry": [
+          "reportMemorySynthesis",
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "VoiceSpeakPolicy": [
+          "theyJustSpoke",
+          "newsOwed"
+        ],
+        "MainLoopVoicePrompt": [
+          "replyNudge",
+          "callEndedNudge",
+          "midTurn"
+        ],
+        "OnePasswordBrokerService": [
+          "getStatus"
+        ],
+        "McpHostService": [
+          "boxServersTurn"
+        ],
+        "FileMemoryStore": [
+          "dreaming",
+          "explicitDir",
+          "generatedDir",
+          "refreshFile",
+          "tombstoneDir",
+          "evidenceDir",
+          "captureMemoryEvidence",
+          "recordMemoryEvidence",
+          "tombstonePath",
+          "originPath",
+          "hasOrigin",
+          "memoryOrigin",
+          "markOrigin",
+          "clearOrigins",
+          "isTombstoned",
+          "markTombstone",
+          "clearTombstone",
+          "prepareSynthesis",
+          "applySynthesis",
+          "hasMemories",
+          "readSpooledEvidence",
+          "clearSpooledEvidence",
+          "isTemporalReviewDue",
+          "markTemporalReview",
+          "readSynthesisState"
+        ],
+        "MemoryService": [
+          "synthesisService",
+          "enableMemorySynthesis",
+          "dispose",
+          "synthesisTargetForAgent",
+          "listSynthesisTargets"
+        ],
+        "SandAgentDb": [
+          "getRequestIds",
+          "recordRequestId",
+          "hasConnectorScopedSend",
+          "setConnectorScopedSend",
+          "getIntroductionPending",
+          "getIntroductionLanguage",
+          "setIntroductionPending",
+          "getServerIntroductionState",
+          "setServerIntroductionState",
+          "getOriginBuiltinListed",
+          "setOriginBuiltinListed",
+          "getWatchedSlackChannels",
+          "hasWatchedSlackChannel",
+          "addWatchedSlackChannel"
+        ],
+        "BoxHandoffService": [
+          "captureSnapshot",
+          "grabScreenshot"
+        ],
+        "HostMcpAuthCompletion": [
+          "waits",
+          "registerConnectCard"
+        ],
+        "SandExperimentServiceCore": [
+          "offerUpdateStateSplit",
+          "offerVoiceSkill"
+        ]
+      },
+      "addedRunnerGates": {
+        "playwrightPostActionWaitQuiet": false,
+        "cancelledToolCallOutcome": false,
+        "mcpArgumentUnmatchedRename": false,
+        "mcpArgumentRepairSinglePass": false,
+        "secureValues": false,
+        "appsPublish": false,
+        "cloudAgentPublishApp": false,
+        "automationSendToAgent": false,
+        "executorLeanPrompt": false,
+        "subagentDynamicTools": false,
+        "linkItems": false,
+        "automationTiming": false,
+        "generateVideo": false,
+        "formFillPlaywrightContext": false,
+        "needsAuthTurnHold": false,
+        "stdioSignInCard": false,
+        "computerUseCodeMode": false,
+        "runCodeReadOnlyReviewSkip": false,
+        "setUserAttribute": false,
+        "financialDataReminder": false,
+        "peerWakeApprovalReminder": false,
+        "subagentHistoryTools": false,
+        "toolArgumentAliases": false,
+        "shopifyStoreSwitchCard": false,
+        "mcpAppHostAllowlist": false,
+        "executorSendRules": false
+      },
+      "retainedRunnerGates": {
+        "sendMessageDeliveryOwed": true,
+        "playwrightRunCodeOnlySurface": false,
+        "playwrightRunCodeScriptFirst": false,
+        "playwrightSettle500": false,
+        "playwrightSettle250": false,
+        "playwrightSettle100": false,
+        "playwrightSettle50": false,
+        "computerSettle500": false,
+        "computerSettleUntilStable": false,
+        "playwrightSnapshotDiff": false,
+        "playwrightSnapshotNone": false,
+        "browserCoordinateActions": false,
+        "browserUseJev": false,
+        "updateStateSplit": false,
+        "documentSubagent": false,
+        "turnEndThroughAgent": true,
+        "voiceSkill": false
+      },
+      "retainedExtensions": [
+        "inferenceExtension"
+      ],
+      "restoredExperiments": [
+        "grok_bot_update_state_split_v2",
+        "grok_bot_voice_skill"
+      ],
+      "sharedApiPorts": {
+        "withAutomationRunAnalytics": [
+          "reportSubagentRevival",
+          "reportShellRevival",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportAutomationRun"
+        ],
+        "createNoopSandTelemetry": [
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "createBackendRelaySources": [
+          "requestDrain"
+        ],
+        "sandBrowserArmDeps": [
+          "playwrightSettleArm",
+          "playwrightSnapshotDiffArm",
+          "browserCoordinateActionsArm"
+        ],
+        "playwrightRunCodeToolDeps": [
+          "playwrightRuntime"
+        ]
+      },
+      "localGatewayReaders": [
+        "getSubagents",
+        "getAsyncTasks"
+      ],
+      "localGatewayActions": [
+        "runAgentAutomationNow",
+        "nudgeVoiceCall"
+      ],
+      "requestContextReaders": "optional-native-capabilities"
+    },
+    "2d3391335989da8ef425bd08d5a9e88261c8826cbbc71798def6767c6ea1ca1e": {
+      "version": "f1727e3",
+      "clientVersion": "0.71.0-pre.1",
+      "strategy": "latest-host-with-box-ports",
+      "sharedClassPorts": {
+        "SandStructuredLogTelemetry": [
+          "reportMemorySynthesis",
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "VoiceSpeakPolicy": [
+          "theyJustSpoke",
+          "newsOwed"
+        ],
+        "MainLoopVoicePrompt": [
+          "replyNudge",
+          "callEndedNudge",
+          "midTurn"
+        ],
+        "OnePasswordBrokerService": [
+          "getStatus"
+        ],
+        "McpHostService": [
+          "boxServersTurn"
+        ],
+        "FileMemoryStore": [
+          "dreaming",
+          "explicitDir",
+          "generatedDir",
+          "refreshFile",
+          "tombstoneDir",
+          "evidenceDir",
+          "captureMemoryEvidence",
+          "recordMemoryEvidence",
+          "tombstonePath",
+          "originPath",
+          "hasOrigin",
+          "memoryOrigin",
+          "markOrigin",
+          "clearOrigins",
+          "isTombstoned",
+          "markTombstone",
+          "clearTombstone",
+          "prepareSynthesis",
+          "applySynthesis",
+          "hasMemories",
+          "readSpooledEvidence",
+          "clearSpooledEvidence",
+          "isTemporalReviewDue",
+          "markTemporalReview",
+          "readSynthesisState"
+        ],
+        "MemoryService": [
+          "synthesisService",
+          "enableMemorySynthesis",
+          "dispose",
+          "synthesisTargetForAgent",
+          "listSynthesisTargets"
+        ],
+        "SandAgentDb": [
+          "getRequestIds",
+          "recordRequestId",
+          "hasConnectorScopedSend",
+          "setConnectorScopedSend",
+          "getIntroductionPending",
+          "getIntroductionLanguage",
+          "setIntroductionPending",
+          "getServerIntroductionState",
+          "setServerIntroductionState",
+          "getOriginBuiltinListed",
+          "setOriginBuiltinListed",
+          "getWatchedSlackChannels",
+          "hasWatchedSlackChannel",
+          "addWatchedSlackChannel"
+        ],
+        "BoxHandoffService": [
+          "captureSnapshot",
+          "grabScreenshot"
+        ],
+        "HostMcpAuthCompletion": [
+          "waits",
+          "registerConnectCard"
+        ],
+        "SandExperimentServiceCore": [
+          "offerUpdateStateSplit",
+          "offerVoiceSkill"
+        ]
+      },
+      "addedRunnerGates": {
+        "playwrightPostActionWaitQuiet": false,
+        "cancelledToolCallOutcome": false,
+        "mcpArgumentUnmatchedRename": false,
+        "mcpArgumentRepairSinglePass": false,
+        "secureValues": false,
+        "appsPublish": false,
+        "cloudAgentPublishApp": false,
+        "automationSendToAgent": false,
+        "executorLeanPrompt": false,
+        "subagentDynamicTools": false,
+        "linkItems": false,
+        "automationTiming": false,
+        "generateVideo": false,
+        "formFillPlaywrightContext": false,
+        "needsAuthTurnHold": false,
+        "stdioSignInCard": false,
+        "computerUseCodeMode": false,
+        "runCodeReadOnlyReviewSkip": false,
+        "setUserAttribute": false,
+        "financialDataReminder": false,
+        "peerWakeApprovalReminder": false,
+        "subagentHistoryTools": false,
+        "toolArgumentAliases": false,
+        "shopifyStoreSwitchCard": false,
+        "mcpAppHostAllowlist": false,
+        "executorSendRules": false,
+        "ackBeforeTools": false,
+        "agentEmailDisabledByTeam": false,
+        "agentEmailNotAvailable": false,
+        "skillTool": false,
+        "compactConnectorCatalog": false,
+        "calendarInviteCard": false,
+        "typedCardReply": false
+      },
+      "retainedRunnerGates": {
+        "sendMessageDeliveryOwed": true,
+        "playwrightRunCodeOnlySurface": false,
+        "playwrightRunCodeScriptFirst": false,
+        "playwrightSettle500": false,
+        "playwrightSettle250": false,
+        "playwrightSettle100": false,
+        "playwrightSettle50": false,
+        "computerSettle500": false,
+        "computerSettleUntilStable": false,
+        "playwrightSnapshotDiff": false,
+        "playwrightSnapshotNone": false,
+        "browserCoordinateActions": false,
+        "browserUseJev": false,
+        "updateStateSplit": false,
+        "documentSubagent": false,
+        "turnEndThroughAgent": true,
+        "voiceSkill": false
+      },
+      "retainedExtensions": [
+        "inferenceExtension"
+      ],
+      "restoredExperiments": [
+        "grok_bot_update_state_split_v2",
+        "grok_bot_voice_skill"
+      ],
+      "sharedApiPorts": {
+        "withAutomationRunAnalytics": [
+          "reportSubagentRevival",
+          "reportShellRevival",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportAutomationRun"
+        ],
+        "createNoopSandTelemetry": [
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "createBackendRelaySources": [
+          "requestDrain"
+        ],
+        "sandBrowserArmDeps": [
+          "playwrightSettleArm",
+          "playwrightSnapshotDiffArm",
+          "browserCoordinateActionsArm"
+        ],
+        "playwrightRunCodeToolDeps": [
+          "playwrightRuntime"
+        ],
+        "createAttachmentsService": [
+          "ingestBytes",
+          "persistImageBytes",
+          "readVideoBytes",
+          "resolveOwnerDir",
+          "createGenerateImageResourceAccessor",
+          "createGenerateImageService"
+        ]
+      },
+      "localGatewayReaders": [
+        "getSubagents",
+        "getAsyncTasks"
+      ],
+      "localGatewayActions": [
+        "runAgentAutomationNow",
+        "nudgeVoiceCall"
+      ],
+      "requestContextReaders": "optional-native-capabilities",
+      "emailCapability": "optional-native-capability",
+      "builtinCatalogOptions": "optional-native-reader"
+    },
+    "12965eda0be0d104d8170b7a81e554e955c606043e182784906741ee9bd84ffc": {
+      "version": "7345aa4",
+      "clientVersion": "0.71.0-pre.6",
+      "strategy": "latest-host-with-box-ports",
+      "sharedClassPorts": {
+        "SandStructuredLogTelemetry": [
+          "reportMemorySynthesis",
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "VoiceSpeakPolicy": [
+          "theyJustSpoke",
+          "newsOwed"
+        ],
+        "MainLoopVoicePrompt": [
+          "replyNudge",
+          "callEndedNudge",
+          "midTurn"
+        ],
+        "OnePasswordBrokerService": [
+          "getStatus"
+        ],
+        "McpHostService": [
+          "boxServersTurn"
+        ],
+        "FileMemoryStore": [
+          "dreaming",
+          "explicitDir",
+          "generatedDir",
+          "refreshFile",
+          "tombstoneDir",
+          "evidenceDir",
+          "captureMemoryEvidence",
+          "recordMemoryEvidence",
+          "tombstonePath",
+          "originPath",
+          "hasOrigin",
+          "memoryOrigin",
+          "markOrigin",
+          "clearOrigins",
+          "isTombstoned",
+          "markTombstone",
+          "clearTombstone",
+          "prepareSynthesis",
+          "applySynthesis",
+          "hasMemories",
+          "readSpooledEvidence",
+          "clearSpooledEvidence",
+          "isTemporalReviewDue",
+          "markTemporalReview",
+          "readSynthesisState"
+        ],
+        "MemoryService": [
+          "synthesisService",
+          "enableMemorySynthesis",
+          "dispose",
+          "synthesisTargetForAgent",
+          "listSynthesisTargets"
+        ],
+        "SandAgentDb": [
+          "getRequestIds",
+          "recordRequestId",
+          "hasConnectorScopedSend",
+          "setConnectorScopedSend",
+          "getIntroductionPending",
+          "getIntroductionLanguage",
+          "setIntroductionPending",
+          "getServerIntroductionState",
+          "setServerIntroductionState",
+          "getOriginBuiltinListed",
+          "setOriginBuiltinListed",
+          "getWatchedSlackChannels",
+          "hasWatchedSlackChannel",
+          "addWatchedSlackChannel"
+        ],
+        "BoxHandoffService": [
+          "captureSnapshot",
+          "grabScreenshot"
+        ],
+        "HostMcpAuthCompletion": [
+          "waits",
+          "registerConnectCard"
+        ],
+        "SandExperimentServiceCore": [
+          "offerUpdateStateSplit",
+          "offerVoiceSkill"
+        ],
+        "CredentialCoordinator": [
+          "refreshedAtMs",
+          "getDirectory",
+          "refresh",
+          "createAccess"
+        ]
+      },
+      "addedRunnerGates": {
+        "playwrightPostActionWaitQuiet": false,
+        "cancelledToolCallOutcome": false,
+        "mcpArgumentUnmatchedRename": false,
+        "mcpArgumentRepairSinglePass": false,
+        "secureValues": false,
+        "appsPublish": false,
+        "cloudAgentPublishApp": false,
+        "automationSendToAgent": false,
+        "executorLeanPrompt": false,
+        "subagentDynamicTools": false,
+        "linkItems": false,
+        "automationTiming": false,
+        "generateVideo": false,
+        "formFillPlaywrightContext": false,
+        "needsAuthTurnHold": false,
+        "stdioSignInCard": false,
+        "computerUseCodeMode": false,
+        "runCodeReadOnlyReviewSkip": false,
+        "setUserAttribute": false,
+        "financialDataReminder": false,
+        "peerWakeApprovalReminder": false,
+        "subagentHistoryTools": false,
+        "toolArgumentAliases": false,
+        "shopifyStoreSwitchCard": false,
+        "mcpAppHostAllowlist": false,
+        "executorSendRules": false,
+        "ackBeforeTools": false,
+        "agentEmailDisabledByTeam": false,
+        "agentEmailNotAvailable": false,
+        "skillTool": false,
+        "compactConnectorCatalog": false,
+        "calendarInviteCard": false,
+        "typedCardReply": false,
+        "autoReviewSelector": false,
+        "needsAuthLiveState": false
+      },
+      "retainedRunnerGates": {
+        "sendMessageDeliveryOwed": true,
+        "playwrightRunCodeOnlySurface": false,
+        "playwrightRunCodeScriptFirst": false,
+        "playwrightSettle500": false,
+        "playwrightSettle250": false,
+        "playwrightSettle100": false,
+        "playwrightSettle50": false,
+        "computerSettle500": false,
+        "computerSettleUntilStable": false,
+        "playwrightSnapshotDiff": false,
+        "playwrightSnapshotNone": false,
+        "browserCoordinateActions": false,
+        "browserUseJev": false,
+        "updateStateSplit": false,
+        "documentSubagent": false,
+        "turnEndThroughAgent": true,
+        "voiceSkill": false
+      },
+      "retainedExtensions": [
+        "inferenceExtension",
+        "autoReviewExtension",
+        "teamAdminPolicyExtension",
+        "sessionExtension"
+      ],
+      "restoredExperiments": [
+        "grok_bot_update_state_split_v2",
+        "grok_bot_voice_skill"
+      ],
+      "sharedApiPorts": {
+        "withAutomationRunAnalytics": [
+          "reportSubagentRevival",
+          "reportShellRevival",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportAutomationRun"
+        ],
+        "createNoopSandTelemetry": [
+          "reportAutomationRun",
+          "reportAutomationFireDropped",
+          "reportAutomationAgentGoneRecovered",
+          "reportSubagentRevival",
+          "reportShellRevival"
+        ],
+        "createBackendRelaySources": [
+          "requestDrain"
+        ],
+        "sandBrowserArmDeps": [
+          "playwrightSettleArm",
+          "playwrightSnapshotDiffArm",
+          "browserCoordinateActionsArm"
+        ],
+        "playwrightRunCodeToolDeps": [
+          "playwrightRuntime"
+        ],
+        "createAttachmentsService": [
+          "ingestBytes",
+          "persistImageBytes",
+          "readVideoBytes",
+          "resolveOwnerDir",
+          "createGenerateImageResourceAccessor",
+          "createGenerateImageService"
+        ],
+        "startCredentialProvider": [
+          "accessForAgentWindow",
+          "status",
+          "agentToolLease"
+        ]
+      },
+      "localGatewayReaders": [
+        "getSubagents",
+        "getAsyncTasks"
+      ],
+      "localGatewayActions": [
+        "runAgentAutomationNow",
+        "nudgeVoiceCall"
+      ],
+      "requestContextReaders": "optional-native-capabilities",
+      "emailCapability": "optional-native-capability",
+      "builtinCatalogOptions": "optional-native-reader",
+      "localHealthContract": "optional-approval-roster",
+      "mcpListingReader": "live-native-catalog"
+    }
+  }
+}

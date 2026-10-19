@@ -114,6 +114,38 @@ def verified_worker(root, progress):
         return False
 
 
+def diagnostic_status(root):
+    """The model's free-form response and private coordinator errors stay private."""
+    try:
+        script = HERE / 'transfer-diagnostics.py'
+        info = script.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError('Untrusted diagnostic adapter')
+        return load('transfer-diagnostics').status(root)
+    except Exception:
+        return {'status': 'unavailable'}
+
+
+def start_diagnostic(root):
+    """Advisory work is isolated, bounded and never holds up transfer recovery."""
+    try:
+        script = HERE / 'transfer-diagnostics.py'
+        info = script.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or not allowed(root):
+            return False
+        advisor = load('transfer-diagnostics')
+        advisor.snapshot(advisor.read_json(root / STATE, 65536))
+        advisor.selected_model(root)
+        # No shell, ACP tools, error text, inherited writer FD, or agent identity.
+        subprocess.Popen(['/usr/bin/timeout', '--signal=TERM', '15s', '/usr/bin/python3',
+                          str(script), '--state', str(root / STATE), '--run'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        return True
+    except Exception:
+        return False
+
+
 def snapshot(root):
     """Refresh journal counts without network work or any success from a lock."""
     try:
@@ -122,8 +154,11 @@ def snapshot(root):
         progress = {}
     progress = {**progress, 'enabled': allowed(root), 'publicationVerified': False,
                 'nativeAppDeliveryVerified': False, 'billingVerified': False,
-                'diagnosticAssistant': 'unavailable',
-                'diagnosticReason': 'No bounded local diagnostic assistant adapter is installed'}
+                'diagnosticAssistant': 'unavailable', 'diagnosticReason': 'unavailable'}
+    advisory = diagnostic_status(root)
+    progress['diagnosticAssistant'] = advisory.get('status', 'unavailable')
+    progress['diagnosticReason'] = advisory.get('reason', 'none')
+    progress['diagnosticAdviceCode'] = advisory.get('adviceCode')
     progress.pop('counts', None)
     progress.pop('agentCount', None)
     progress['verifiedAgents'] = 0
@@ -428,6 +463,8 @@ def main():
                             if allowed(args.root) else 'cancelled-mode-change',
                             refusalPhase=recovery.progress['phase'], diagnosticCode=category,
                             errorType=type(error).__name__, nextCheckAtMs=int(time.time()*1000)+retry_ms)
+            if recovery.progress['phase'] == 'review-needed':
+                start_diagnostic(args.root)
             raise SystemExit(1) from None
 
 

@@ -92,3 +92,15 @@ test("saved completion without current proof is pending and a maintenance hold i
   assert.equal(status.publicationVerified, false);
   assert.equal(publicTransfer({ phase: "bound-box", publicationVerified: true }).phase, "bound-box");
 });
+
+
+test("advisor status accepts fixed enums and codes but never model output or delivery claims", () => {
+  const available = publicTransfer({ diagnosticAssistant: "available", diagnosticAdviceCode: "history-review", diagnosticReason: "secret-key@example.test", advice: "<script>bad</script>", nativeAppDeliveryVerified: true });
+  assert.equal(available.diagnosticAssistant, "available");
+  assert.equal(available.diagnosticAdviceCode, "history-review");
+  assert.equal(available.nativeAppDeliveryVerified, false);
+  assert.doesNotMatch(JSON.stringify(available), /secret-key|script/);
+  assert.equal(publicTransfer({ diagnosticAssistant: "failed", diagnosticAdviceCode: "history-review" }).diagnosticAdviceCode, undefined);
+  assert.equal(publicTransfer({ diagnosticAssistant: "available", diagnosticAdviceCode: "run-shell" }).diagnosticAdviceCode, undefined);
+  assert.equal(publicTransfer({ diagnosticAssistant: "execute" }).diagnosticAssistant, "unavailable");
+});

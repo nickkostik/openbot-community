@@ -794,7 +794,7 @@ class Reminter:
             raise RuntimeError('Server routine authority digest changed')
         if (value.get('schema') != 'openbot-server-routine-authority/v1' or
                 value.get('oldId') != entry['oldId'] or value.get('newId') != entry['newId'] or
-                not isinstance(value.get('automations'), list)):
+                not isinstance(value.get('automations'), list) or not value['automations']):
             raise RuntimeError('Server routine authority belongs to another transfer')
         records = value['automations']
         ids, paths = set(), set()

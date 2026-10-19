@@ -229,6 +229,14 @@ class RemintTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'collides'):self.r.activate(OLD)
         self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
 
+    def test_empty_server_authority_cannot_silently_drop_a_server_routine(self):
+        _,path=self.stage_server_routine()
+        data=json.loads(path.read_bytes());data['automations']=[];self.write(path,data)
+        journal=self.r.read();journal['entries'][0]['serverRoutineAuthority']['sha256']=M.hashlib.sha256(path.read_bytes()).hexdigest()
+        self.r.save(journal)
+        with self.assertRaises(RuntimeError):self.r.activate(OLD)
+        self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
+
     def test_non_cron_authored_fire_time_is_not_ignored(self):
         before={'trigger':{'type':'once','firesAt':'original'}}
         after={'trigger':{'type':'once','firesAt':'changed'}}

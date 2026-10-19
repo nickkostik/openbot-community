@@ -40,7 +40,7 @@ export function LocalTransferCard() {
   };
   return <section className="card col-12" aria-labelledby="h-local-transfer">
     <div className="card__head"><span className="card__label" id="h-local-transfer">Local transfer</span>
-      <Badge tone={review ? "warning" : "info"}>{progress?.workerRunning ? "Running" : progress?.lockHeld ? "Transfer locked" : progress?.phase === "bound-box" && progress.publicationVerified ? "Transfer recorded" : "Resumable"}</Badge></div>
+      <Badge tone={review ? "warning" : "info"}>{progress?.workerRunning ? "Running" : progress?.lockHeld ? "Transfer locked" : progress?.phase === "bound-box" && progress.publicationVerified && progress.rosterComplete ? "Transfer recorded" : "Resumable"}</Badge></div>
     <div className="card__body stack" style={{ gap: 12 }}>
       <div aria-live="polite" role="status">
         <p>{progress ? progress.phase.replaceAll("-", " ") : "Checking transfer…"}
@@ -48,6 +48,8 @@ export function LocalTransferCard() {
         {progress?.counts ? <p className="mono">{Object.entries(progress.counts).map(([phase, count]) => `${phase}: ${count}`).join(" · ")}</p> : null}
         {progress?.verifiedAgents !== undefined ? <p>{progress.verifiedAgents} publication checks passed at the last check.</p> : null}
         {progress?.jobId ? <p className="mono">Job {progress.jobId}</p> : null}
+        {progress?.untrackedSourceAgents ? <p>{progress.untrackedSourceAgents} owner-roster bots are outside this transfer plan ({progress.untrackedVisibleAgents ?? 0} visible, {progress.unknownSourceAgents ?? 0} requiring ownership or visibility review). Import and review their complete cloud history and SDK context before adding them. Existing copies are retained; automatic source appending is unavailable.</p> : null}
+        {progress?.publicationVerified && !progress.rosterComplete && !progress.untrackedSourceAgents ? <p>The copied cohort passed publication checks. The complete owner roster still needs a current check before transfer completion.</p> : null}
         {progress?.lockHeld && !progress.workerRunning ? <p>Another process holds the transfer lock. A running transfer worker has not been confirmed.</p> : null}
         {review ? <p>Review required during {progress.refusalPhase?.replaceAll("-", " ") ?? "preflight"}: {progress.diagnosticCode?.replaceAll("-", " ") ?? "preflight refused"}. Resolve the conflict, then resume this job.</p> : null}
       </div>

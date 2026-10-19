@@ -21,6 +21,7 @@ import uuid
 HERE = pathlib.Path(__file__).resolve().parent
 STATE = 'openbot-custom-dispatch-state.json'
 LOCK = 'openbot-custom-dispatch.lock'
+ROSTER_SCOPE_TTL_MS = 120000
 
 
 def load(name):
@@ -93,6 +94,50 @@ def publication_proof(root, journal):
     return {'journalSha256': fingerprint(journal), 'verificationSha256': fingerprint(proof)}
 
 
+def roster_scope(rows, profiles, covered):
+    """Known local archives stay retired; unknown/cloud-only sources need review."""
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError('Unknown owner roster schema')
+    counts = {'untrackedSourceAgents': 0, 'untrackedVisibleAgents': 0,
+              'unknownSourceAgents': 0, 'hiddenArchiveAgents': 0}
+    seen = set()
+    for row in rows:
+        aid = row.get('agentId')
+        if not isinstance(aid, str) or str(uuid.UUID(aid)) != aid or aid in seen:
+            raise RuntimeError('Ambiguous owner roster identity')
+        seen.add(aid)
+        if aid in covered or row.get('viewerIsOwner') is False:
+            continue
+        sid = row.get('id')
+        bound = (row.get('legacyAgentId') == aid and isinstance(sid, str) and
+                 sid.isascii() and sid.isdigit() and int(sid) > 0)
+        if row.get('harness') == 'box' and row.get('viewerIsOwner') is True and bound:
+            continue  # Actual owned BOX sources are never reminted.
+        local = profiles.get(aid, {})
+        profile, settings = local.get('profile', {}), local.get('settings', {})
+        matching = (bound and str(profile.get('serverId')) == sid and
+                    profile.get('harness') in ('box', 'temporal'))
+        hidden = settings.get('hiddenFromSidebar') if matching else None
+        if row.get('harness') == 'temporal' and row.get('viewerIsOwner') is True and hidden is True:
+            counts['hiddenArchiveAgents'] += 1
+            continue
+        counts['untrackedSourceAgents'] += 1
+        if row.get('harness') == 'temporal' and row.get('viewerIsOwner') is True and hidden is False:
+            counts['untrackedVisibleAgents'] += 1
+        else:
+            counts['unknownSourceAgents'] += 1
+    return counts
+
+
+def roster_receipt_current(progress, journal, now=None):
+    now = int(time.time() * 1000) if now is None else now
+    checked = progress.get('rosterCheckedAtMs')
+    return (progress.get('rosterComplete') is True and type(checked) is int and
+            0 <= now - checked < ROSTER_SCOPE_TTL_MS and
+            progress.get('rosterScopeJournalSha256') == fingerprint(journal) and
+            all(progress.get(key) == 0 for key in ('untrackedSourceAgents', 'untrackedVisibleAgents', 'unknownSourceAgents')))
+
+
 def verified_worker(root, progress):
     """A held flock can be a maintenance keeper; it does not identify a worker."""
     pid = progress.get('workerPid')
@@ -162,9 +207,12 @@ def snapshot(root):
     progress.pop('counts', None)
     progress.pop('agentCount', None)
     progress['verifiedAgents'] = 0
+    saved_scope = dict(progress)
+    progress['rosterComplete'] = False
     try:
         journal, counts = journal_progress(root)
         progress.update(counts=counts, agentCount=len(journal['entries']))
+        progress['rosterComplete'] = roster_receipt_current(saved_scope, journal)
         try:
             proof = publication_proof(root, journal)
         except FileNotFoundError:
@@ -176,6 +224,8 @@ def snapshot(root):
         if progress.get('phase', 'idle') in ('bound-box', 'idle') and not progress['publicationVerified']:
             progress['phase'] = ('copying' if counts['planned'] else 'registering' if counts['copied']
                                  else 'waiting-for-publication')
+        if progress.get('phase') == 'bound-box' and not progress['rosterComplete']:
+            progress['phase'] = 'checking-bindings'
     except FileNotFoundError:
         if progress.get('phase') == 'bound-box':
             progress['phase'] = 'waiting-for-publication'
@@ -265,6 +315,8 @@ class Recovery:
         if phase == 'bound-box':
             journal, counts = journal_progress(self.root)
             proof = publication_proof(self.root, journal)
+            if not roster_receipt_current(self.progress, journal):
+                raise RuntimeError('Current owner roster completeness must be checked before completion')
             if counts['active'] != len(journal['entries']) or not proof:
                 raise RuntimeError('Publication proof missing for completed transfer')
             self.progress['publicationProof'] = proof
@@ -335,6 +387,24 @@ class Recovery:
         return {'phase': 'publication-bindings-refreshed', 'boxAgentCount': len(box),
                 'checkedAtMs': value['checkedAtMs'], 'nativeAppDeliveryVerified': False}
 
+    def check_roster_scope(self, journal, rows=None, profiles=None, prospective=()):
+        self.require()
+        rows = self.r.rows() if rows is None else rows
+        profiles = self.r.profiles() if profiles is None else profiles
+        lineage = self.module.identity_mapping(journal) if journal else {}
+        covered = set(lineage) | set(lineage.values()) | set(prospective)
+        counts = roster_scope(rows, profiles, covered)
+        complete = counts['untrackedSourceAgents'] == 0
+        self.progress.update(**counts, rosterComplete=complete,
+                             rosterCheckedAtMs=int(time.time() * 1000),
+                             rosterScopeJournalSha256=fingerprint(journal) if journal else None)
+        if not complete:
+            # No journal append, next-generation reset, source hide, or blind
+            # local-only copy may substitute for a complete cloud/SDK import.
+            self.status('review-needed', refusalPhase='checking-bindings', diagnosticCode='history-conflict')
+            start_diagnostic(self.root)
+        return complete
+
     def run(self):
         self.require()
         self.status('checking-bindings')
@@ -351,6 +421,8 @@ class Recovery:
             return result
         self.r.rows = rows
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
+        if journal is not None and not self.check_roster_scope(journal):
+            return self.progress
         if journal is None or all(e['phase'] == 'active' for e in journal['entries']):
             rows = self.r.rows()
             expected = load('server-roster-check').authority(journal) if journal else {}
@@ -363,6 +435,10 @@ class Recovery:
                 paired = {e['oldId'] for e in journal['entries']}
                 profiles = {aid:p for aid,p in profiles.items() if aid not in paired}
             sources = self.module.source_candidates(rows, profiles)
+            if journal is None and not self.check_roster_scope(None, rows, profiles, [e['oldId'] for e in sources]):
+                return self.progress
+            if journal is not None and sources:
+                raise RuntimeError('Current transfer authority requires review; automatic generation replacement is refused')
             if expected and report['state'] == 'bound-box':
                 self.r.reselect_active()
             if not sources:
@@ -376,10 +452,12 @@ class Recovery:
                 if len(results) != len(expected) or any(row['status'] != 'verified-box' for row in results):
                     self.status('waiting-for-publication')
                     return self.progress
+                if not self.check_roster_scope(self.r.read()):
+                    return self.progress
                 self.status('bound-box', agentCount=len(expected), nextCheckAtMs=int(time.time()*1000)+120000)
                 return self.progress
             self.status('copying', agentCount=len(sources))
-            journal = self.r.initialize(next_generation=journal is not None)
+            journal = self.r.initialize()
         self.progress['agentCount'] = len(journal['entries'])
         for entry in journal['entries']:
             self.require()
@@ -403,6 +481,8 @@ class Recovery:
                         nextCheckAtMs=int(time.time()*1000)+60000)
             return self.progress
         self.require()
+        if not self.check_roster_scope(self.r.read()):
+            return self.progress
         self.status('activating', verifiedAgents=verified)
         self.r.activate()
         self.r.restore_routines()
@@ -411,6 +491,8 @@ class Recovery:
         report = load('server-roster-check').compare(expected, self.r.rows())
         if len(expected) != len(entries) or report['state'] != 'bound-box':
             raise RuntimeError('BOX authority changed during activation')
+        if not self.check_roster_scope(active):
+            return self.progress
         self.status('bound-box', agentCount=len(expected), verifiedAgents=verified,
                     nextCheckAtMs=int(time.time()*1000)+120000)
         return self.progress

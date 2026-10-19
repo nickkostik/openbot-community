@@ -530,7 +530,8 @@ export type GrokSkillsReport = {
 };
 
 export type LocalTransfer = {
-  enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean;
+  enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean; rosterComplete: boolean;
+  untrackedSourceAgents?: number; untrackedVisibleAgents?: number; unknownSourceAgents?: number; hiddenArchiveAgents?: number; rosterCheckedAtMs?: number;
   jobId?: string; agentCount?: number; verifiedAgents?: number; updatedAtMs?: number;
   counts?: Record<string, number>; refusalPhase?: string; diagnosticCode?: string;
   diagnosticAssistant: "unavailable" | "running" | "available" | "failed" | "disabled"; diagnosticReason: string; diagnosticAdviceCode?: string;

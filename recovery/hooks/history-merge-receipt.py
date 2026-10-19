@@ -349,12 +349,16 @@ def source_freshness(r,journal,entry,cache=None):
                     row=db.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()
                 if not row:raise RuntimeError('Source SDK metadata missing during freshness check')
                 slot=json.loads(bytes.fromhex(row[0])).get('latestRootBlobId')
-                blob_path=directory/'conversation-blobs.db';row=None
-                if blob_path.exists() or blob_path.is_symlink():
+                row=None
+                # Retained engines can keep the graph in either native store.
+                for blob_path in (directory/'conversation-blobs.db',directory/'store.db'):
+                    if not(blob_path.exists()or blob_path.is_symlink()):continue
                     info=blob_path.lstat()
                     if info.st_uid!=os.getuid()or not stat.S_ISREG(info.st_mode):raise RuntimeError('Source SDK path is foreign or symlinked')
                     with contextlib.closing(sqlite3.connect('file:'+str(blob_path)+'?mode=ro',uri=True))as db:
-                        row=db.execute('SELECT data FROM blobs WHERE id=?',(slot,)).fetchone() if slot is not None else None
+                        has_blobs=db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='blobs'").fetchone()[0]
+                        row=db.execute('SELECT data FROM blobs WHERE id=?',(slot,)).fetchone() if slot is not None and has_blobs else None
+                    if row:break
                 current['sdkRootSha256']=digest(row[0])if row else None;cache[key]=current
         if cache[key]!=expected:
             raise RuntimeError('Source history changed after reviewed merge; incremental preservation required before activation')

@@ -200,6 +200,14 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(any(method=='SetGrokBotAgentClientState'for method,_ in self.calls))
         self.assertTrue(json.loads((self.source/'automations/routine/automation.json').read_text())['enabled'])
 
+    def test_source_freshness_checks_sdk_graph_retained_in_store_database(self):
+        path=self.prepare_receipt();self.r.accept_history_merge(NEW,str(path));journal=self.r.read();entry=journal['entries'][0]
+        with contextlib.closing(sqlite3.connect(self.source/'store.db'))as db:
+            db.execute("UPDATE kv SET value=? WHERE key='metadata'",(json.dumps({'agentId':OLD,'latestRootBlobId':'root'}).encode().hex(),))
+            db.execute('CREATE TABLE blobs(id TEXT PRIMARY KEY,data BLOB)');db.execute('INSERT INTO blobs VALUES(?,?)',('root',b'later embedded SDK context'));db.commit()
+        with self.assertRaisesRegex(RuntimeError,'Source history changed'):
+            H.source_freshness(self.r,journal,entry)
+
     def test_receipt_keeps_original_conflict_proof_and_allows_new_turns(self):
         path=self.prepare_receipt();self.r.accept_history_merge(NEW,str(path))
         self.assertEqual(self.r.read()['entries'][0]['copyProof']['historyIdConflicts'],2)

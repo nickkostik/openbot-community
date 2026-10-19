@@ -153,7 +153,9 @@ def owned_hop(root, proc=pathlib.Path('/proc'), repo=None):
     if process.stat().st_uid != os.getuid():
         raise Refusal('hop-not-owned')
     argv = (process / 'cmdline').read_bytes().split(b'\0')
-    repo = pathlib.Path(repo or pathlib.Path(__file__).resolve().parents[2])
+    helper = pathlib.Path(__file__).resolve()
+    default_repo = root / 'openbot' if helper.parent.name == 'openbot-hooks' else helper.parents[2]
+    repo = pathlib.Path(repo or default_repo)
     cwd = (process / 'cwd').resolve()
     expected = (repo / 'src/ui/server.ts').resolve()
     if not any((cwd / os.fsdecode(arg)).resolve() == expected for arg in argv[1:] if arg and not arg.startswith(b'-')):

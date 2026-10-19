@@ -128,6 +128,9 @@ class DiagnosticsTests(unittest.TestCase):
         response['usage'] = {'completion_tokens':256, 'completion_tokens_details':{'reasoning_tokens':254}}
         with self.assertRaisesRegex(m.Refusal, 'advice-truncated'):
             m.classify(response)
+        response['usage']['completion_tokens'] = 2048
+        with self.assertRaisesRegex(m.Refusal, 'invalid-advice'):
+            m.classify(response)
 
     def test_explicit_low_survives_saved_xhigh_mapping_and_responses_conversion(self):
         payload = pathlib.Path(__file__).resolve().parents[2] / 'payload'

@@ -152,7 +152,10 @@ def diagnostic_effort(root, model):
     Do not invent 'none' for a model that only declares low through xhigh.
     """
     plan = read_json(root / 'openbot-plan.json')
-    rows = plan.get('catalog', {}).get('models', [])
+    catalog = plan.get('catalog')
+    if not isinstance(catalog, dict) or not isinstance(catalog.get('models'), list):
+        raise Refusal('invalid-route')
+    rows = catalog['models']
     matches = [row for row in rows if isinstance(row, dict) and row.get('id') == model]
     if len(matches) != 1:
         raise Refusal('invalid-route')
@@ -280,7 +283,7 @@ def classify(response):
         details = usage.get('completion_tokens_details', {}) if isinstance(usage, dict) else {}
         if (isinstance(details, dict) and type(usage.get('completion_tokens')) is int
                 and type(details.get('reasoning_tokens')) is int
-                and usage['completion_tokens'] >= 256 and details['reasoning_tokens'] >= 240):
+                and usage['completion_tokens'] == 256 and 240 <= details['reasoning_tokens'] <= 256):
             raise Refusal('advice-truncated') from None
         raise Refusal('invalid-advice') from None
 

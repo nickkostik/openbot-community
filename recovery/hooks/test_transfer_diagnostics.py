@@ -47,7 +47,7 @@ class DiagnosticsTests(unittest.TestCase):
         result = m.run(self.root, now=1000)
         model, job, facts = self.request.call_args.args
         self.assertEqual(model, 'opencode-2:muse')
-        self.assertEqual(set(facts), {'phase', 'diagnosticCode', 'counts', 'publicationVerified', 'liveHistoryMerged', 'sdkContextsMerged'})
+        self.assertEqual(set(facts), {'phase', 'diagnosticCode', 'counts', 'countsKnown', 'publicationVerified', 'liveHistoryMerged', 'sdkContextsMerged'})
         self.assertNotIn('secret-key', json.dumps(facts))
         self.assertNotIn(job, json.dumps(facts))
         self.assertEqual(result['status'], 'available')

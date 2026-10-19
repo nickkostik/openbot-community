@@ -97,7 +97,7 @@ def snapshot(state):
     code = state.get('diagnosticCode')
     if phase not in PHASES or code not in REFUSALS:
         raise Refusal('no-refusal')
-    source = state.get('counts')
+    source = state.get('counts', {})
     if not isinstance(source, dict):
         raise Refusal('invalid-counts')
     counts = {}
@@ -107,7 +107,7 @@ def snapshot(state):
             raise Refusal('invalid-counts')
         counts[key] = value
     # No arbitrary string, name, ID, error message, or nested object crosses here.
-    facts = {'phase': phase, 'diagnosticCode': code, 'counts': counts,
+    facts = {'phase': phase, 'diagnosticCode': code, 'counts': counts, 'countsKnown': 'counts' in state,
              'publicationVerified': state.get('publicationVerified') is True,
              'liveHistoryMerged': state.get('liveHistoryMerged') is True,
              'sdkContextsMerged': state.get('sdkContextsMerged') is True}
@@ -235,8 +235,9 @@ def status(root):
         return {'status': 'disabled', 'reason': 'not-requested', 'nativeAppDeliveryVerified': False}
     # A reply belongs to one persisted job only; never show it on a new job.
     try:
-        current_job, _ = snapshot(read_json(root / STATE, 65536))
-        if value.get('jobId') is not None and value.get('jobId') != current_job:
+        current_job, current_facts = snapshot(read_json(root / STATE, 65536))
+        if ((value.get('jobId') is not None and value.get('jobId') != current_job)
+                or (value.get('status') in ('available', 'running') and value.get('factsDigest') is not None and value.get('factsDigest') != hashlib.sha256(json.dumps(current_facts, sort_keys=True).encode()).hexdigest())):
             return {'status': 'disabled', 'reason': 'not-requested', 'nativeAppDeliveryVerified': False}
     except (OSError, ValueError, Refusal):
         if value.get('status') in ('available', 'running'):
@@ -248,12 +249,12 @@ def status(root):
         if type(value.get(key)) is int:
             result[key] = value[key]
     code = value.get('adviceCode')
-    if code in ADVICE and result['status'] == 'available':
+    if isinstance(code, str) and code in ADVICE and result['status'] == 'available':
         result.update(adviceCode=code, advice=ADVICE[code])
-    if value.get('reason') in ('timeout', 'upstream-refused', 'invalid-advice', 'response-too-large', 'hop-not-owned',
+    if isinstance(value.get('reason'), str) and value.get('reason') in ('timeout', 'upstream-refused', 'invalid-advice', 'response-too-large', 'hop-not-owned',
             'unsupported-selected-route', 'official-mode', 'opted-out', 'invalid-route', 'no-refusal', 'request-failed', 'state-changed', 'interrupted', 'not-requested'):
         result['reason'] = value['reason']
-    if result['status'] == 'running' and time.time() * 1000 > value.get('updatedAtMs', 0) + (TIMEOUT + 5) * 1000:
+    if result['status'] == 'running' and time.time() * 1000 > (value.get('updatedAtMs') if type(value.get('updatedAtMs')) is int else 0) + (TIMEOUT + 5) * 1000:
         result.update(status='failed', reason='interrupted')
     return result
 
@@ -283,10 +284,11 @@ def run(root, now=None):
                 previous = {}
             if previous.get('fingerprint') == fingerprint:
                 return status(root)  # At most one billable call per exact refusal.
-            if now < previous.get('nextAttemptAtMs', 0):
+            if now < (previous.get('nextAttemptAtMs') if type(previous.get('nextAttemptAtMs')) is int else 0):
                 return status(root)
             owned_hop(root)
-            value = {'status': 'running', 'jobId': job, 'fingerprint': fingerprint, 'updatedAtMs': now,
+            value = {'status': 'running', 'jobId': job, 'fingerprint': fingerprint,
+                     'factsDigest': hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest(), 'updatedAtMs': now,
                      'nextAttemptAtMs': now + BACKOFF_MS, 'attempts': 1}
             write(root, value)  # Persist before any billable work; restart cannot replay.
             if selected_model(root) != model:

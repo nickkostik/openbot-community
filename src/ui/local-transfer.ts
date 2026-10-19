@@ -10,7 +10,7 @@ export type LocalTransfer = {
   enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean;
   jobId?: string; agentCount?: number; verifiedAgents?: number; updatedAtMs?: number;
   counts?: Record<string, number>; refusalPhase?: string; diagnosticCode?: string;
-  diagnosticAssistant: "unavailable"; diagnosticReason: string;
+  diagnosticAssistant: "unavailable" | "running" | "available" | "failed" | "disabled"; diagnosticReason: string; diagnosticAdviceCode?: string;
   nativeAppDeliveryVerified: false; billingVerified: false;
 };
 const diagnostics = {
@@ -24,6 +24,13 @@ export function publicTransfer(raw: Record<string, unknown>, available = true): 
   const value: LocalTransfer = { ...diagnostics, enabled: raw.enabled === true, available,
     phase: typeof raw.phase === "string" && PHASES.has(raw.phase) ? raw.phase : "idle", workerRunning: raw.workerRunning === true && raw.lockHeld === true, lockHeld: raw.lockHeld === true, publicationVerified: raw.publicationVerified === true };
   if (value.phase === "bound-box" && !value.publicationVerified) value.phase = "waiting-for-publication";
+  if (["running", "available", "failed", "disabled"].includes(String(raw.diagnosticAssistant))) {
+    value.diagnosticAssistant = raw.diagnosticAssistant as LocalTransfer["diagnosticAssistant"];
+    value.diagnosticReason = "AI diagnostic review has no transfer or delivery authority.";
+  }
+  if (value.diagnosticAssistant === "available" && ["publication-backlog", "identity-review", "history-review", "provider-backoff", "control-plane-review", "insufficient-evidence"].includes(String(raw.diagnosticAdviceCode))) {
+    value.diagnosticAdviceCode = String(raw.diagnosticAdviceCode);
+  }
   if (typeof raw.jobId === "string" && /^[0-9a-f-]{36}$/.test(raw.jobId)) value.jobId = raw.jobId;
   for (const key of ["agentCount", "verifiedAgents", "updatedAtMs"] as const) {
     if (Number.isSafeInteger(raw[key]) && Number(raw[key]) >= 0) value[key] = Number(raw[key]);

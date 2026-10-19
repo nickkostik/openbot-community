@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import fcntl
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import time
 import urllib.error
+import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATE = 'openbot-custom-dispatch-state.json'
@@ -38,6 +40,9 @@ def write(root, value):
 
 def allowed(root):
     try:
+        directory = root.lstat()
+        if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid():
+            return False
         for path in (root / 'openbot-mode', root / 'openbot-local-only.enable'):
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -55,25 +60,120 @@ def lock(root):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise RuntimeError('Untrusted Custom dispatch lock')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        yield fd
     finally:
         os.close(fd)
 
 
-def maybe_start(root, now=None):
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def journal_progress(root):
+    journal = read(root, 'openbot-box-remint.json')
+    entries = journal.get('entries')
+    phases = ('planned', 'copied', 'registered-box', 'active')
+    if not isinstance(entries, list) or not entries or any(
+            not isinstance(e, dict) or e.get('phase') not in phases or
+            not isinstance(e.get('oldId'), str) or not isinstance(e.get('newId'), str) for e in entries):
+        raise RuntimeError('Unrecognized transfer journal')
+    if len({(e['oldId'], e['newId']) for e in entries}) != len(entries):
+        raise RuntimeError('Ambiguous transfer journal')
+    return journal, {phase: sum(e['phase'] == phase for e in entries) for phase in phases}
+
+
+def publication_proof(root, journal):
+    proof = read(root, 'openbot-custom-dispatch-verification.json')
+    results = proof.get('results')
+    pairs = {(e['oldId'], e['newId']) for e in journal['entries']}
+    if (not isinstance(results, list) or len(results) != len(pairs) or
+            any(not isinstance(r, dict) or r.get('status') != 'verified-box' for r in results) or
+            {(r.get('oldId'), r.get('newId')) for r in results} != pairs):
+        return None
+    return {'journalSha256': fingerprint(journal), 'verificationSha256': fingerprint(proof)}
+
+
+def verified_worker(root, progress):
+    """A held flock can be a maintenance keeper; it does not identify a worker."""
+    pid = progress.get('workerPid')
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        proc = pathlib.Path('/proc') / str(pid) / 'cmdline'
+        if proc.stat().st_uid != os.getuid():
+            return False
+        with proc.open('rb') as stream:
+            command = stream.read(8193)
+        if len(command) > 8192:
+            return False
+        argv = command.decode().rstrip('\0').split('\0')
+        if argv[:4] != ['/usr/bin/python3', str(HERE / 'custom-dispatch-recovery.py'), '--root', str(root)]:
+            return False
+        return not argv[4:] or (len(argv[4:]) == 2 and argv[4] == '--worker-lock-fd' and argv[5].isdigit())
+    except (OSError, UnicodeError):
+        return False
+
+
+def snapshot(root):
+    """Refresh journal counts without network work or any success from a lock."""
+    try:
+        progress = read(root, STATE)
+    except FileNotFoundError:
+        progress = {}
+    progress = {**progress, 'enabled': allowed(root), 'publicationVerified': False,
+                'nativeAppDeliveryVerified': False, 'billingVerified': False,
+                'diagnosticAssistant': 'unavailable',
+                'diagnosticReason': 'No bounded local diagnostic assistant adapter is installed'}
+    progress.pop('counts', None)
+    progress.pop('agentCount', None)
+    progress['verifiedAgents'] = 0
+    try:
+        journal, counts = journal_progress(root)
+        progress.update(counts=counts, agentCount=len(journal['entries']))
+        try:
+            proof = publication_proof(root, journal)
+        except FileNotFoundError:
+            proof = None
+        complete = counts['active'] == len(journal['entries'])
+        progress['publicationVerified'] = bool(complete and proof and progress.get('publicationProof') == proof)
+        if progress['publicationVerified']:
+            progress['verifiedAgents'] = len(journal['entries'])
+        if progress.get('phase', 'idle') in ('bound-box', 'idle') and not progress['publicationVerified']:
+            progress['phase'] = ('copying' if counts['planned'] else 'registering' if counts['copied']
+                                 else 'waiting-for-publication')
+    except FileNotFoundError:
+        if progress.get('phase') == 'bound-box':
+            progress['phase'] = 'waiting-for-publication'
+    except Exception:
+        progress.update(phase='review-needed', diagnosticCode='preflight-refused')
+    try:
+        with lock(root):
+            progress['lockHeld'] = False
+    except BlockingIOError:
+        progress['lockHeld'] = True
+    progress['workerRunning'] = progress['lockHeld'] and verified_worker(root, progress)
+    return progress
+
+
+def maybe_start(root, now=None, requested=False):
     """Keep network/copy work outside the fifteen-second recovery tick."""
     if not allowed(root):
         return {'phase': 'disabled', 'nativeAppDeliveryVerified': False}
     now = int(time.time() * 1000) if now is None else now
     try:
-        progress = read(root, STATE)
-    except FileNotFoundError:
-        progress = {}
-    try:
-        with lock(root):
-            if progress.get('nextCheckAtMs', 0) > now:
+        with lock(root) as worker_fd:
+            # Read only after claiming the writer lock; a completed worker may
+            # have published newer state while this request was waiting.
+            try:
+                progress = read(root, STATE)
+            except FileNotFoundError:
+                progress = {}
+            if not requested and (progress.get('phase') == 'review-needed' or progress.get('nextCheckAtMs', 0) > now):
                 return progress
-            claimed = {**progress, 'phase': 'starting', 'nextCheckAtMs': now + 60000}
+            if not allowed(root):
+                return {'phase': 'disabled', 'nativeAppDeliveryVerified': False}
+            claimed = {**progress, 'jobId': progress.get('jobId') or str(uuid.uuid4()),
+                       'phase': 'starting', 'nextCheckAtMs': now + 60000}
             write(root, claimed)
             fd = os.open(root / 'openbot-custom-dispatch.log',
                          os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
@@ -82,13 +182,14 @@ def maybe_start(root, now=None):
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
                     raise RuntimeError('Untrusted Custom dispatch log')
                 child = subprocess.Popen(['/usr/bin/python3', str(HERE / 'custom-dispatch-recovery.py'),
-                                          '--root', str(root)], stdin=subprocess.DEVNULL,
-                                         stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
+                                          '--root', str(root), '--worker-lock-fd', str(worker_fd)],
+                                         stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                                         start_new_session=True, close_fds=True, pass_fds=(worker_fd,))
             finally:
                 os.close(fd)
             return {**claimed, 'pid': child.pid}
     except BlockingIOError:
-        return {**progress, 'workerRunning': True}
+        return snapshot(root)
 
 
 class Recovery:
@@ -101,7 +202,11 @@ class Recovery:
         self.r.m.SD = root
         self.r.m.JOURNAL = root / 'openbot-local-migration.json'
         self.sleep, self.clock, self.last_request = sleep, clock, -10.0
-        self.progress = {'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
+        try:
+            previous = read(root, STATE)
+        except FileNotFoundError:
+            previous = {}
+        self.progress = {'workerPid': os.getpid(), 'jobId': previous.get('jobId') or str(uuid.uuid4()), 'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
                          'rateLimitRetries': 0, 'nativeAppDeliveryVerified': False, 'billingVerified': False,
                          'liveHistoryMerged': False, 'sdkContextsMerged': False}
 
@@ -113,6 +218,21 @@ class Recovery:
     def status(self, phase, **values):
         self.progress.update(phase=phase, **values)
         self.progress['updatedAtMs'] = int(time.time() * 1000)
+        if (self.root / 'openbot-box-remint.json').exists():
+            try:
+                entries = self.r.read().get('entries', [])
+                self.progress['counts'] = {phase: sum(e.get('phase') == phase for e in entries)
+                                           for phase in ('planned', 'copied', 'registered-box', 'active')}
+                self.progress['agentCount'] = len(entries)
+            except Exception:
+                # A refused/corrupt journal must still publish its review state.
+                self.progress.pop('counts', None)
+        if phase == 'bound-box':
+            journal, counts = journal_progress(self.root)
+            proof = publication_proof(self.root, journal)
+            if counts['active'] != len(journal['entries']) or not proof:
+                raise RuntimeError('Publication proof missing for completed transfer')
+            self.progress['publicationProof'] = proof
         write(self.root, self.progress)
 
     def pace(self, call):
@@ -182,6 +302,7 @@ class Recovery:
 
     def run(self):
         self.require()
+        self.status('checking-bindings')
         self.r.m.rpc = self.pace(self.r.m.rpc)
         original_gateway = self.r.m.gateway
         def gateway(method, body):
@@ -215,6 +336,11 @@ class Recovery:
                 self.r.restore_routines()
                 self.r.finalize_preferences()
                 self.r.refresh_peer_roster()
+                results = self.r.verify()
+                self.r.m.write(self.root / 'openbot-custom-dispatch-verification.json', {'results': results})
+                if len(results) != len(expected) or any(row['status'] != 'verified-box' for row in results):
+                    self.status('waiting-for-publication')
+                    return self.progress
                 self.status('bound-box', agentCount=len(expected), nextCheckAtMs=int(time.time()*1000)+120000)
                 return self.progress
             self.status('copying', agentCount=len(sources))
@@ -258,10 +384,28 @@ class Recovery:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=pathlib.Path, default=pathlib.Path('/home/box/sand-data'))
+    parser.add_argument('--request', action='store_true')
+    parser.add_argument('--status', action='store_true')
+    parser.add_argument('--worker-lock-fd', type=int)
     parser.add_argument('--refresh-publication-bindings', action='store_true',
                         help='Refresh owned BOX publisher authority only; do not mint, copy, activate or send.')
     args = parser.parse_args()
-    with lock(args.root):
+    if args.status:
+        print(json.dumps(snapshot(args.root)))
+        return
+    if args.request:
+        result = maybe_start(args.root, requested=True)
+        print(json.dumps(snapshot(args.root)))
+        return
+    # A requested worker inherits the parent's flock with no unlock/spawn gap.
+    if args.worker_lock_fd is not None:
+        inherited = os.fstat(args.worker_lock_fd)
+        expected = (args.root / LOCK).lstat()
+        if (inherited.st_dev, inherited.st_ino, inherited.st_uid) != (expected.st_dev, expected.st_ino, os.getuid()):
+            raise RuntimeError('Invalid inherited transfer lock')
+        fcntl.flock(args.worker_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    held = contextlib.nullcontext() if args.worker_lock_fd is not None else lock(args.root)
+    with held:
         recovery = Recovery(args.root)
         try:
             if args.refresh_publication_bindings:
@@ -273,7 +417,16 @@ def main():
                 'phase': recovery.progress['phase'], 'errorType': type(error).__name__,
                 'message': str(error)[:4096], 'atMs': int(time.time()*1000)})
             retry_ms = 60000 if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError)) else 300000
-            recovery.status('failed' if allowed(args.root) else 'cancelled-mode-change',
+            transient = isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError))
+            # Exception bodies stay in the owned private error artifact. The
+            # panel gets a safe phase and actionable diagnostic category only.
+            message = str(error).lower()
+            category = ('history-conflict' if any(word in message for word in ('history', 'transcript', 'sdk', 'diverg'))
+                        else 'identity-conflict' if any(word in message for word in ('identity', 'ownership', 'authority', 'ambiguous'))
+                        else 'preflight-refused')
+            recovery.status(('waiting-for-control-plane' if transient else 'review-needed')
+                            if allowed(args.root) else 'cancelled-mode-change',
+                            refusalPhase=recovery.progress['phase'], diagnosticCode=category,
                             errorType=type(error).__name__, nextCheckAtMs=int(time.time()*1000)+retry_ms)
             raise SystemExit(1) from None
 

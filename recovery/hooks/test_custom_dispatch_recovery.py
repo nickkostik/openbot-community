@@ -247,7 +247,7 @@ class DispatchTests(fleet.RemintTests):
 
     def test_worker_lock_excludes_duplicate_spawn(self):
         with M.lock(self.root), mock.patch.object(M.subprocess,'Popen',side_effect=AssertionError('duplicate worker')):
-            self.assertTrue(M.maybe_start(self.root).get('workerRunning'))
+            self.assertTrue(M.maybe_start(self.root).get('lockHeld'))
 
     def test_long_cutover_renews_once_on_401_without_recreating_agents(self):
         recovery=self.recovery();self.r.m.H={'Authorization':'private'};calls=[]
@@ -285,6 +285,125 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(recovery.pace(call)('ListGrokBotAgents',{}),{'agents':[]})
         self.assertEqual(len(calls),2)
         self.assertIs(self.r.m.H,credential)
+
+    def test_requested_resume_keeps_job_and_journal_and_passes_writer_lock(self):
+        state = {'jobId': '00000000-0000-4000-8000-000000000001',
+                 'phase': 'review-needed', 'nextCheckAtMs': 9999999999999}
+        self.write(self.root/M.STATE, state)
+        protected = {p:p.read_bytes() for p in (self.root/'openbot-box-remint.json',
+                                               self.root/'openbot-mode', self.source/'settings.json')}
+        with mock.patch.object(M.subprocess, 'Popen') as start:
+            start.return_value.pid = 123
+            self.assertEqual(M.maybe_start(self.root)['phase'], 'review-needed')
+            start.assert_not_called()
+            result = M.maybe_start(self.root, requested=True)
+            self.assertEqual(result['jobId'], state['jobId'])
+            self.assertEqual(result['phase'], 'starting')
+            self.assertIn('--worker-lock-fd', start.call_args.args[0])
+            self.assertEqual(len(start.call_args.kwargs['pass_fds']), 1)
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+        recovery = self.recovery()
+        self.assertEqual(recovery.progress['jobId'], state['jobId'])
+        self.assertEqual(recovery.run()['counts'], {'planned':0, 'copied':0, 'registered-box':0, 'active':1})
+
+    def test_status_reports_real_lock_and_diagnostic_dependency(self):
+        self.assertFalse(M.snapshot(self.root)['workerRunning'])
+        with M.lock(self.root):
+            result = M.snapshot(self.root)
+            self.assertTrue(result['lockHeld'])
+            self.assertFalse(result['workerRunning'])
+            self.assertEqual(result['diagnosticAssistant'], 'unavailable')
+        (self.root/'openbot-mode').write_text('official')
+        self.assertFalse(M.snapshot(self.root)['enabled'])
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=AssertionError('Official cannot spawn')):
+            self.assertEqual(M.maybe_start(self.root, requested=True)['phase'], 'disabled')
+
+    def test_refusal_is_reviewable_and_private_error_is_not_public_progress(self):
+        recovery = self.recovery()
+        with mock.patch.object(recovery.r, 'stage', side_effect=RuntimeError('SDK history conflict private-detail')):
+            with mock.patch.object(M, 'Recovery', return_value=recovery), mock.patch('sys.argv', ['recovery', '--root', str(self.root)]):
+                with self.assertRaises(SystemExit): M.main()
+        state = json.loads((self.root/M.STATE).read_text())
+        self.assertEqual(state['phase'], 'review-needed')
+        self.assertEqual(state['refusalPhase'], 'copying')
+        self.assertEqual(state['diagnosticCode'], 'history-conflict')
+        self.assertNotIn('private-detail', json.dumps(state))
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=AssertionError('Review must not auto-retry')):
+            self.assertEqual(M.maybe_start(self.root, now=99999999999999)['phase'], 'review-needed')
+
+    def test_writer_lock_survives_request_parent_return(self):
+        real_start = M.subprocess.Popen
+        workers = []
+        def isolated_worker(argv, **kwargs):
+            # Keep only the inherited lock alive; this fixture must not invoke
+            # the production worker or any network/host operation.
+            child = real_start(['/usr/bin/python3', '-c', 'import time; time.sleep(10)'], **kwargs)
+            workers.append(child)
+            return child
+        try:
+            with mock.patch.object(M.subprocess, 'Popen', side_effect=isolated_worker):
+                M.maybe_start(self.root, requested=True)
+            with self.assertRaises(BlockingIOError):
+                with M.lock(self.root): pass
+            self.assertTrue(M.snapshot(self.root)['lockHeld'])
+            self.assertFalse(M.snapshot(self.root)['workerRunning'])
+        finally:
+            for child in workers:
+                child.terminate(); child.wait(timeout=5)
+        self.assertFalse(M.snapshot(self.root)['workerRunning'])
+
+    def test_status_refreshes_registered_counts_instead_of_stale_success(self):
+        journal = self.r.read()
+        journal['entries'] = [{**journal['entries'][0], 'phase': 'registered-box',
+            'oldId': '00000000-0000-4000-8000-' + str(i + 100).zfill(12),
+            'newId': '00000000-0000-4000-8000-' + str(i + 200).zfill(12)} for i in range(34)]
+        self.write(self.root/'openbot-box-remint.json', journal)
+        self.write(self.root/M.STATE, {'phase':'bound-box', 'agentCount':99, 'counts':{'active':99},
+                                     'nativeAppDeliveryVerified':True, 'billingVerified':True})
+        before = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with M.lock(self.root):
+            state = M.snapshot(self.root)
+        self.assertEqual(state['phase'], 'waiting-for-publication')
+        self.assertEqual(state['agentCount'], 34)
+        self.assertEqual(state['counts'], {'planned':0, 'copied':0, 'registered-box':34, 'active':0})
+        self.assertEqual(state['verifiedAgents'], 0)
+        self.assertTrue(state['lockHeld'])
+        self.assertFalse(state['workerRunning'])
+        self.assertFalse(state['publicationVerified'])
+        self.assertFalse(state['nativeAppDeliveryVerified'])
+        self.assertFalse(state['billingVerified'])
+        self.assertEqual({p:p.read_bytes() for p in before}, before)
+        self.assertEqual(self.calls, [])
+
+    def test_completed_status_requires_current_journal_and_exact_publication_receipt(self):
+        self.recovery().run()
+        state = M.snapshot(self.root)
+        self.assertEqual(state['phase'], 'bound-box')
+        self.assertTrue(state['publicationVerified'])
+        proof = self.root/'openbot-custom-dispatch-verification.json'
+        self.write(proof, {'results':[{'oldId':fleet.OTHER, 'newId':fleet.NEW, 'status':'verified-box'}]})
+        stale = M.snapshot(self.root)
+        self.assertEqual(stale['phase'], 'waiting-for-publication')
+        self.assertFalse(stale['publicationVerified'])
+        self.assertEqual(stale['counts']['active'], 1)
+        self.assertEqual(stale['verifiedAgents'], 0)
+
+    def test_worker_identity_must_match_owned_process_script_and_root(self):
+        import io
+        argv = ['/usr/bin/python3', str(M.HERE/'custom-dispatch-recovery.py'), '--root', str(self.root), '--worker-lock-fd', '3']
+        with mock.patch.object(pathlib.Path, 'open', return_value=io.BytesIO(('\0'.join(argv)+'\0').encode())):
+            self.assertTrue(M.verified_worker(self.root, {'workerPid':M.os.getpid()}))
+        argv[3] = '/tmp/other-data'
+        with mock.patch.object(pathlib.Path, 'open', return_value=io.BytesIO(('\0'.join(argv)+'\0').encode())):
+            self.assertFalse(M.verified_worker(self.root, {'workerPid':M.os.getpid()}))
+        self.assertFalse(M.verified_worker(self.root, {'workerPid':-1}))
+
+    def test_refresh_cli_dispatch_survives_transfer_cli_integration(self):
+        recovery = self.recovery()
+        with mock.patch.object(M, 'Recovery', return_value=recovery), mock.patch.object(recovery, 'refresh_publication_bindings', return_value={'phase':'publication-bindings-refreshed'}) as refresh:
+            with mock.patch('sys.argv', ['recovery', '--root', str(self.root), '--refresh-publication-bindings']), mock.patch('builtins.print'):
+                M.main()
+            refresh.assert_called_once_with()
 
     def test_opt_in_cannot_be_a_symlink(self):
         flag=self.root/'openbot-local-only.enable';flag.unlink();flag.symlink_to(self.root/'openbot-mode')

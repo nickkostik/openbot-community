@@ -338,6 +338,47 @@ Native BOX ownership, not on a session box, readiness, per-routine enablement, t
 
 Global/bot pauses hold the clock, and malformed/unreadable pause authority conservatively holds it even though ordinary hop pause is fail-open. Keep `openbot-routine-holds.json.heldAgentIds`, native enablement and receipts intact. Both-mode fixtures or policy eligibility do not prove Official delivery. Loading changed scheduler code requires a controlled idle-owned host reload; a cap edit alone is not proof of the loaded module or actual concurrency.
 
+## Panel Local transfer job
+
+The dashboard's Local transfer card reads `GET /api/local-transfer` and offers explicit start/resume through `POST /api/local-transfer`. This is a separate endpoint, not a new `/api/save` kind. The only accepted POST bodies are exactly `{"action":"start"}` and `{"action":"resume"}`. Additional fields, arbitrary commands, environment values and paths are not accepted. An action requires current-user-owned literal Custom mode and the owned `openbot-local-only.enable` flag in the selected data root. The action never flips mode or creates Local opt-in; preserve both choices and all existing identity/history authority.
+
+The API publishes a bounded whitelist, excluding agent IDs, paths, credentials, transcripts, free-form exceptions and private error bodies:
+
+| Field | Contract |
+|---|---|
+| `enabled` | Current owned mode is exactly trimmed `custom` and the Local opt-in flag is present; not proof of BOX ownership or delivery. |
+| `available` | A checked owned transfer helper is available; not proof that work is running. |
+| `lockHeld` | Singleton `flock` is contended; this alone establishes neither a transfer worker nor successful progress. |
+| `workerRunning` | Lock is held and recorded `workerPid` resolves to an owned `/proc` process with the exact transfer script/root command line. Maintenance keepers and unknown holders report false. |
+| `phase` | One of `idle`, `disabled`, `starting`, `checking-bindings`, `copying`, `registering`, `waiting-for-publication`, `waiting-for-rate-limit`, `waiting-for-control-plane`, `activating`, `bound-box`, `review-needed`, `failed`, `cancelled-mode-change`. |
+| `jobId` | Optional stable opaque job UUID retained across retries/resume, not a bot identity or a new migration generation. |
+| `counts` | Fresh counts from the owned `openbot-box-remint.json` for `planned`, `copied`, `registered-box`, `active`; current phase counts, not cached progress or cumulative completed totals. |
+| `agentCount`, `verifiedAgents`, `updatedAtMs` | Optional nonnegative progress counts/update time. `verifiedAgents` is zero unless the current exact completion proof matches; not native-client delivery evidence. |
+| `publicationVerified` | True only when all current entries are active, saved `publicationProof` matches the exact canonical journal SHA256 and verification-artifact SHA256, and verification results match every current source/destination pair with `verified-box` statuses. No private identifiers or artifact contents are exposed. |
+| `refusalPhase`, `diagnosticCode` | Optional bounded phase plus safe category: `history-conflict`, `identity-conflict` or `preflight-refused`. Preserve evidence and inspect privately rather than exposing raw errors. |
+| `diagnosticAssistant`, `diagnosticReason` | `unavailable` and a fixed availability explanation; no assistant execution is implied. |
+| `nativeAppDeliveryVerified`, `billingVerified` | Always false in this public transfer status. |
+
+The service selects its reviewed source helper or installed `openbot-hooks/custom-dispatch-recovery.py`; callers cannot supply an executable. The helper also provides the following commands from the authenticated Computer:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/custom-dispatch-recovery.py \
+  --root /home/box/sand-data --status
+# Explicitly authorized start or retry of the same guarded transfer:
+python3 /home/box/sand-data/openbot-hooks/custom-dispatch-recovery.py \
+  --root /home/box/sand-data --request
+```
+
+`--status` inspects progress, fresh journal counts and process/lock ownership without starting copy/network work. `--request` requests a detached worker for either start or resume; use the existing job's receipt after a disconnect instead of assuming a second job is needed. The worker inherits the held single-writer lock across spawn, retaining the same persisted `jobId` across attempts. Concurrent requests observe the held lock instead of creating parallel writers. A maintenance keeper or unknown holder yields `lockHeld: true`, `workerRunning: false`; the UI displays transfer locked without claiming running/success. Preserve the lock and inspect its owner privately rather than killing an unknown process or deleting lock authority to retry.
+
+Every snapshot derives counts from the current owned remint journal. A saved `bound-box` phase survives only with `publicationVerified: true`: all current entries must be active, saved `publicationProof` must match the exact canonical journal SHA256 and verification-artifact SHA256, and artifact results must match every current `oldId`/`newId` pair with `verified-box` statuses. These identifiers and artifacts remain private. Without that exact proof, public `verifiedAgents` is zero; stale completion derives `copying` when entries are planned, `registering` when entries are copied, or `waiting-for-publication` when entries are registered or all active without matching proof. Cached phase, matching counts, an earlier generation or a held lock cannot manufacture current publication evidence. Public native-app delivery and billing flags remain false even when current publication checks pass.
+
+The private `openbot-custom-dispatch-state.json` tracks job progress; `openbot-box-remint.json` remains migration/copy/activation authority. Private `openbot-custom-dispatch-error.json` and `openbot-custom-dispatch.log` retain diagnostic details on the Computer. Never copy their contents into public status or expose raw subprocess errors. Do not edit journal phases, zero conflict counters, delete an error to manufacture recovery, remint another generation or bypass ownership/history/publication guards to make progress appear complete.
+
+Transient control-plane failures can retain bounded retry/backoff. Nontransient failures enter `review-needed`, stopping automatic supervisor retries. Explicit resume requests another attempt under all current guards; it does not resolve conflicts, accept a history-merge receipt, override copying rules or alter the retained source evidence. If mode/Local authority is withdrawn, the workflow stops; a start/resume button is not permission to restore that authority silently. Complete separately authorized reconciliation when required, then resume the same job.
+
+The public tree has no safely callable bounded ACP/local Codex/OpenCode diagnostic adapter. Report `diagnosticAssistant: "unavailable"` honestly; do not fabricate agent work, execute arbitrary commands or launch unbounded inference/spend as a substitute. A transferred/registered/active roster or `bound-box` is not a native send/tool-return/delivered-reply, billing, live SDK/context merge or prune-safety proof. Keep originals, private backups, routines and session branches under their existing contracts and verify requested native-client outcomes independently.
+
 ## Reuse existing BOX counterparts in Custom
 
 The existing opted-in Custom dispatch coordinator can reuse a completed current journal's actual verified BOX destinations after an authorized return to Custom. It compares owner-visible server authority first. When that current authority is `bound-box`, already-paired original IDs are excluded from fresh source detection and the coordinator calls internal `Reminter.reselect_active()`. This prevents a visible original left by Official roster selection from creating another copy generation merely to restore the same target. There is no new CLI subcommand or live-merge override. Official remains owner authority: selecting Official does not authorize a Custom re-selection or automatic mode flip.
@@ -387,6 +428,37 @@ Journal entries retain their own source/destination UUIDs, server binding and st
 Activation verifies destinations before retiring sources, preserves sidebar/main identity settings and captures current source routine switches. Retired server schedules must be explicitly disabled and read back before cutover, not merely hidden locally. `activationAutomationStates,routineRestoreProgress,routinesRestored` prevent replaying enablement over later user choices. For an authorized interrupted active handoff, `restore-routines --agent-id '<journaled-id>'` completes only unfinished captured switches under current binding/ownership checks; it does not clear global holds or replay missed runs.
 
 Existing journals are retained. Only an explicitly requested next generation can roll an entirely active journal forward while keeping prior mapping/backups and rejecting cycles/conflicts. No user/fleet IDs, fixed roster, copy artifacts or credentials belong in product exports.
+
+### Durable publication reload
+
+An authorized `remint-box-fleet.py publish` rechecks the registered copies' owned BOX bindings and requests the native startup publication sweep through [publication-reload.py](../../recovery/hooks/publication-reload.py). It no longer sets `computer-recovery-state.json.pendingHostReload` for publication. That state file remains recovery telemetry and may still contain pending reloads for other repairs; do not edit it to create, acknowledge or repair a publication request.
+
+The separate durable authority is `<data>/openbot-publication-reload.json` with sibling `openbot-publication-reload.json.lock`. Both must be current-user-owned regular nonsymlink files with no group/other permissions; the marker is bounded to 64 KiB. The writer and consumer hold the same exclusive lock. Marker writes use a private temporary file, file fsync, atomic replacement and directory fsync so telemetry rewrites cannot lose the request. Keep these files and the remint journal private; never copy another installation's request.
+
+| Field | Contract |
+|---|---|
+| `schema` | Exactly `1`. |
+| `requestId` | Fresh canonical UUID for this request, independent of bot/conversation IDs. |
+| `mode` | Exactly `custom`. |
+| `phase` | Persisted `pending`, `signal-issued` or `acknowledged`. Waiting observations do not replace this phase. |
+| `target` | Native process identity `{pid,startTicks}`; PID is a positive integer and `startTicks` is the `/proc/<pid>/stat` start identity string. PID alone cannot authorize a reload. |
+| `hostSha256` | SHA256 of the exact selected owned native host source when requested. |
+| `requestedAtMs` | Request creation time in Unix milliseconds. |
+| `signalIssuedAtMs` | Latest durably recorded signal-intent time in Unix milliseconds; also starts the ten-second retry grace. It does not prove SIGTERM reached the host. |
+| `signalAttempts` | Count of durably recorded signal intents, incremented before the initial attempt and each retry; not a successful-signal count. |
+| `acknowledgedAtMs`, `replacement` | Added on acknowledgement with the replacement native `{pid,startTicks}` identity. Acknowledgement does not prove publication or client delivery. |
+
+Request creation requires owned local-only opt-in, literal trimmed Custom and one native host. It captures the host source and process start identity, then rechecks mode and process authority before writing. The durable marker is published before `publish` saves `publicationReloadRequestedAtMs` and `publicationReloadRequestId` in `openbot-box-remint.json` and returns its request receipt. Compare the same request ID across marker, journal, publish result and watcher observation. If interrupted between marker publication and journal/result completion, inspect the retained marker before repeating the operation; a successful journal save is not required for the marker to survive.
+
+The Custom computer watcher consumes the request under its lock. It requires owned local-only opt-in and Custom mode, the exact requested host hash and source mtime quiet for at least two seconds. Missing, multiple or unidentifiable native hosts remain waiting. For the recorded native PID/start identity, the authenticated gateway must report literal `isBusy: false`; busy or unknown is not idle. After that potentially slow call it rechecks mode/local-only authority, source hash and quiet age, and exact native process identity before signalling.
+
+Before the initial SIGTERM and each retry, the watcher durably writes `phase: "signal-issued"`, updates `signalIssuedAtMs` and increments `signalAttempts` under the same `requestId`. While the same PID/start identity remains, ticks within ten seconds of the latest intent report `waiting-native-replacement` without signalling. After that grace, the watcher repeats the exact expected source hash, two-second source quiet age, Custom/local-only, unique process and gateway-idle checks, including every post-gateway authority recheck, before retrying SIGTERM against that same target. Busy or unknown gateway state waits for idle. There is no SIGKILL escalation. A failed signal call returns that request to `pending` and surfaces the failure; a persisted intent alone is not a successful signal receipt.
+
+Watcher `publicationReload` observations can report `absent`, a persisted phase, or `waiting-custom`, `waiting-request-refresh`, `waiting-stable-source`, `waiting-native-host`, `waiting-native-replacement`, `waiting-idle` or `waiting-authority`. In Official, the computer watcher does not consume or clear this Custom request. A changed host hash leaves it waiting for a request refresh; finish the checked source change and use an explicitly authorized `publish` to capture fresh source/process authority. The legacy `pendingHostReload` branch runs only when the durable observation is `absent` or `acknowledged`; an active durable request, including one waiting for source refresh, prevents that telemetry branch from bypassing these guards. Do not hand-edit the hash, target, mode, phase or request ID, remove the lock, or poll by repeatedly invoking mutating `publish`.
+
+The durable intent closes the telemetry-loss problem but still permits a crash between writing `signal-issued` and calling SIGTERM. Automatic recovery uses the same ten-second grace and fresh authority checks before retrying against the unchanged target identity. Retries are limited by this interval and ownership/idle/source conditions, not a fixed attempt-count ceiling. Once a unique owned native identity differs from `target`, the watcher rechecks Custom/native authority and acknowledges that request without signalling the replacement; an already replaced process can also acknowledge on the first consumer tick. A same PID with different `startTicks` is a replacement, so recycled PIDs do not authorize another bounce. No acknowledgement is written while the same target remains. Preserve the marker through Official selection, watcher restart and telemetry updates rather than resetting it or creating repeated requests to manufacture progress.
+
+`publish` reports `supervisedReloadRequested: true`, `publicationReloadRequestId`, `publicationVerified: false` and `nativeAppDeliveryVerified: false`. An `acknowledged` reload means a replacement native process was observed under the checked authority. It does not prove that the startup sweep completed, that copied transcript payloads reached the platform, that the UI displays them, or that chat sends/replies work. Run the separate full ordered paginated publication `verify` before activation, preserve incomplete/divergent history and test actual intended-client delivery separately. No acknowledgement authorizes activation, pruning, inferred billing or a live SDK/context merge.
 
 ### Reviewed terminal return and history merge receipts
 

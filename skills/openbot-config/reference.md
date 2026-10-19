@@ -338,6 +338,47 @@ Native BOX ownership, not on a session box, readiness, per-routine enablement, t
 
 Global/bot pauses hold the clock, and malformed/unreadable pause authority conservatively holds it even though ordinary hop pause is fail-open. Keep `openbot-routine-holds.json.heldAgentIds`, native enablement and receipts intact. Both-mode fixtures or policy eligibility do not prove Official delivery. Loading changed scheduler code requires a controlled idle-owned host reload; a cap edit alone is not proof of the loaded module or actual concurrency.
 
+## Panel Local transfer job
+
+The dashboard's Local transfer card reads `GET /api/local-transfer` and offers explicit start/resume through `POST /api/local-transfer`. This is a separate endpoint, not a new `/api/save` kind. The only accepted POST bodies are exactly `{"action":"start"}` and `{"action":"resume"}`. Additional fields, arbitrary commands, environment values and paths are not accepted. An action requires current-user-owned literal Custom mode and the owned `openbot-local-only.enable` flag in the selected data root. The action never flips mode or creates Local opt-in; preserve both choices and all existing identity/history authority.
+
+The API publishes a bounded whitelist, excluding agent IDs, paths, credentials, transcripts, free-form exceptions and private error bodies:
+
+| Field | Contract |
+|---|---|
+| `enabled` | Current owned mode is exactly trimmed `custom` and the Local opt-in flag is present; not proof of BOX ownership or delivery. |
+| `available` | A checked owned transfer helper is available; not proof that work is running. |
+| `lockHeld` | Singleton `flock` is contended; this alone establishes neither a transfer worker nor successful progress. |
+| `workerRunning` | Lock is held and recorded `workerPid` resolves to an owned `/proc` process with the exact transfer script/root command line. Maintenance keepers and unknown holders report false. |
+| `phase` | One of `idle`, `disabled`, `starting`, `checking-bindings`, `copying`, `registering`, `waiting-for-publication`, `waiting-for-rate-limit`, `waiting-for-control-plane`, `activating`, `bound-box`, `review-needed`, `failed`, `cancelled-mode-change`. |
+| `jobId` | Optional stable opaque job UUID retained across retries/resume, not a bot identity or a new migration generation. |
+| `counts` | Fresh counts from the owned `openbot-box-remint.json` for `planned`, `copied`, `registered-box`, `active`; current phase counts, not cached progress or cumulative completed totals. |
+| `agentCount`, `verifiedAgents`, `updatedAtMs` | Optional nonnegative progress counts/update time. `verifiedAgents` is zero unless the current exact completion proof matches; not native-client delivery evidence. |
+| `publicationVerified` | True only when all current entries are active, saved `publicationProof` matches the exact canonical journal SHA256 and verification-artifact SHA256, and verification results match every current source/destination pair with `verified-box` statuses. No private identifiers or artifact contents are exposed. |
+| `refusalPhase`, `diagnosticCode` | Optional bounded phase plus safe category: `history-conflict`, `identity-conflict` or `preflight-refused`. Preserve evidence and inspect privately rather than exposing raw errors. |
+| `diagnosticAssistant`, `diagnosticReason` | `unavailable` and a fixed availability explanation; no assistant execution is implied. |
+| `nativeAppDeliveryVerified`, `billingVerified` | Always false in this public transfer status. |
+
+The service selects its reviewed source helper or installed `openbot-hooks/custom-dispatch-recovery.py`; callers cannot supply an executable. The helper also provides the following commands from the authenticated Computer:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/custom-dispatch-recovery.py \
+  --root /home/box/sand-data --status
+# Explicitly authorized start or retry of the same guarded transfer:
+python3 /home/box/sand-data/openbot-hooks/custom-dispatch-recovery.py \
+  --root /home/box/sand-data --request
+```
+
+`--status` inspects progress, fresh journal counts and process/lock ownership without starting copy/network work. `--request` requests a detached worker for either start or resume; use the existing job's receipt after a disconnect instead of assuming a second job is needed. The worker inherits the held single-writer lock across spawn, retaining the same persisted `jobId` across attempts. Concurrent requests observe the held lock instead of creating parallel writers. A maintenance keeper or unknown holder yields `lockHeld: true`, `workerRunning: false`; the UI displays transfer locked without claiming running/success. Preserve the lock and inspect its owner privately rather than killing an unknown process or deleting lock authority to retry.
+
+Every snapshot derives counts from the current owned remint journal. A saved `bound-box` phase survives only with `publicationVerified: true`: all current entries must be active, saved `publicationProof` must match the exact canonical journal SHA256 and verification-artifact SHA256, and artifact results must match every current `oldId`/`newId` pair with `verified-box` statuses. These identifiers and artifacts remain private. Without that exact proof, public `verifiedAgents` is zero; stale completion derives `copying` when entries are planned, `registering` when entries are copied, or `waiting-for-publication` when entries are registered or all active without matching proof. Cached phase, matching counts, an earlier generation or a held lock cannot manufacture current publication evidence. Public native-app delivery and billing flags remain false even when current publication checks pass.
+
+The private `openbot-custom-dispatch-state.json` tracks job progress; `openbot-box-remint.json` remains migration/copy/activation authority. Private `openbot-custom-dispatch-error.json` and `openbot-custom-dispatch.log` retain diagnostic details on the Computer. Never copy their contents into public status or expose raw subprocess errors. Do not edit journal phases, zero conflict counters, delete an error to manufacture recovery, remint another generation or bypass ownership/history/publication guards to make progress appear complete.
+
+Transient control-plane failures can retain bounded retry/backoff. Nontransient failures enter `review-needed`, stopping automatic supervisor retries. Explicit resume requests another attempt under all current guards; it does not resolve conflicts, accept a history-merge receipt, override copying rules or alter the retained source evidence. If mode/Local authority is withdrawn, the workflow stops; a start/resume button is not permission to restore that authority silently. Complete separately authorized reconciliation when required, then resume the same job.
+
+The public tree has no safely callable bounded ACP/local Codex/OpenCode diagnostic adapter. Report `diagnosticAssistant: "unavailable"` honestly; do not fabricate agent work, execute arbitrary commands or launch unbounded inference/spend as a substitute. A transferred/registered/active roster or `bound-box` is not a native send/tool-return/delivered-reply, billing, live SDK/context merge or prune-safety proof. Keep originals, private backups, routines and session branches under their existing contracts and verify requested native-client outcomes independently.
+
 ## Reuse existing BOX counterparts in Custom
 
 The existing opted-in Custom dispatch coordinator can reuse a completed current journal's actual verified BOX destinations after an authorized return to Custom. It compares owner-visible server authority first. When that current authority is `bound-box`, already-paired original IDs are excluded from fresh source detection and the coordinator calls internal `Reminter.reselect_active()`. This prevents a visible original left by Official roster selection from creating another copy generation merely to restore the same target. There is no new CLI subcommand or live-merge override. Official remains owner authority: selecting Official does not authorize a Custom re-selection or automatic mode flip.

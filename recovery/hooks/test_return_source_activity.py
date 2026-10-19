@@ -144,6 +144,24 @@ class StatusSampleTests(unittest.TestCase):
 
 
 
+class KnownSessionMetadataTests(unittest.TestCase):
+    def test_all_typed_watch_session_metadata_refuses_known_nondefault(self):
+        for key in('rows','cleared','cursorTooOld','turnFailed'):
+            with self.subTest(key=key),self.assertRaisesRegex(A.ActivityUnverified,'known nondefault'):
+                A.default_snapshot({key:{'agentId':ONE,'sessionId':'secondary-session'}},{ONE},NOW)
+        with self.assertRaisesRegex(A.ActivityUnverified,'known nondefault viewer'):
+            A.default_snapshot({'rosterChanged':{'agentId':ONE,'agent':{'viewerSessionId':'secondary'}}},{ONE},NOW)
+        with self.assertRaisesRegex(A.ActivityUnverified,'pending computer'):
+            A.default_snapshot({'computerActions':{'actions':[{'agentId':ONE,'type':'click'}]}},{ONE},NOW)
+        with self.assertRaisesRegex(A.ActivityUnverified,'failed turn'):
+            A.default_snapshot({'turnFailed':{'agentId':ONE}},{ONE},NOW)
+
+    def test_default_history_metadata_and_unrelated_source_do_not_claim_global_inventory(self):
+        for key in('rows','cleared','cursorTooOld'):
+            self.assertIsNone(A.default_snapshot({key:{'agentId':ONE}},{ONE},NOW))
+            self.assertIsNone(A.default_snapshot({key:{'agentId':TWO,'sessionId':'secondary'}},{ONE},NOW))
+
+
 class ChunkedStream:
     def __init__(self, data, chunk=7):
         self.data = data; self.chunk = chunk; self.offset = 0; self.reads = []; self.closed = False

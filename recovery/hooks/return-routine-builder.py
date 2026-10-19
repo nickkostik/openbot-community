@@ -10,6 +10,9 @@ def prepare(builder,entry,folder,indexed):
     original=json.loads(builder.tail.owned(folder/'sources'/selected/'settings.json'))
     current=json.loads(builder.tail.owned(folder/'sources'/terminal/'settings.json'))
     owner=terminal;selection='current-local'
+    visible=(original.get('hiddenFromSidebar'),current.get('hiddenFromSidebar'))
+    if visible not in((False,True),(True,False)):
+        raise RuntimeError('Return selected routine owner visibility is ambiguous')
     # A real preserved Official selection is authority only while its explicit
     # selected source is visible and the terminal Local counterpart is hidden.
     if indexed[terminal]['harness']in('box','temporal')and original.get('hiddenFromSidebar')is False and current.get('hiddenFromSidebar')is True:

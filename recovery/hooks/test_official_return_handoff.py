@@ -137,6 +137,8 @@ class FreshReturnTests(unittest.TestCase):
     def append(self, folder, plan):
         self.append_calls.append(copy.deepcopy(plan))
         with contextlib.closing(sqlite3.connect(folder / 'conversation-blobs.db')) as db:
+            previous = db.execute('SELECT data FROM blobs WHERE id=?', (ROOT_SLOT,)).fetchone()[0]
+            db.execute('INSERT OR IGNORE INTO blobs(id,data) VALUES(?,?)', (H.sha(previous), previous))
             db.execute('UPDATE blobs SET data=? WHERE id=?',
                        (H.encoded({'syntheticNativeBoundaryRecords': plan['records']}), ROOT_SLOT)); db.commit()
         graph = self.builder.tail.graph(folder / 'conversation-blobs.db')
@@ -225,6 +227,27 @@ class FreshReturnTests(unittest.TestCase):
             self.builder.validator.referenced(result['backup'], source['store'])
             self.builder.validator.referenced(result['backup'], source['blobs'])
         self.assert_protected(before)
+
+    def test_unintentional_temporal_drift_preserves_current_local_routine_intent(self):
+        self.roster[1]['harness']='temporal'
+        self.write(self.source/'settings.json',{'hiddenFromSidebar':True})
+        self.write(self.target/'settings.json',{'hiddenFromSidebar':False})
+        self.server_transcripts[fleet.OLD]=cloud([self.first])
+        late=message('new-on-known-current',3,fleet.NEW,'new current default literal')
+        self.server_transcripts[fleet.NEW]=cloud([{**self.first,'agentId':fleet.NEW},self.local,late])
+        result=self.builder.run();entry=result['entries'][0]
+        authority=json.loads(self.builder.validator.referenced(result['backup'],entry['returnRoutineAuthority']))
+        self.assertEqual(authority['ownerId'],fleet.NEW)
+        self.assertEqual(authority['selection'],'current-local')
+        self.assertEqual(entry['activationAutomationStates'],{'automations/routine/automation.json':True})
+        self.assertFalse(json.loads((self.root/'agents'/entry['newId']/'automations/routine/automation.json').read_bytes())['enabled'])
+
+    def test_ambiguous_selected_routine_owner_visibility_refuses_before_install(self):
+        self.write(self.target/'settings.json',{'hiddenFromSidebar':False})
+        before=self.protected();journal=self.r.read()
+        with self.assertRaisesRegex(RuntimeError,'owner visibility is ambiguous'):self.builder.run()
+        self.assertEqual(self.r.read(),journal);self.assert_protected(before)
+        self.assertEqual(set(path.name for path in(self.root/'agents').iterdir()),{fleet.OLD,fleet.NEW})
 
     def test_known_nondefault_viewer_or_routine_session_refuses_before_install(self):
         for source in ('viewer', 'routine'):

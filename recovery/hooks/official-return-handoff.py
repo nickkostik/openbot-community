@@ -718,7 +718,8 @@ class FreshReturn(Capture):
             self.return_mapping=self.recovery.module.identity_mapping(proposed)
             for entry,members,folder in selected:
                 result=self.prepare(journal,entry,folder,members,indexed,destinations[entry['newId']])
-                if result:prepared.append(result)
+                if result is None:raise RuntimeError('Return source checkpoint advanced without a supported literal delta')
+                prepared.append(result)
                 self.status('preparing',preparedAgents=len(prepared))
             if not prepared: raise RuntimeError('Return request has no supported fresh history delta')
             self.fresh(journal,prepared,indexed,attempt)

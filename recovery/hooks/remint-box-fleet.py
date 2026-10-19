@@ -716,7 +716,7 @@ class Reminter:
             # already correct; never let a UI fast path hide later source data.
             validator=helper('history-merge-receipt');freshness_cache={}
             for recorded in journal['entries']:
-                if not recorded.get('historyMergeReceipt'):continue
+                if not recorded.get('returnRetainedSources'):continue
                 try:validator.source_freshness(self,journal,recorded,freshness_cache)
                 except RuntimeError as error:
                     if str(error)!='Source history changed after reviewed merge; incremental preservation required before activation':raise
@@ -726,9 +726,9 @@ class Reminter:
                 self.return_source_changed_ids=changed
                 raise ReturnHistoryRequired('Retained source history changed; fresh typed generation required')
             if not visible and not preferences_changed and journal.get('preferencesFinalized') is True:
-                return {'state': 'already-selected', 'agentCount': len(mapping)}
+                return {'state': 'already-selected', 'agentCount': len(journal['entries'])}
             results = self.verify()
-            if len(results) != len(mapping) or any(r['status'] != 'verified-box' for r in results):
+            if len(results) != len(journal['entries']) or any(r['status'] != 'verified-box' for r in results):
                 raise RuntimeError('Every existing BOX copy must be verified before reselection')
             rows = self.rows()
             indexed = {row['agentId']: row for row in rows}
@@ -786,7 +786,7 @@ class Reminter:
                 self.m.gateway('setAgentHiddenFromSidebar', {'id':old, 'isHidden':True})
             self.require_local_mode()
             self._finalize_preferences(journal, mapping)
-            return {'state':'reselected', 'agentCount':len(mapping), 'backup':str(backup),
+            return {'state':'reselected', 'agentCount':len(journal['entries']), 'backup':str(backup),
                     'liveHistoryMerged':False, 'sdkContextsMerged':False, 'pruneAllowed':False}
 
     def checked_routine_states(self, aid, states):

@@ -5,6 +5,8 @@ This restores identity selection only. Divergent SDK context and transcript
 branches remain preserved; this is not proof of a completed live history merge.
 """
 import argparse
+import contextlib
+import sqlite3
 import importlib.util
 import json
 import pathlib
@@ -64,6 +66,11 @@ class Recovery:
             if entry['phase'] != 'active':
                 raise RuntimeError('Incomplete remint must be reviewed before Official roster handoff')
             old, new = self.module.canonical(entry['oldId']), self.module.canonical(entry['newId'])
+            original=entry.get('selectionSourceId')
+            if original is not None:
+                original=self.module.canonical(original)
+                if self.module.identity_mapping(journal).get(original)!=new:
+                    raise RuntimeError('Explicit stock counterpart is outside the proven lineage')
             current, previous = by_id.get(new), by_id.get(old)
             # A migrated plain agent is not a replacement for a typed room.
             target = current if current and current.get('harness') == 'temporal' and \
@@ -80,6 +87,8 @@ class Recovery:
                 if candidate and candidate.get('harness') == 'temporal' and \
                         candidate.get('kind') == entry['kind']:
                     target = candidate
+            if original is not None:
+                target=by_id.get(original)
             if not target or target.get('harness') != 'temporal' or target.get('viewerIsOwner') is not True:
                 raise RuntimeError('No verified owned stock counterpart exists')
             if target.get('kind') != entry['kind']:
@@ -87,13 +96,16 @@ class Recovery:
             aid = target['agentId']
             if target.get('legacyAgentId') != aid:
                 raise RuntimeError('Stock counterpart identity is ambiguous')
-            expected_sid = entry['sourceServerId'] if aid == old else entry['serverId']
+            expected_sid = entry['selectionSourceServerId'] if aid==original else entry['sourceServerId'] if aid==old else entry['serverId']
             if str(target.get('id')) != str(expected_sid):
                 raise RuntimeError('Stock counterpart binding changed')
             profile = self.module.owned_json(self.root / 'agents' / aid / 'profile.json')
             if str(profile.get('serverId')) != str(target['id']):
                 raise RuntimeError('Native stock counterpart binding differs')
-            for candidate, expected in ((old, entry['sourceServerId']), (new, entry['serverId'])):
+            counterparts=[(old,entry['sourceServerId']),(new,entry['serverId'])]
+            if original is not None and original not in (old,new):
+                counterparts.append((original,entry['selectionSourceServerId']))
+            for candidate, expected in counterparts:
                 row = by_id.get(candidate)
                 if not row or row.get('viewerIsOwner') is not True or row.get('legacyAgentId') != candidate or \
                         str(row.get('id')) != str(expected):
@@ -123,6 +135,21 @@ class Recovery:
             backup.mkdir(mode=0o700, parents=True)
             self.r.m.write(backup / 'platform-settings.json', settings)
             self.r.m.write(backup / 'native-settings.json', host)
+            # A reviewed terminal merge has stronger fidelity authority than
+            # legacy selection-only receipts. Do not hide its new messages on
+            # a later Official switch until the stock conversation contains them.
+            lineage=self.module.identity_mapping(journal)
+            for entry,aid in selected:
+                if not entry.get('requiresHistoryMerge'):continue
+                with contextlib.closing(sqlite3.connect('file:'+str(self.root/'agents'/aid/'store.db')+'?mode=ro',uri=True)) as conn:
+                    target=[json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
+                with contextlib.closing(sqlite3.connect('file:'+str(self.root/'agents'/entry['newId']/'store.db')+'?mode=ro',uri=True)) as conn:
+                    source=[json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
+                wanted=[self.r.transcript_key(value,lineage) for value in source];cursor=0
+                for value in target:
+                    if cursor<len(wanted) and self.r.transcript_key(value,lineage)==wanted[cursor]:cursor+=1
+                if cursor!=len(wanted):
+                    raise RuntimeError('Merged local history must reach its stock counterpart before hiding')
             paired = self.module.transfer_preferences(settings, mapping)
             self.rpc('UpdateGrokBotUserRuntimeSettings', paired)
             for entry, aid in selected:
@@ -135,7 +162,7 @@ class Recovery:
                                           expected=before, pre_commit=self.require)
                 self.rpc('SetGrokBotAgentClientState', {'agentId': aid, 'hiddenFromSidebar': False})
                 self.gateway('setAgentHiddenFromSidebar', {'id': aid, 'isHidden': False})
-                for counterpart in (entry['oldId'], entry['newId']):
+                for counterpart in (value for value,target in mapping.items() if target==aid):
                     if counterpart != aid:
                         self.rpc('SetGrokBotAgentClientState', {'agentId': counterpart, 'hiddenFromSidebar': True})
                         self.gateway('setAgentHiddenFromSidebar', {'id': counterpart, 'isHidden': True})
@@ -163,7 +190,7 @@ class Recovery:
             for entry, aid in selected:
                 if self.module.owned_json(self.root/'agents'/aid/'settings.json').get('hiddenFromSidebar',False):
                     raise RuntimeError('Stock counterpart remains hidden')
-                for counterpart in (entry['oldId'], entry['newId']):
+                for counterpart in (value for value,target in mapping.items() if target==aid):
                     if counterpart != aid and not self.module.owned_json(self.root/'agents'/counterpart/'settings.json').get('hiddenFromSidebar',False):
                         raise RuntimeError('Unselected counterpart remains visible in Official')
             result = {'phase': 'stock-roster-selected', 'mode': 'official', 'agentCount': len(selected),

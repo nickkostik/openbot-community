@@ -81,11 +81,17 @@ def remap_preferences(settings, mapping):
 def transfer_preferences(settings, mapping):
     """Keep both identities in their position until visibility handoff finishes."""
     final = remap_preferences(settings, mapping)
-    reverse = {new:old for old,new in mapping.items() if old != new}
-    pair = lambda ids: [value for aid in ids for value in ([reverse[aid],aid] if aid in reverse else [aid])]
+    ancestors = {}
+    for old, new in mapping.items():
+        if old != new:
+            ancestors.setdefault(new, []).append(old)
+    def pair(ids):
+        return list(dict.fromkeys(value for aid in ids
+            for value in [*ancestors.get(aid, []), aid]))
     return {'sidebarSections': {'sections': [{**section, 'agentIds': pair(section['agentIds'])}
             for section in final['sidebarSections']['sections']]},
             'pinnedAgents': {'agentIds': pair(final['pinnedAgents']['agentIds'])}}
+
 
 
 def preserve_native_section_state(sections, current):
@@ -132,6 +138,44 @@ def identity_mapping(journal):
             seen.add(target); target = direct[target]
         resolved[old] = target
     return resolved
+
+
+def lineage_mapping(journal, destinations):
+    """Select complete proven chains, never unrelated earlier generations."""
+    return {old:new for old,new in identity_mapping(journal).items() if new in destinations}
+
+
+def terminal_sources(previous, rows, profiles):
+    """Return from a saved stock selection through its terminal local copy."""
+    lineage = identity_mapping(previous)
+    indexed = {row['agentId']:row for row in rows}
+    if len(indexed) != len(rows):
+        raise RuntimeError('Ambiguous platform identity')
+    entries=[];seen=set()
+    for entry in previous['entries']:
+        terminal=entry['newId']
+        if lineage.get(terminal,terminal) != terminal:
+            raise RuntimeError('Previous copy is not a terminal identity')
+        original=entry.get('selectionSourceId',entry['oldId'])
+        original_sid=entry.get('selectionSourceServerId',entry['sourceServerId'])
+        selected=indexed.get(original);local=indexed.get(terminal)
+        if not selected or profiles.get(original,{}).get('settings',{}).get('hiddenFromSidebar',False):
+            continue
+        for aid,row,sid in ((original,selected,original_sid),(terminal,local,entry['serverId'])):
+            profile=profiles.get(aid,{}).get('profile',{})
+            if (not row or row.get('viewerIsOwner') is not True or row.get('legacyAgentId')!=aid
+                    or str(row.get('id'))!=str(sid) or str(profile.get('serverId'))!=str(sid)
+                    or row.get('harness')!='temporal' or row.get('kind')!=(registration_kind(entry) if aid==terminal else entry['kind'])):
+                raise RuntimeError('Return lineage ownership or binding changed')
+        if terminal in seen:
+            raise RuntimeError('Return lineages overlap')
+        seen.add(terminal)
+        entries.append({'oldId':terminal,'sourceServerId':str(local['id']),
+            'selectionSourceId':original,'selectionSourceServerId':str(original_sid),
+            'name':selected.get('name',''),'kind':entry['kind'],'phase':'planned',
+            'requiresHistoryMerge':True,
+            **({'registrationStrategy':entry['registrationStrategy']} if 'registrationStrategy' in entry else {})})
+    return entries
 
 
 class Reminter:
@@ -188,7 +232,7 @@ class Reminter:
     def plan(self):
         return self.read() if JOURNAL.exists() else {'entries': source_candidates(self.rows(), self.profiles())}
 
-    def initialize(self, next_generation=False):
+    def initialize(self, next_generation=False, return_from_terminal=False):
         self.require_local_mode()
         with self.m.migration_lock():
             previous = self.read() if JOURNAL.exists() else None
@@ -197,7 +241,9 @@ class Reminter:
             if previous and any(e['phase'] != 'active' for e in previous['entries']):
                 raise RuntimeError('Finish the current remint before starting another generation')
             rows, profiles = self.rows(), self.profiles()
-            entries = source_candidates(rows, profiles)
+            if return_from_terminal and (not previous or not next_generation):
+                raise RuntimeError('Terminal return requires an explicit next generation')
+            entries = terminal_sources(previous, rows, profiles) if return_from_terminal else source_candidates(rows, profiles)
             if not entries:
                 raise RuntimeError('No visible Temporal source needs reminting')
             backup = SD / 'recovery-snapshots' / ('box-remint-' + time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8])
@@ -236,7 +282,7 @@ class Reminter:
             old, new = entry['oldId'], entry['newId']
             source = SD / 'agents' / old
             before = owned_json(source / 'profile.json')
-            if before.get('harness') != 'box' or before.get('serverId') != entry['sourceServerId']:
+            if before.get('harness') not in (('box','temporal') if entry.get('requiresHistoryMerge') else ('box',)) or before.get('serverId') != entry['sourceServerId']:
                 raise RuntimeError('Source binding changed before copy')
             self.m.atomic_bytes(pathlib.Path(journal['backup']) / (old + '.profile.before.json'), self.m.checked_bytes(source / 'profile.json'))
             mapping = identity_mapping(journal)
@@ -255,7 +301,7 @@ class Reminter:
             updated = copy_bot_overrides(json.loads(raw), old, new)
             if updated != json.loads(raw):
                 self.m.atomic_bytes(models, self.m.json_bytes(updated), expected=raw)
-            if entry['copyProof'].get('historyIdConflicts', 0):
+            if entry.get('requiresHistoryMerge') or entry['copyProof'].get('historyIdConflicts', 0):
                 # A completed private staging copy must remain resumable even
                 # when live registration requires review of divergent branches.
                 entry['phase'] = 'copied'; self.save(journal)
@@ -264,8 +310,8 @@ class Reminter:
             return entry
 
     def local_identity(self, entry):
-        if entry.get('copyProof', {}).get('historyIdConflicts', 0):
-            raise RuntimeError('Divergent same-ID history is preserved; review session branches before registration')
+        if entry.get('requiresHistoryMerge') or entry.get('copyProof', {}).get('historyIdConflicts', 0):
+            helper('history-merge-receipt').validate(self, self.read(), entry)
         aid = entry['newId']; directory = SD / 'agents' / aid
         profile = owned_json(directory / 'profile.json')
         self.publisher.require_safe_profile(profile, aid)
@@ -284,6 +330,17 @@ class Reminter:
         if count < entry.get('copyProof', {}).get('transcriptEntries', 0):
             raise RuntimeError('Copied transcript entries are missing')
         return profile, count
+
+    def accept_history_merge(self, aid, receipt):
+        """Pin reviewed immutable evidence without erasing original copy conflicts."""
+        self.require_local_mode()
+        with self.m.migration_lock():
+            journal=self.read();entry=self.entry(journal,aid)
+            if entry['phase']!='copied':
+                raise RuntimeError('Only a staged copy may accept reviewed history evidence')
+            proof=helper('history-merge-receipt').accept(self,journal,entry,receipt)
+            self.save(journal)
+            return proof
 
     def restage_room(self, aid, adopt_id=None):
         """Retain a refused hidden room copy; never replace an active destination."""
@@ -490,15 +547,18 @@ class Reminter:
                     self.checked_routine_states(entry['newId'],current)
                     entry['activationAutomationStates']=current
                     self.save(journal)
-            mapping = {e['oldId']:e['newId'] for e in journal['entries'] if e['newId'] in selected}
+            mapping = lineage_mapping(journal, selected)
             # Sidebar hiding and disabling a local JSON file do not stop the
             # retired Temporal bot's server scheduler. Retire both authorities
             # before exposing the replacement or changing the user's positions.
             retired = set(mapping)
-            for previous in journal.get('previousGenerations', []):
-                retired.update(e['oldId'] for e in previous['entries'] if e['phase']=='active')
             for old in sorted(retired):
                 self.pause_cloud_routines(old, pathlib.Path(journal['backup']))
+                for path in (SD/'agents'/old/'automations').rglob('automation.json'):
+                    raw=self.m.checked_bytes(path);definition=json.loads(raw)
+                    if definition.get('enabled') is True:
+                        self.m.atomic_bytes(pathlib.Path(journal['backup'])/'retired-automations'/old/path.parent.name/'automation.json',raw)
+                        self.m.atomic_bytes(path,self.m.json_bytes({**definition,'enabled':False}),expected=raw)
             settings = self.m.rpc('GetGrokBotUserRuntimeSettings', {}).get('settings',{})
             transitional = transfer_preferences(settings, mapping)
             self.m.rpc('UpdateGrokBotUserRuntimeSettings', transitional)
@@ -534,8 +594,9 @@ class Reminter:
                                     if isinstance(copied_settings.get(k),bool)}
                 self.m.rpc('SetGrokBotAgentClientState',{'agentId':new,'hiddenFromSidebar':False,**notification_state})
                 self.m.gateway('setAgentHiddenFromSidebar',{'id':new,'isHidden':False})
-                self.m.rpc('SetGrokBotAgentClientState',{'agentId':old,'hiddenFromSidebar':True})
-                self.m.gateway('setAgentHiddenFromSidebar',{'id':old,'isHidden':True})
+                for ancestor in (value for value,target in mapping.items() if target==new):
+                    self.m.rpc('SetGrokBotAgentClientState',{'agentId':ancestor,'hiddenFromSidebar':True})
+                    self.m.gateway('setAgentHiddenFromSidebar',{'id':ancestor,'isHidden':True})
                 entry['phase']='active';self.save(journal)
                 self.restore_entry_routines(journal,entry)
             self._finalize_preferences(journal, mapping)
@@ -585,7 +646,7 @@ class Reminter:
                 raise RuntimeError('Every copy must be active before finalizing preferences')
             if journal.get('preferencesFinalized') is True:
                 return {'state': 'already-finalized', 'agentCount': len(journal['entries'])}
-            mapping = {e['oldId']: e['newId'] for e in journal['entries']}
+            mapping = lineage_mapping(journal, {e['newId'] for e in journal['entries']})
             return self._finalize_preferences(journal, mapping)
 
     def reselect_active(self):
@@ -773,7 +834,8 @@ class Reminter:
         """Remap the existing colleague allowlist; do not invent or send to peers."""
         self.require_local_mode()
         journal = self.read()
-        mapping = {e['oldId']:e['newId'] for e in journal['entries'] if e['phase']=='active'}
+        mapping = lineage_mapping(journal, {e['newId'] for e in journal['entries'] if e['phase']=='active'})
+        proven=dict(mapping)
         for old,new in (existing_copies or {}).items():
             canonical(old);canonical(new)
             if old in mapping and mapping[old] != new:
@@ -781,7 +843,7 @@ class Reminter:
             if old == new:
                 raise RuntimeError('Existing copy must have a separate identity')
             mapping[old] = new
-        if len(set(mapping.values())) != len(mapping) or set(mapping) & set(mapping.values()):
+        if any(sum(value==new for value in mapping.values())>1 and proven.get(old)!=new for old,new in mapping.items()) or set(mapping) & set(mapping.values()):
             raise RuntimeError('Peer identity map is not one-to-one')
         path = SD/'openbot-recovery'/'roster.json'
         if not path.exists() and not path.is_symlink():
@@ -881,8 +943,20 @@ class Reminter:
             updated.append({**record,'id':new,'name':current.get('name',record.get('name','')),
                             'isGroup':current.get('isGroup',False),'memberIds':members,'previousIds':previous})
             changed+=1
-        if len({r['id'] for r in updated}) != len(updated):
-            raise RuntimeError('Peer remap would introduce duplicate identities')
+        consolidated={}
+        for record in updated:
+            target=record['id']
+            if target not in consolidated:
+                consolidated[target]=record;continue
+            prior=consolidated[target]
+            comparable=lambda value:{k:v for k,v in value.items() if k!='previousIds'}
+            if comparable(prior)!=comparable(record):
+                raise RuntimeError('Peer remap would introduce duplicate identities with conflicting metadata')
+            previous=list(dict.fromkeys([*prior.get('previousIds',[]),*record.get('previousIds',[])]))
+            if any(mapping.get(ancestor)!=target for ancestor in previous if ancestor in mapping):
+                raise RuntimeError('Peer remap would introduce duplicate identities')
+            consolidated[target]={**prior,'previousIds':previous}
+        updated=list(consolidated.values())
         if changed:
             backup=pathlib.Path(journal['backup'])/'peer-roster-before.json'
             if not backup.exists():self.m.atomic_bytes(backup,raw,expected=None)
@@ -893,18 +967,22 @@ class Reminter:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('plan','init','stage','restage-room','register','publish','verify','activate','restore-routines','refresh-roster'))
+    parser.add_argument('command',choices=('plan','init','stage','accept-history-merge','restage-room','register','publish','verify','activate','restore-routines','refresh-roster'))
     parser.add_argument('--agent-id')
+    parser.add_argument('--return-from-terminal',action='store_true')
+    parser.add_argument('--receipt')
     parser.add_argument('--next-generation',action='store_true',help='For init only: preserve a completed journal and stage another observed Temporal-to-BOX recovery.')
     parser.add_argument('--native-box-room',action='store_true',help='Register an existing native BOX group as BOX AGENT; preserves local membership, does not repair platform ROOM kind.')
     parser.add_argument('--adopt-copy',help='For restage-room only: reuse a verified hidden BOX copy with this UUID.')
     parser.add_argument('--existing-copy',action='append',default=[],metavar='OLD=NEW',help='For refresh-roster only: verify a separately recovered complete BOX copy before remapping its existing peer entry.')
     args=parser.parse_args();r=Reminter()
+    if args.return_from_terminal and (args.command!='init' or not args.next_generation):parser.error('--return-from-terminal requires init --next-generation')
+    if args.receipt and args.command!='accept-history-merge':parser.error('--receipt is for accept-history-merge only')
     if args.next_generation and args.command!='init':parser.error('--next-generation is for init only')
     if args.native_box_room and args.command!='register':parser.error('--native-box-room is for register only')
     if args.adopt_copy and args.command!='restage-room':parser.error('--adopt-copy is for restage-room only')
     if args.existing_copy and args.command!='refresh-roster':parser.error('--existing-copy is for refresh-roster only')
-    if args.command in ('stage','register','restage-room') and not args.agent_id:
+    if args.command in ('stage','register','restage-room','accept-history-merge') and not args.agent_id:
         parser.error('--agent-id is required for writes to a copy')
     if args.command=='refresh-roster':
         mapping={}
@@ -915,9 +993,12 @@ def main():
         with r.m.migration_lock():result=r.refresh_peer_roster(mapping)
     elif args.command in ('verify','activate','restore-routines'):result=getattr(r,args.command.replace('-','_'))(args.agent_id)
     elif args.command=='register':result=r.register(args.agent_id,args.native_box_room)
+    elif args.command=='accept-history-merge':
+        if not args.receipt:parser.error('--receipt is required')
+        result=r.accept_history_merge(args.agent_id,args.receipt)
     elif args.command=='stage':result=r.stage(args.agent_id)
     elif args.command=='restage-room':result=r.restage_room(args.agent_id,args.adopt_copy)
-    elif args.command=='init':result=r.initialize(args.next_generation)
+    elif args.command=='init':result=r.initialize(args.next_generation,args.return_from_terminal)
     else:result=getattr(r,{'init':'initialize'}.get(args.command,args.command))()
     print(json.dumps(result,indent=2))
 

@@ -18,6 +18,8 @@ export type EngineSelection = {
   readonly vendor?: string;
   readonly vendorRecord?: string;
   readonly officialRestore: boolean;
+  /** Current BOX body is already valid; do not reset recovery's stock backup. */
+  readonly retainedCurrent?: true;
   readonly unchanged: () => boolean;
 };
 
@@ -126,25 +128,46 @@ export function selectLocalEngine(
   requireRunner(stock);
   requireRunner(wrapped);
   const proof = wrapHostSource({ source: stock, runtimePath: deps.paths.runtime, payloadFingerprint: fingerprint });
-  const selected = refreshPayloadStamp(wrapped, fingerprint).source;
-  if (stock.includes(OPENBOT_MARKER) || count(wrapped, OPENBOT_MARKER) !== 1 || proof.kind !== "wrapped" || proof.source !== selected) {
+  const pinned = refreshPayloadStamp(wrapped, fingerprint).source;
+  if (stock.includes(OPENBOT_MARKER) || count(wrapped, OPENBOT_MARKER) !== 1 || proof.kind !== "wrapped" || proof.source !== pinned) {
     throw new Error("Pinned engine pair is not the canonical wrapper for this installation");
   }
+  let selected = pinned;
+  if (current.includes(OPENBOT_MARKER)) {
+    // The recovery owner may have applied newer canonical repairs after this
+    // retained generation was prepared. Replacing that live BOX runner with
+    // the raw older pin makes a model/key save undo those repairs, then the
+    // recovery watcher puts them back and schedules a second host restart.
+    // Keep the current body only behind the same real runner contract and
+    // an exact wrapper owned by this installation, never just a marker.
+    if (Buffer.byteLength(current, "utf8") > MAX_SOURCE) throw new Error("Current Local engine exceeds its bound");
+    requireRunner(current);
+    const refreshed = refreshPayloadStamp(current, fingerprint).source;
+    const rebuilt = wrapHostSource({ source: stripWrap(current), runtimePath: deps.paths.runtime, payloadFingerprint: fingerprint });
+    if (count(current, OPENBOT_MARKER) !== 1 || rebuilt.kind !== "wrapped" || rebuilt.source !== refreshed) {
+      throw new Error("Current Local engine wrapper does not belong to this installation");
+    }
+    selected = refreshed;
+  }
   const normalized = (source: string): string => refreshPayloadStamp(source, "0000000000000000").source;
-  const alreadyLocal = current.includes(COMPAT_MARKER) || normalized(current) === normalized(wrapped) || current === stock;
+  const retainedCurrent = current.includes(OPENBOT_MARKER);
+  const alreadyLocal = current.includes(COMPAT_MARKER) || normalized(current) === normalized(wrapped) || current === stock ||
+    (retainedCurrent && deps.fs.read(deps.paths.mode)?.trim() === "custom");
   const vendor = alreadyLocal ? vendorRecord() : stripWrap(current);
   if (vendor.includes(OPENBOT_MARKER) || vendor.includes(COMPAT_MARKER)) throw new Error("Cannot preserve a local engine as Official vendor");
   // Include both targets in the compare set, even when absent, to avoid
   // overwriting another save's snapshot after the syntax check yields.
   if (!alreadyLocal) { owned(recordPath, 16384); owned(vendorPath, MAX_SOURCE); }
   const record = JSON.stringify({ schemaVersion: 1, sha256: sha(vendor), localNormalizedSha256: sha(normalized(selected)) }) + "\n";
-  return { source: selected, vendor, vendorRecord: record, officialRestore: false, unchanged };
+  return { source: selected, vendor, vendorRecord: record, officialRestore: false, ...(retainedCurrent ? { retainedCurrent: true } : {}), unchanged };
 }
 
 export function publishOfficialSnapshot(deps: SupervisorDeps, selection: EngineSelection): void {
   if (selection.vendor === undefined || selection.vendorRecord === undefined) return;
-  deps.fs.writeAtomic!(joinAbs(deps.paths.sandData, "openbot-official-host.cjs"), selection.vendor, 0o600);
-  deps.fs.writeAtomic!(joinAbs(deps.paths.sandData, "openbot-official-host.json"), selection.vendorRecord, 0o600);
+  const vendor = joinAbs(deps.paths.sandData, "openbot-official-host.cjs");
+  const record = joinAbs(deps.paths.sandData, "openbot-official-host.json");
+  if (deps.fs.read(vendor) !== selection.vendor) deps.fs.writeAtomic!(vendor, selection.vendor, 0o600);
+  if (deps.fs.read(record) !== selection.vendorRecord) deps.fs.writeAtomic!(record, selection.vendorRecord, 0o600);
 }
 
 type Readiness = { state: "ready" | "unavailable" | "not-pinned"; nativeDeliveryVerified: false };

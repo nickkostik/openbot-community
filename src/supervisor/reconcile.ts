@@ -1082,7 +1082,7 @@ export async function reconcile(
     // installCustomWrap correctly reports no stamp change, but the active
     // vendor still needs replacement by these verified bytes.
     publishOfficialSnapshot(deps, engine);
-    deps.fs.writeAtomic!(deps.paths.knownBackup, engine.vendor!, 0o644);
+    if (!engine.retainedCurrent) deps.fs.writeAtomic!(deps.paths.knownBackup, engine.vendor!, 0o644);
     if (raw !== source) deps.fs.writeAtomic!(deps.paths.hostMain, source, 0o644);
     wrapBytesChanged = raw !== source;
     if (wrapBytesChanged) appendAudit(deps, opts, "wrap", wrapFromSource(raw).kind, "local-engine");

@@ -15,6 +15,7 @@ import stat
 import subprocess
 import time
 import urllib.error
+import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATE = 'openbot-custom-dispatch-state.json'
@@ -38,6 +39,9 @@ def write(root, value):
 
 def allowed(root):
     try:
+        directory = root.lstat()
+        if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.getuid():
+            return False
         for path in (root / 'openbot-mode', root / 'openbot-local-only.enable'):
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -55,25 +59,47 @@ def lock(root):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise RuntimeError('Untrusted Custom dispatch lock')
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        yield
+        yield fd
     finally:
         os.close(fd)
 
 
-def maybe_start(root, now=None):
+def snapshot(root):
+    """Public progress contains no exception bodies, credentials or agent IDs."""
+    try:
+        progress = read(root, STATE)
+    except FileNotFoundError:
+        progress = {}
+    progress = {**progress, "enabled": allowed(root),
+                "diagnosticAssistant": "unavailable",
+                "diagnosticReason": "No bounded local diagnostic assistant adapter is installed"}
+    try:
+        with lock(root):
+            progress["workerRunning"] = False
+    except BlockingIOError:
+        progress["workerRunning"] = True
+    return progress
+
+
+def maybe_start(root, now=None, requested=False):
     """Keep network/copy work outside the fifteen-second recovery tick."""
     if not allowed(root):
         return {'phase': 'disabled', 'nativeAppDeliveryVerified': False}
     now = int(time.time() * 1000) if now is None else now
     try:
-        progress = read(root, STATE)
-    except FileNotFoundError:
-        progress = {}
-    try:
-        with lock(root):
-            if progress.get('nextCheckAtMs', 0) > now:
+        with lock(root) as worker_fd:
+            # Read only after claiming the writer lock; a completed worker may
+            # have published newer state while this request was waiting.
+            try:
+                progress = read(root, STATE)
+            except FileNotFoundError:
+                progress = {}
+            if not requested and (progress.get('phase') == 'review-needed' or progress.get('nextCheckAtMs', 0) > now):
                 return progress
-            claimed = {**progress, 'phase': 'starting', 'nextCheckAtMs': now + 60000}
+            if not allowed(root):
+                return {'phase': 'disabled', 'nativeAppDeliveryVerified': False}
+            claimed = {**progress, 'jobId': progress.get('jobId') or str(uuid.uuid4()),
+                       'phase': 'starting', 'nextCheckAtMs': now + 60000}
             write(root, claimed)
             fd = os.open(root / 'openbot-custom-dispatch.log',
                          os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
@@ -82,13 +108,14 @@ def maybe_start(root, now=None):
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
                     raise RuntimeError('Untrusted Custom dispatch log')
                 child = subprocess.Popen(['/usr/bin/python3', str(HERE / 'custom-dispatch-recovery.py'),
-                                          '--root', str(root)], stdin=subprocess.DEVNULL,
-                                         stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
+                                          '--root', str(root), '--worker-lock-fd', str(worker_fd)],
+                                         stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                                         start_new_session=True, close_fds=True, pass_fds=(worker_fd,))
             finally:
                 os.close(fd)
             return {**claimed, 'pid': child.pid}
     except BlockingIOError:
-        return {**progress, 'workerRunning': True}
+        return {**snapshot(root), 'workerRunning': True}
 
 
 class Recovery:
@@ -101,7 +128,11 @@ class Recovery:
         self.r.m.SD = root
         self.r.m.JOURNAL = root / 'openbot-local-migration.json'
         self.sleep, self.clock, self.last_request = sleep, clock, -10.0
-        self.progress = {'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
+        try:
+            previous = read(root, STATE)
+        except FileNotFoundError:
+            previous = {}
+        self.progress = {'jobId': previous.get('jobId') or str(uuid.uuid4()), 'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
                          'rateLimitRetries': 0, 'nativeAppDeliveryVerified': False, 'billingVerified': False,
                          'liveHistoryMerged': False, 'sdkContextsMerged': False}
 
@@ -113,6 +144,15 @@ class Recovery:
     def status(self, phase, **values):
         self.progress.update(phase=phase, **values)
         self.progress['updatedAtMs'] = int(time.time() * 1000)
+        if (self.root / 'openbot-box-remint.json').exists():
+            try:
+                entries = self.r.read().get('entries', [])
+                self.progress['counts'] = {phase: sum(e.get('phase') == phase for e in entries)
+                                           for phase in ('planned', 'copied', 'registered-box', 'active')}
+                self.progress['agentCount'] = len(entries)
+            except Exception:
+                # A refused/corrupt journal must still publish its review state.
+                self.progress.pop('counts', None)
         write(self.root, self.progress)
 
     def pace(self, call):
@@ -247,8 +287,26 @@ class Recovery:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=pathlib.Path, default=pathlib.Path('/home/box/sand-data'))
+    parser.add_argument('--request', action='store_true')
+    parser.add_argument('--status', action='store_true')
+    parser.add_argument('--worker-lock-fd', type=int)
     args = parser.parse_args()
-    with lock(args.root):
+    if args.status:
+        print(json.dumps(snapshot(args.root)))
+        return
+    if args.request:
+        result = maybe_start(args.root, requested=True)
+        print(json.dumps({**snapshot(args.root), **result}))
+        return
+    # A requested worker inherits the parent's flock with no unlock/spawn gap.
+    if args.worker_lock_fd is not None:
+        inherited = os.fstat(args.worker_lock_fd)
+        expected = (args.root / LOCK).lstat()
+        if (inherited.st_dev, inherited.st_ino, inherited.st_uid) != (expected.st_dev, expected.st_ino, os.getuid()):
+            raise RuntimeError('Invalid inherited transfer lock')
+        fcntl.flock(args.worker_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    held = contextlib.nullcontext() if args.worker_lock_fd is not None else lock(args.root)
+    with held:
         recovery = Recovery(args.root)
         try:
             recovery.run()
@@ -257,7 +315,16 @@ def main():
                 'phase': recovery.progress['phase'], 'errorType': type(error).__name__,
                 'message': str(error)[:4096], 'atMs': int(time.time()*1000)})
             retry_ms = 60000 if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError)) else 300000
-            recovery.status('failed' if allowed(args.root) else 'cancelled-mode-change',
+            transient = isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError))
+            # Exception bodies stay in the owned private error artifact. The
+            # panel gets a safe phase and actionable diagnostic category only.
+            message = str(error).lower()
+            category = ('history-conflict' if any(word in message for word in ('history', 'transcript', 'sdk', 'diverg'))
+                        else 'identity-conflict' if any(word in message for word in ('identity', 'ownership', 'authority', 'ambiguous'))
+                        else 'preflight-refused')
+            recovery.status(('waiting-for-control-plane' if transient else 'review-needed')
+                            if allowed(args.root) else 'cancelled-mode-change',
+                            refusalPhase=recovery.progress['phase'], diagnosticCode=category,
                             errorType=type(error).__name__, nextCheckAtMs=int(time.time()*1000)+retry_ms)
             raise SystemExit(1) from None
 

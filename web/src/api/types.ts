@@ -528,3 +528,11 @@ export type GrokSkillsReport = {
   ref?: string;
   skills: GrokSkill[];
 };
+
+export type LocalTransfer = {
+  enabled: boolean; available: boolean; phase: string; workerRunning: boolean;
+  jobId?: string; agentCount?: number; verifiedAgents?: number; updatedAtMs?: number;
+  counts?: Record<string, number>; refusalPhase?: string; diagnosticCode?: string;
+  diagnosticAssistant: "unavailable"; diagnosticReason: string;
+  nativeAppDeliveryVerified: false; billingVerified: false;
+};

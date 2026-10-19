@@ -237,6 +237,70 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(len(calls),2)
         self.assertIs(self.r.m.H,credential)
 
+    def test_requested_resume_keeps_job_and_journal_and_passes_writer_lock(self):
+        state = {'jobId': '00000000-0000-4000-8000-000000000001',
+                 'phase': 'review-needed', 'nextCheckAtMs': 9999999999999}
+        self.write(self.root/M.STATE, state)
+        protected = {p:p.read_bytes() for p in (self.root/'openbot-box-remint.json',
+                                               self.root/'openbot-mode', self.source/'settings.json')}
+        with mock.patch.object(M.subprocess, 'Popen') as start:
+            start.return_value.pid = 123
+            self.assertEqual(M.maybe_start(self.root)['phase'], 'review-needed')
+            start.assert_not_called()
+            result = M.maybe_start(self.root, requested=True)
+            self.assertEqual(result['jobId'], state['jobId'])
+            self.assertEqual(result['phase'], 'starting')
+            self.assertIn('--worker-lock-fd', start.call_args.args[0])
+            self.assertEqual(len(start.call_args.kwargs['pass_fds']), 1)
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+        recovery = self.recovery()
+        self.assertEqual(recovery.progress['jobId'], state['jobId'])
+        self.assertEqual(recovery.run()['counts'], {'planned':0, 'copied':0, 'registered-box':0, 'active':1})
+
+    def test_status_reports_real_lock_and_diagnostic_dependency(self):
+        self.assertFalse(M.snapshot(self.root)['workerRunning'])
+        with M.lock(self.root):
+            result = M.snapshot(self.root)
+            self.assertTrue(result['workerRunning'])
+            self.assertEqual(result['diagnosticAssistant'], 'unavailable')
+        (self.root/'openbot-mode').write_text('official')
+        self.assertFalse(M.snapshot(self.root)['enabled'])
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=AssertionError('Official cannot spawn')):
+            self.assertEqual(M.maybe_start(self.root, requested=True)['phase'], 'disabled')
+
+    def test_refusal_is_reviewable_and_private_error_is_not_public_progress(self):
+        recovery = self.recovery()
+        with mock.patch.object(recovery.r, 'stage', side_effect=RuntimeError('SDK history conflict private-detail')):
+            with mock.patch.object(M, 'Recovery', return_value=recovery), mock.patch('sys.argv', ['recovery', '--root', str(self.root)]):
+                with self.assertRaises(SystemExit): M.main()
+        state = json.loads((self.root/M.STATE).read_text())
+        self.assertEqual(state['phase'], 'review-needed')
+        self.assertEqual(state['refusalPhase'], 'copying')
+        self.assertEqual(state['diagnosticCode'], 'history-conflict')
+        self.assertNotIn('private-detail', json.dumps(state))
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=AssertionError('Review must not auto-retry')):
+            self.assertEqual(M.maybe_start(self.root, now=99999999999999)['phase'], 'review-needed')
+
+    def test_writer_lock_survives_request_parent_return(self):
+        real_start = M.subprocess.Popen
+        workers = []
+        def isolated_worker(argv, **kwargs):
+            # Keep only the inherited lock alive; this fixture must not invoke
+            # the production worker or any network/host operation.
+            child = real_start(['/usr/bin/python3', '-c', 'import time; time.sleep(10)'], **kwargs)
+            workers.append(child)
+            return child
+        try:
+            with mock.patch.object(M.subprocess, 'Popen', side_effect=isolated_worker):
+                M.maybe_start(self.root, requested=True)
+            with self.assertRaises(BlockingIOError):
+                with M.lock(self.root): pass
+            self.assertTrue(M.snapshot(self.root)['workerRunning'])
+        finally:
+            for child in workers:
+                child.terminate(); child.wait(timeout=5)
+        self.assertFalse(M.snapshot(self.root)['workerRunning'])
+
     def test_opt_in_cannot_be_a_symlink(self):
         flag=self.root/'openbot-local-only.enable';flag.unlink();flag.symlink_to(self.root/'openbot-mode')
         self.assertFalse(M.allowed(self.root))

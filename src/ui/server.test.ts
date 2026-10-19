@@ -670,3 +670,18 @@ test("completing OAuth stages a private login without changing any saved account
     assert.equal(replay.status, 400);
   } finally { server.close(); server.closeAllConnections(); }
 });
+
+test("Local transfer endpoint rejects arbitrary commands and never flips Official mode", async () => {
+  const { server, port } = await listen();
+  try {
+    mkdirSync("/tmp/openbot-sand-data", { recursive: true });
+    writeFileSync("/tmp/openbot-sand-data/openbot-mode", "official\n");
+    for (const body of [{ action: "resume", command: "anything" }, { command: "anything" }, { action: "reset" }, []]) {
+      const result = await request(port, "/api/local-transfer", "POST", Buffer.from(JSON.stringify(body)));
+      assert.equal(result.status, 400);
+    }
+    const refused = await request(port, "/api/local-transfer", "POST", Buffer.from('{"action":"resume"}'));
+    assert.equal(refused.status, 409);
+    assert.equal(readFileSync("/tmp/openbot-sand-data/openbot-mode", "utf8"), "official\n");
+  } finally { server.close(); }
+});

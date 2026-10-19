@@ -3,6 +3,15 @@ import { getLocalTransfer, resumeLocalTransfer } from "../api/client";
 import type { LocalTransfer } from "../api/types";
 import { Badge, Button } from "./ui";
 
+const ADVICE: Record<string, string> = {
+  "publication-backlog": "Check native publication progress and retry receipts before activating any copy.",
+  "identity-review": "Review owned server bindings and the transfer receipt before remapping identities.",
+  "history-review": "Compare immutable history receipts; preserve every source until the conflict is resolved.",
+  "provider-backoff": "Wait for the recorded retry window; do not change providers or repeat dispatch.",
+  "control-plane-review": "Check the owned control-plane connection and retry after it recovers.",
+  "insufficient-evidence": "The diagnostic snapshot does not establish a cause. Keep the transfer paused for review.",
+};
+
 export function LocalTransferCard() {
   const [progress, setProgress] = useState<LocalTransfer | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +51,11 @@ export function LocalTransferCard() {
         {progress?.lockHeld && !progress.workerRunning ? <p>Another process holds the transfer lock. A running transfer worker has not been confirmed.</p> : null}
         {review ? <p>Review required during {progress.refusalPhase?.replaceAll("-", " ") ?? "preflight"}: {progress.diagnosticCode?.replaceAll("-", " ") ?? "preflight refused"}. Resolve the conflict, then resume this job.</p> : null}
       </div>
-      {review ? <p>{progress?.diagnosticReason} Automatic AI review is unavailable.</p> : null}
+      {review ? <div role="status" aria-label="AI diagnostic review">
+        <p>{progress?.diagnosticAssistant === "running" ? "AI diagnostic review is running." : progress?.diagnosticAssistant === "available" ? "AI diagnostic review completed." : progress?.diagnosticAssistant === "failed" ? "AI diagnostic review did not complete. You can still resolve the conflict and resume." : progress?.diagnosticAssistant === "disabled" ? "AI diagnostic review is disabled or the selected route is unsupported." : "Automatic AI review is unavailable."}</p>
+        {progress?.diagnosticAssistant === "available" && progress.diagnosticAdviceCode && ADVICE[progress.diagnosticAdviceCode] ? <p>{ADVICE[progress.diagnosticAdviceCode]}</p> : null}
+        <p>Advisory only: this review cannot change modes, run tools, merge history, or verify message delivery.</p>
+      </div> : null}
       <p>Transfer preserves its recorded copies and saved settings when resumed. Native app delivery and billing have not been verified.</p>
       {progress && !progress.enabled ? <p>Custom mode and Local opt-in are required to resume.</p> : null}
       {progress && !progress.available ? <p>The Local transfer helper is missing from this installation.</p> : null}

@@ -99,6 +99,156 @@ class RemintTests(unittest.TestCase):
             return self.gateway('getAgentAutomations',{'id':body['id']})
         raise AssertionError(method)
 
+    def stage_server_routine(self, enabled=True, with_local=False):
+        if not with_local:
+            (self.source/'automations'/'routine'/'automation.json').unlink(missing_ok=True)
+        self.r.stage(OLD); self.r.register(OLD)
+        record = {'id':'server-routine', 'name':'Scheduled check', 'prompt':'Check peer ' + OLD,
+                  'trigger':{'type':'cron', 'schedule':'0 * * * *', 'firesAt':'derived',
+                             'window':{'earlyMinutes':0,'lateMinutes':2}, 'timing':'exact'},
+                  'schedule':'0 * * * *', 'triggerDescription':'Every hour',
+                  'triggerPresentation':{'summary':'Hourly'}, 'provenance':'user',
+                  'sessionId':'existing-session', 'isEnabled':enabled, 'createdAt':'original',
+                  'lastRunAt':None,'nextRunAt':'next','runs':[], 'filePath':'old/path'}
+        wrapper = {'automationId':OTHER, 'recordJson':json.dumps(record)}
+        self.cloud_routines[OLD] = [copy.deepcopy(wrapper)]
+        relative = 'automations/server-routine/automation.json'
+        native = {key:value for key,value in record.items() if key in
+                  ('name','prompt','trigger','schedule','triggerPresentation','provenance','sessionId','createdAt','lastRunAt')}
+        native = self.r.m.remap_json(native, {OLD:NEW})
+        native['trigger'].pop('firesAt')
+        native['enabled'] = False
+        self.write(self.root/'agents'/NEW/relative, native)
+        authority = {'schema':'openbot-server-routine-authority/v1','oldId':OLD,'newId':NEW,
+                     'automations':[{**wrapper,'nativePath':relative}]}
+        path=self.backup/'server-routines.json';self.write(path,authority)
+        journal=self.r.read();entry=journal['entries'][0]
+        entry['serverRoutineAuthority']={'path':str(path),'sha256':M.hashlib.sha256(path.read_bytes()).hexdigest()}
+        self.r.save(journal)
+        return relative, path
+
+    def test_server_only_routine_needs_no_fabricated_old_native_file(self):
+        relative,_=self.stage_server_routine()
+        ordering=[];rpc=self.r.m.rpc;gateway=self.r.m.gateway
+        def tracked_rpc(method,body):
+            if method=='SetGrokBotAgentAutomationEnabled':ordering.append('pause-cloud')
+            return rpc(method,body)
+        def tracked_gateway(method,body):
+            if method=='setAgentAutomationEnabled':ordering.append('enable-native')
+            return gateway(method,body)
+        self.r.m.rpc=tracked_rpc;self.r.m.gateway=tracked_gateway
+        self.r.activate(OLD)
+        self.assertFalse((self.source/relative).exists())
+        self.assertTrue(json.loads((self.root/'agents'/NEW/relative).read_text())['enabled'])
+        self.assertEqual(ordering,['pause-cloud','enable-native'])
+        self.assertTrue(self.r.read()['entries'][0]['serverRoutinesPaused'])
+
+    def test_server_and_native_local_routines_restore_together(self):
+        relative,_=self.stage_server_routine(with_local=True)
+        self.r.activate(OLD)
+        states=self.r.read()['entries'][0]['activationAutomationStates']
+        self.assertEqual(states,{'automations/routine/automation.json':True,relative:True})
+
+    def test_current_server_pause_overrides_captured_enabled_switch(self):
+        relative,_=self.stage_server_routine()
+        record=json.loads(self.cloud_routines[OLD][0]['recordJson']);record['isEnabled']=False
+        record['lastRunAt']='later';record['trigger']['firesAt']='later-derived'
+        self.cloud_routines[OLD][0]['recordJson']=json.dumps(record)
+        self.r.activate(OLD)
+        self.assertFalse(json.loads((self.root/'agents'/NEW/relative).read_text())['enabled'])
+        self.assertFalse(any(name=='setAgentAutomationEnabled' for name,_ in self.gateway_calls))
+
+    def test_server_authored_changes_refuse_before_any_cutover(self):
+        for field,value in [('prompt','New instructions'),('sessionId','another-session'),('provenance','different')]:
+            with self.subTest(field=field):
+                relative,path=self.stage_server_routine()
+                record=json.loads(self.cloud_routines[OLD][0]['recordJson']);record[field]=value
+                self.cloud_routines[OLD][0]['recordJson']=json.dumps(record)
+                with self.assertRaisesRegex(RuntimeError,'payload changed'):self.r.activate(OLD)
+                self.assertFalse(any(name=='UpdateGrokBotUserRuntimeSettings' for name,_ in self.calls))
+                # Reset the test's transfer phase for the next independent case.
+                self.roster=[row()];self.calls=[]
+                journal=self.r.read();journal['entries'][0].update(phase='planned')
+                journal['entries'][0].pop('serverRoutineAuthority',None);self.r.save(journal)
+                import shutil
+                shutil.rmtree(self.root/'agents'/NEW)
+
+    def test_server_authority_rejects_tampering_foreign_identity_and_symlink(self):
+        relative,path=self.stage_server_routine()
+        journal=self.r.read();entry=journal['entries'][0]
+        original=path.read_bytes()
+        path.write_bytes(original+b' ')
+        with self.assertRaisesRegex(RuntimeError,'digest'):self.r.server_routine_states(journal,entry)
+        path.write_bytes(original)
+        data=json.loads(original);data['oldId']=OTHER;self.write(path,data)
+        entry['serverRoutineAuthority']['sha256']=M.hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(RuntimeError,'another transfer'):self.r.server_routine_states(journal,entry)
+        path.write_bytes(original);entry['serverRoutineAuthority']['sha256']=M.hashlib.sha256(original).hexdigest()
+        target=self.backup/'real.json';path.rename(target);path.symlink_to(target)
+        with self.assertRaises((RuntimeError, OSError)):self.r.server_routine_states(journal,entry)
+
+    def test_server_destination_change_or_source_ownership_change_refuses(self):
+        relative,_=self.stage_server_routine()
+        path=self.root/'agents'/NEW/relative;before=path.read_bytes()
+        definition=json.loads(before);definition['trigger']['timing']='different';self.write(path,definition)
+        with self.assertRaisesRegex(RuntimeError,'configuration changed'):self.r.activate(OLD)
+        path.write_bytes(before);self.roster[0]['viewerIsOwner']=False
+        with self.assertRaisesRegex(RuntimeError,'ownership'):self.r.activate(OLD)
+
+    def test_server_only_routine_restore_retries_preserve_later_native_pause(self):
+        relative,_=self.stage_server_routine();self.r.activate(OLD)
+        path=self.root/'agents'/NEW/relative;definition=json.loads(path.read_bytes())
+        definition['enabled']=False;self.write(path,definition);before=path.read_bytes()
+        self.assertEqual(self.r.restore_routines(OLD)[0]['state'],'already-restored')
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_server_pause_refusal_keeps_destination_disabled_and_can_resume(self):
+        relative,_=self.stage_server_routine()
+        rpc=self.r.m.rpc
+        def refused(method,body):
+            return {} if method=='SetGrokBotAgentAutomationEnabled' else rpc(method,body)
+        self.r.m.rpc=refused
+        with self.assertRaisesRegex(RuntimeError,'remain paused'):self.r.activate(OLD)
+        entry=self.r.read()['entries'][0]
+        self.assertTrue(entry['serverRoutinePauseIntent'])
+        self.assertTrue(entry['activationAutomationStates'][relative])
+        self.assertFalse(json.loads((self.root/'agents'/NEW/relative).read_text())['enabled'])
+        self.assertFalse(any(name=='setAgentAutomationEnabled' for name,_ in self.gateway_calls))
+        self.r.m.rpc=rpc;self.r.activate(OLD)
+        self.assertTrue(json.loads((self.root/'agents'/NEW/relative).read_text())['enabled'])
+
+    def test_server_authority_cannot_overwrite_local_routine_switch_authority(self):
+        _,path=self.stage_server_routine(with_local=True)
+        journal=self.r.read();entry=journal['entries'][0]
+        data=json.loads(path.read_bytes());wrapper=data['automations'][0]
+        record=json.loads(wrapper['recordJson']);record['id']='routine'
+        wrapper['recordJson']=json.dumps(record);wrapper['nativePath']='automations/routine/automation.json'
+        self.write(path,data);entry['serverRoutineAuthority']['sha256']=M.hashlib.sha256(path.read_bytes()).hexdigest()
+        self.cloud_routines[OLD][0]['recordJson']=wrapper['recordJson']
+        self.r.save(journal)
+        with self.assertRaisesRegex(RuntimeError,'collides'):self.r.activate(OLD)
+        self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
+
+    def test_empty_server_authority_cannot_silently_drop_a_server_routine(self):
+        _,path=self.stage_server_routine()
+        data=json.loads(path.read_bytes());data['automations']=[];self.write(path,data)
+        journal=self.r.read();journal['entries'][0]['serverRoutineAuthority']['sha256']=M.hashlib.sha256(path.read_bytes()).hexdigest()
+        self.r.save(journal)
+        with self.assertRaises(RuntimeError):self.r.activate(OLD)
+        self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
+
+    def test_non_cron_authored_fire_time_is_not_ignored(self):
+        before={'trigger':{'type':'once','firesAt':'original'}}
+        after={'trigger':{'type':'once','firesAt':'changed'}}
+        self.assertNotEqual(self.r.routine_semantics(before),self.r.routine_semantics(after))
+
+    def test_added_server_routine_requires_another_reviewed_copy(self):
+        self.stage_server_routine(with_local=True)
+        self.cloud_routines[OLD].append({'automationId':NEW,'recordJson':json.dumps(
+            {'id':'new-unreviewed','isEnabled':True})})
+        with self.assertRaisesRegex(RuntimeError,'list changed'):self.r.activate(OLD)
+        self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
+
     def test_selection_uses_visible_owned_matching_temporal_rows_only(self):
         profiles={OLD:{'profile':self.profile,'settings':{}},OTHER:{'profile':{'harness':'box'},'settings':{}}}
         self.assertEqual(len(M.source_candidates([row()],profiles)),1)

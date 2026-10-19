@@ -39,6 +39,14 @@ def cloud_records(r,wrappers):
     return result
 
 
+def cloud_response(response):
+    # Native protobuf JSON omits an empty repeated field. Only the known
+    # response object may use that default; error/unknown envelopes never do.
+    if not isinstance(response,dict)or set(response)-{'automations'}:
+        raise RuntimeError('Return routine response schema is unknown')
+    rows=response.get('automations',[])
+    if not isinstance(rows,list):raise RuntimeError('Return routine list schema is unknown')
+    return rows
 
 
 def validate_codec(r,folder,plan,proof,tail,module,plan_path=None):
@@ -94,11 +102,13 @@ def validate_prequiesced(r,journal,entry,authority,validator):
             row.get('viewerIsOwner')is not True or str(row.get('id'))!=authority['ownerServerId'] or
             capture.get('cloudRaw')!=cloud):
         raise RuntimeError('Return pre-quiesced capture belongs to another owner or destination')
-    original=cloud_records(r,cloud.get('automations'))
+    original=cloud_records(r,cloud_response(cloud))
     desired={rid:record['isEnabled']for rid,record in original.items()}
     if original!=authority['cloudRecords'] or capture.get('originalDesiredCloud')!=desired:
         raise RuntimeError('Return pre-quiesced desired switches differ from immutable capture')
-    readback=cloud_records(r,paused.get('cloud',{}).get('automations'))
+    if not isinstance(paused,dict)or 'cloud'not in paused:
+        raise RuntimeError('Return paused routine response is missing')
+    readback=cloud_records(r,cloud_response(paused['cloud']))
     if set(readback)!=set(original):raise RuntimeError('Return paused cloud readback lost a routine')
     for rid,record in readback.items():
         if record['isEnabled']is not False or r.routine_semantics(record)!=r.routine_semantics(original[rid]):
@@ -191,7 +201,7 @@ def authority_for(r,journal,entry,validator):
             authority.get('newId')!=entry['newId'] or authority.get('states')!=entry.get('activationAutomationStates')):
         raise RuntimeError('Return routine switch authority belongs to another generation')
     captured=json.loads(validator.referenced(journal['backup'],authority['capturedCloud']))
-    if cloud_records(r,captured.get('automations'))!=authority['cloudRecords']:
+    if cloud_records(r,cloud_response(captured))!=authority['cloudRecords']:
         raise RuntimeError('Return routine desired state differs from immutable source capture')
     native=authority.get('nativeProof');plan_ref=authority.get('nativePlan')
     if bool(native)!=bool(plan_ref):raise RuntimeError('Return routine native plan/proof pairing differs')
@@ -256,7 +266,8 @@ def authority_for(r,journal,entry,validator):
                     raise RuntimeError('Return installed native routine differs from proof')
     elif materialized or authority['cloudRecords']:
         raise RuntimeError('Return materialized or captured cloud routines have no native proof')
-    elif authority['states']!={relative:value.get('enabled')for relative,value in authority['localDefinitions'].items()}:
+    elif authority['states']!={relative:value.get('enabled')if authority['ownerId']==authority['sourceId']else False
+                              for relative,value in authority['localDefinitions'].items()}:
         raise RuntimeError('Return Local routine switches differ from captured authority')
     return authority
 
@@ -295,7 +306,7 @@ def validate(r,journal,entry,validator):
     request={'agentId':owner}
     if authority.get('timeZoneSettings'):
         request['timeZone']=json.loads(validator.referenced(journal['backup'],authority['timeZoneSettings']))['userTimeZone']
-    fresh=cloud_records(r,r.m.rpc('ListGrokBotAgentAutomations',request).get('automations'))
+    fresh=cloud_records(r,cloud_response(r.m.rpc('ListGrokBotAgentAutomations',request)))
     if set(fresh)!=set(authority['cloudRecords']):raise RuntimeError('Return selected cloud routine list changed')
     for rid,record in fresh.items():
         if prequiesced and record['isEnabled']is not False:raise RuntimeError('Return pre-quiesced cloud source became enabled')

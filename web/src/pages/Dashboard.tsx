@@ -1,3 +1,4 @@
+import { LocalTransferCard } from "../components/LocalTransferCard";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
@@ -307,6 +308,8 @@ export function Dashboard() {
             </div>
           )}
         </section>
+
+        <LocalTransferCard />
 
         {/* Health strip */}
         <section className="card col-12" aria-labelledby="h-health">

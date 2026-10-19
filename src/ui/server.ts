@@ -1,3 +1,4 @@
+import { localTransfer } from "./local-transfer.ts";
 import { localEngineReadiness } from "../supervisor/local-engine.ts";
 import fs from "node:fs";
 import http from "node:http";
@@ -1003,6 +1004,29 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     return;
   }
   if (await handleLogsApi(req, res, url)) {
+    return;
+  }
+  if (url.pathname === "/api/local-transfer" && (req.method === "GET" || req.method === "POST")) {
+    try {
+      let action: "start" | "resume" | undefined;
+      if (req.method === "POST") {
+        let body: unknown;
+        try { body = JSON.parse(await readBody(req)); }
+        catch { sendJson(res, 400, { error: "Expected a JSON transfer action." }); return; }
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
+            !("action" in body) || (body.action !== "start" && body.action !== "resume")) {
+          sendJson(res, 400, { error: "Expected only action: start or resume." });
+          return;
+        }
+        action = body.action;
+      }
+      const progress = await localTransfer(current, action);
+      sendJson(res, action && !progress.available ? 409 : action ? 202 : 200,
+        action && !progress.available ? { ...progress, error: "Install the owned Local transfer helper before starting." } : progress);
+    } catch {
+      // Never return helper stderr or control-plane exception bodies.
+      sendJson(res, 409, { error: "Local transfer is unavailable. Use an opted-in Custom installation with owned recovery helpers." });
+    }
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/save") {

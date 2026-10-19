@@ -70,6 +70,40 @@ class NativeRoutineTriggerPreservationTests(unittest.TestCase):
         self.assertFalse(result['modeChanged'])
         self.assertNotIn('idle', result)
 
+    def component_fixture(self):
+        source, result = self.fixture()
+        parser = 'function parseStoredAutomationConfig(raw) { return raw; }'
+        trigger = 'function serializeStoredTrigger(t) { return t; }'
+        # Delimiters are genuine module-level function boundaries; no vendor fixture.
+        source = parser + '\n' + source + trigger + '\nfunction triggerIdentity(t) {}\n'
+        result = source.replace(m.OLD, m.NEW)
+        deps = ((parser.split('raw')[0], '\nfunction serializeStoredAutomationConfig(', m.sha256(parser)),
+                ('function serializeStoredTrigger(', '\nfunction triggerIdentity(', m.sha256(trigger)))
+        return source, result, deps
+
+    def test_component_injector_allows_outer_wrapper_but_pins_dependencies(self):
+        source, expected, deps = self.component_fixture()
+        with self.reviewed_fixture(source, expected), patch.object(m, 'DEPENDENCIES', deps):
+            outer = '/* separately CAS-verified wrapper */\n' + source
+            self.assertEqual(m.patch_component(outer), '/* separately CAS-verified wrapper */\n' + expected)
+            self.assertEqual(m.patch_component(m.patch_component(outer)), m.patch_component(outer))
+            with self.assertRaisesRegex(RuntimeError, 'Unreviewed'):
+                m.patch(outer)
+
+    def test_component_injector_refuses_dependency_edits_and_duplicate_native_copies(self):
+        source, expected, deps = self.component_fixture()
+        with self.reviewed_fixture(source, expected), patch.object(m, 'DEPENDENCIES', deps):
+            for altered in [source.replace('return raw;', 'return null;'), source + source]:
+                with self.assertRaisesRegex(RuntimeError, 'dependency'):
+                    m.patch_component(altered)
+
+    def test_component_injector_refuses_unknown_serializer_and_partial_markers(self):
+        source, expected, deps = self.component_fixture()
+        with self.reviewed_fixture(source, expected), patch.object(m, 'DEPENDENCIES', deps):
+            for altered in [source + m.MARK, source.replace(m.OLD, '      trigger: null,'), expected + m.OLD]:
+                with self.assertRaises(RuntimeError):
+                    m.patch_component(altered)
+
     def test_no_patch_api_mutates_host_or_agents_or_invokes_reload(self):
         # The production module is a pure transform: no filesystem/process/network API.
         source = (HERE / 'native-routine-trigger-preservation.py').read_text()

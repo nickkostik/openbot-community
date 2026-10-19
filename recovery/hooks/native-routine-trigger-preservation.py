@@ -61,6 +61,46 @@ def patch(source):
     return result
 
 
+# Canonical injector authority pins the exact native component and its public
+# parser/trigger serializer dependencies. Its enclosing bundle remains under the
+# supervisor's independent engine/source CAS; no caller supplies these digests.
+DEPENDENCIES = (
+    ('function parseStoredAutomationConfig(', '\nfunction serializeStoredAutomationConfig(',
+     '1444c734cbf60e3a7a60108394dcbdf0e4ff684a427fd282a32e0436d9dd622f'),
+    ('function serializeStoredTrigger(', '\nfunction triggerIdentity(',
+     '78b74e04b37f88326b7b0b143d48b6a8b27e884679422fb0ebedb38c4a66728f'),
+)
+
+
+def patch_component(source):
+    """Canonical injector for a separately CAS-verified engine preparation.
+
+    Wrapper/header changes are allowed outside the reviewed native component.
+    Changed dependencies, partial markers and ambiguous copies always refuse.
+    This API performs the same one-line edit and never writes or activates it.
+    """
+    if not isinstance(source, str) or len(source.encode('utf8')) > MAX_BYTES:
+        raise RuntimeError('Native routine source exceeds its bound')
+    for start, end, expected in DEPENDENCIES:
+        if source.count(start) != 1 or source.count(end) != 1:
+            raise RuntimeError('Native routine dependency boundary changed')
+        a, b = source.index(start), source.index(end)
+        if b <= a or sha256(source[a:b]) != expected:
+            raise RuntimeError('Native routine dependency source changed')
+    block = serializer_block(source)
+    if sha256(block) == AFTER_BLOCK_SHA256:
+        if source.count(MARK) != 1 or source.count(NEW) != 1 or OLD in source:
+            raise RuntimeError('Native routine preservation patch is incomplete')
+        return source
+    if (sha256(block) != BEFORE_BLOCK_SHA256 or block.count(OLD) != 1 or
+            source.count(OLD) != 1 or MARK in source):
+        raise RuntimeError('Native routine serializer source changed')
+    result = source.replace(OLD, NEW, 1)
+    if sha256(serializer_block(result)) != AFTER_BLOCK_SHA256:
+        raise RuntimeError('Native routine preservation output differs from review')
+    return result
+
+
 def proof(source, result):
     """Describe only the transform; never claim activation or native delivery."""
     if patch(source) != result:

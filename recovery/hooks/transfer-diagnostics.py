@@ -187,7 +187,7 @@ def request(model, job, facts):
         connection.connect()
         connection.sock.settimeout(max(0.01, deadline - time.monotonic()))
         connection.request('POST', '/v1/chat/completions', payload,
-            {'Content-Type': 'application/json', 'User-Agent': 'OpenBot/transfer-diagnostics'})
+            {'Content-Type': 'application/json'})
         connection.sock.settimeout(max(0.01, deadline - time.monotonic()))
         response = connection.getresponse()
         if response.status != 200:

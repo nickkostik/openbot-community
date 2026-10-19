@@ -213,6 +213,8 @@ class HopRequestTests(unittest.TestCase):
         self.assertTrue(body['openbot_internal_auxiliary'])
         self.assertNotIn('tools', body)
         self.assertNotIn('Authorization', args[3])
+        # The owned hop supplies its installed OpenBot version for Go auxiliary calls.
+        self.assertNotIn('User-Agent', args[3])
         self.assertEqual(len(body['messages']), 2)
         self.assertEqual(json.loads(body['messages'][1]['content']), {'phase': 'waiting-for-publication'})
 

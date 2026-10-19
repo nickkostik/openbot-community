@@ -24,6 +24,7 @@ STATE = 'openbot-custom-dispatch-state.json'
 TIMEOUT = 12
 MAX_RESPONSE = 16384
 BACKOFF_MS = 15 * 60 * 1000
+MAX_JOB_CALLS = 16
 APPROVED_ORIGINS = {'https://opencode.ai/zen/go/v1', 'https://api.openai.com/v1',
                     'https://integrate.api.nvidia.com/v1'}
 PHASES = {'review-needed', 'checking-bindings', 'copying', 'registering', 'waiting-for-publication',
@@ -69,10 +70,13 @@ def write(root, value):
     path = root / NAME
     if path.is_symlink():
         raise Refusal('untrusted-file')
+    encoded = (json.dumps(value, sort_keys=True) + '\n').encode()
+    if len(encoded) > 4096:
+        raise Refusal('invalid-advice-ledger')
     fd, temp = tempfile.mkstemp(prefix='.transfer-diagnostic-', dir=root)
     try:
         with os.fdopen(fd, 'wb') as output:
-            output.write((json.dumps(value, sort_keys=True) + '\n').encode())
+            output.write(encoded)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temp, path)
@@ -312,11 +316,40 @@ def status(root):
     if isinstance(code, str) and code in ADVICE and result['status'] == 'available':
         result.update(adviceCode=code, advice=ADVICE[code])
     if isinstance(value.get('reason'), str) and value.get('reason') in ('timeout', 'upstream-refused', 'invalid-advice', 'response-too-large', 'hop-not-owned',
-            'advice-truncated', 'unsupported-diagnostic-effort', 'unsupported-selected-route', 'official-mode', 'opted-out', 'invalid-route', 'no-refusal', 'request-failed', 'state-changed', 'interrupted', 'not-requested'):
+            'advice-truncated', 'diagnostic-budget-exhausted', 'invalid-advice-ledger', 'unsupported-diagnostic-effort', 'unsupported-selected-route', 'official-mode', 'opted-out', 'invalid-route', 'no-refusal', 'request-failed', 'state-changed', 'interrupted', 'not-requested'):
         result['reason'] = value['reason']
     if result['status'] == 'running' and time.time() * 1000 > (value.get('updatedAtMs') if type(value.get('updatedAtMs')) is int else 0) + (TIMEOUT + 5) * 1000:
         result.update(status='failed', reason='interrupted')
     return result
+
+
+def seen_fingerprints(previous, job):
+    """No eviction: once a job reaches its bounded budget it cannot bill again."""
+    previous_job = previous.get('jobId')
+    if previous_job is not None:
+        try:
+            if str(uuid.UUID(previous_job)) != previous_job:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise Refusal('invalid-advice-ledger') from None
+    if previous_job not in (None, job):
+        return []
+    seen = previous.get('seenFingerprints', [])
+    valid = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
+    if (not isinstance(seen, list) or len(seen) > MAX_JOB_CALLS
+            or any(not valid(value) for value in seen) or len(set(seen)) != len(seen)):
+        raise Refusal('invalid-advice-ledger')
+    seen = list(seen)
+    # Upgrade the old single-fingerprint marker without discarding its receipt.
+    legacy = previous.get('fingerprint')
+    if legacy is not None:
+        if not valid(legacy):
+            raise Refusal('invalid-advice-ledger')
+        if legacy not in seen:
+            if len(seen) >= MAX_JOB_CALLS:
+                raise Refusal('diagnostic-budget-exhausted')
+            seen.append(legacy)
+    return seen
 
 
 def run(root, now=None):
@@ -335,22 +368,30 @@ def run(root, now=None):
             return status(root)
         now = int(time.time() * 1000) if now is None else now
         try:
+            previous = read_json(root / NAME, 4096)
+        except FileNotFoundError:
+            previous = {}
+        value = dict(previous)
+        try:
             job, facts = snapshot(read_json(root / STATE, 65536))
+            seen = seen_fingerprints(previous, job)
+            if previous.get('jobId') not in (None, job):
+                value = {}
+            value.update(jobId=job, seenFingerprints=seen)
             model = selected_model(root)
             effort = diagnostic_effort(root, model)
             fingerprint = hashlib.sha256(json.dumps([job, model, effort, facts], sort_keys=True).encode()).hexdigest()
-            try:
-                previous = read_json(root / NAME, 4096)
-            except FileNotFoundError:
-                previous = {}
-            if previous.get('fingerprint') == fingerprint:
-                return status(root)  # At most one billable call per exact refusal.
+            if fingerprint in seen:
+                return status(root)  # Durable across A -> B -> A and restarts.
+            if len(seen) >= MAX_JOB_CALLS:
+                raise Refusal('diagnostic-budget-exhausted')
             if now < (previous.get('nextAttemptAtMs') if type(previous.get('nextAttemptAtMs')) is int else 0):
                 return status(root)
             owned_hop(root)
             value = {'status': 'running', 'jobId': job, 'fingerprint': fingerprint,
                      'factsDigest': hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest(), 'updatedAtMs': now,
-                     'nextAttemptAtMs': now + BACKOFF_MS, 'attempts': 1}
+                     'nextAttemptAtMs': now + BACKOFF_MS, 'attempts': len(seen) + 1,
+                     'seenFingerprints': seen + [fingerprint]}
             write(root, value)  # Persist before any billable work; restart cannot replay.
             if selected_model(root) != model or diagnostic_effort(root, model) != effort:
                 raise Refusal('state-changed')
@@ -361,8 +402,8 @@ def run(root, now=None):
         except (Refusal, OSError, ValueError, http.client.HTTPException) as error:
             previous_value = locals().get('value', {})
             reason = str(error) if isinstance(error, Refusal) else 'timeout' if isinstance(error, (TimeoutError, socket.timeout)) else 'request-failed'
-            disabled = reason in ('official-mode', 'opted-out', 'unsupported-selected-route', 'unsupported-diagnostic-effort', 'no-refusal')
-            value = {**previous_value, 'jobId': locals().get('job'), 'status': 'disabled' if disabled else 'failed', 'reason': reason,
+            disabled = reason in ('official-mode', 'opted-out', 'unsupported-selected-route', 'unsupported-diagnostic-effort', 'diagnostic-budget-exhausted', 'no-refusal')
+            value = {**previous_value, 'jobId': locals().get('job', previous_value.get('jobId')), 'status': 'disabled' if disabled else 'failed', 'reason': reason,
                      'updatedAtMs': now, 'nextAttemptAtMs': now + BACKOFF_MS}
         write(root, value)
         return status(root)

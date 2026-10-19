@@ -73,6 +73,82 @@ class DiagnosticsTests(unittest.TestCase):
         m.run(self.root, now=1000 + m.BACKOFF_MS)
         self.assertEqual(self.request.call_count, 2)
 
+    def test_a_b_a_and_module_restart_never_rebill_a(self):
+        m.run(self.root, now=1000)
+        self.state['counts']['copied'] = 33
+        self.save_state()
+        m.run(self.root, now=1000+m.BACKOFF_MS)
+        second = importlib.util.module_from_spec(SPEC)
+        SPEC.loader.exec_module(second)
+        self.state['counts']['copied'] = 34
+        self.save_state()
+        with mock.patch.object(second, 'owned_hop', return_value=True), mock.patch.object(second, 'request') as request:
+            second.run(self.root, now=1000+2*m.BACKOFF_MS)
+            request.assert_not_called()
+        self.assertEqual(self.request.call_count, 2)
+        self.assertEqual(len(json.loads((self.root/m.NAME).read_text())['seenFingerprints']), 2)
+
+    def test_sixteen_calls_exhaust_job_without_eviction_and_new_job_resets_budget(self):
+        for index in range(m.MAX_JOB_CALLS):
+            self.state['counts']['copied'] = index
+            self.save_state()
+            m.run(self.root, now=1000+index*m.BACKOFF_MS)
+        self.assertEqual(self.request.call_count, m.MAX_JOB_CALLS)
+        saved = json.loads((self.root/m.NAME).read_text())
+        self.assertEqual(len(saved['seenFingerprints']), m.MAX_JOB_CALLS)
+        self.assertLessEqual((self.root/m.NAME).stat().st_size, 4096)
+        self.state['counts']['copied'] = 99
+        self.save_state()
+        result = m.run(self.root, now=1000+m.MAX_JOB_CALLS*m.BACKOFF_MS)
+        self.assertEqual(result['reason'], 'diagnostic-budget-exhausted')
+        self.assertEqual(self.request.call_count, m.MAX_JOB_CALLS)
+        self.assertEqual(json.loads((self.root/m.NAME).read_text())['seenFingerprints'], saved['seenFingerprints'])
+        self.state['jobId'] = '24238183-e7f8-48a2-96ea-994a641cf49b'
+        self.save_state()
+        m.run(self.root, now=1000+(m.MAX_JOB_CALLS+1)*m.BACKOFF_MS)
+        self.assertEqual(self.request.call_count, m.MAX_JOB_CALLS+1)
+        self.assertEqual(len(json.loads((self.root/m.NAME).read_text())['seenFingerprints']), 1)
+
+    def test_legacy_fingerprint_and_preflight_failure_preserve_existing_receipts(self):
+        m.run(self.root, now=1000)
+        saved = json.loads((self.root/m.NAME).read_text())
+        saved.pop('seenFingerprints')
+        m.write(self.root, saved)
+        self.state['counts']['copied'] = 33
+        self.save_state()
+        with mock.patch.object(m, 'owned_hop', side_effect=m.Refusal('hop-not-owned')):
+            m.run(self.root, now=1000+m.BACKOFF_MS)
+        preserved = json.loads((self.root/m.NAME).read_text())
+        self.assertEqual(preserved['seenFingerprints'], [saved['fingerprint']])
+        self.state['counts']['copied'] = 34
+        self.save_state()
+        m.run(self.root, now=1000+2*m.BACKOFF_MS)
+        self.assertEqual(self.request.call_count, 1)
+
+    def test_invalid_ledger_fails_closed_without_call_or_receipt_eviction(self):
+        m.run(self.root, now=1000)
+        saved = json.loads((self.root/m.NAME).read_text())
+        saved['seenFingerprints'] = ['bad-hash']
+        m.write(self.root, saved)
+        self.state['counts']['copied'] = 33
+        self.save_state()
+        result = m.run(self.root, now=1000+m.BACKOFF_MS)
+        self.assertEqual(result['reason'], 'invalid-advice-ledger')
+        self.assertEqual(json.loads((self.root/m.NAME).read_text())['seenFingerprints'], ['bad-hash'])
+        self.assertEqual(self.request.call_count, 1)
+
+    def test_malformed_ledger_owner_is_not_treated_as_a_fresh_job(self):
+        m.run(self.root, now=1000)
+        saved = json.loads((self.root/m.NAME).read_text())
+        saved['jobId'] = 'invalid-owner'
+        m.write(self.root, saved)
+        self.state['counts']['copied'] = 33
+        self.save_state()
+        result = m.run(self.root, now=1000+m.BACKOFF_MS)
+        self.assertEqual(result['reason'], 'invalid-advice-ledger')
+        self.assertEqual(json.loads((self.root/m.NAME).read_text())['seenFingerprints'], saved['seenFingerprints'])
+        self.assertEqual(self.request.call_count, 1)
+
     def test_persisted_running_intent_does_not_replay_after_process_crash(self):
         self.request.side_effect = KeyboardInterrupt()
         with self.assertRaises(KeyboardInterrupt):

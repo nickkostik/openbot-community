@@ -556,3 +556,10 @@ export function customActivationBlocked(state: BoxState): RefusalError | null {
 export function customActivationModel(state: BoxState): Model | undefined {
   return modelById(state, state.activeModelId) ?? state.models[0];
 }
+
+export async function getLocalTransfer(): Promise<import("./types").LocalTransfer> {
+  return await request("/api/local-transfer") as import("./types").LocalTransfer;
+}
+export async function resumeLocalTransfer(action: "start" | "resume"): Promise<import("./types").LocalTransfer> {
+  return await request("/api/local-transfer", jsonInit({ action })) as import("./types").LocalTransfer;
+}

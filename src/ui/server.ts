@@ -1,3 +1,4 @@
+import { localEngineReadiness } from "../supervisor/local-engine.ts";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -494,6 +495,7 @@ function publicState(current: SupervisorDeps, catalog?: Catalog) {
     models: saved.models,
     keyedProviders,
     activeModelId: active?.modelId ?? null,
+    localEngine: localEngineReadiness(current),
     logSettings: logSettings(),
   };
 }

@@ -113,6 +113,10 @@ test("UI root serves index.html and state remains an API route", async () => {
 
     const state = await request(port, "/api/state", "GET");
     assert.equal(state.status, 200);
+    const readiness = (state.json as { localEngine: { state: string; nativeDeliveryVerified: boolean } }).localEngine;
+    assert.deepEqual(Object.keys(readiness).sort(), ["nativeDeliveryVerified", "state"]);
+    assert.ok(["ready", "unavailable", "not-pinned"].includes(readiness.state));
+    assert.equal(readiness.nativeDeliveryVerified, false);
   } finally {
     server.close();
     server.closeAllConnections();

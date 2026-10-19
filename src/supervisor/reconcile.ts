@@ -18,6 +18,7 @@ import {
 } from "../host/wrap.ts";
 import { observe, wrapFromSource, type SupervisorDeps } from "./observe.ts";
 import { compileCustomPlan, planToJson } from "./plan.ts";
+import { selectLocalEngine, publishOfficialSnapshot, type EngineSelection } from "./local-engine.ts";
 import { parseOwnedPid, writeTemp } from "./procs.ts";
 import { joinAbs } from "./paths.ts";
 import { reconcileExpose } from "./tunnel.ts";
@@ -25,6 +26,8 @@ import { reconcileExpose } from "./tunnel.ts";
 export type ReconcileError =
   | { readonly kind: "host-missing"; readonly path: string }
   | { readonly kind: "mode-changed" }
+  | { readonly kind: "local-engine-refused"; readonly reason: string }
+  | { readonly kind: "source-changed" }
   | { readonly kind: "foreign-hop" }
   | { readonly kind: "foreign-ui" }
   | { readonly kind: "foreign-opengrok" }
@@ -913,6 +916,7 @@ export async function reconcile(
   opts: ReconcileOpts = {},
 ): Promise<ReconcileResult> {
   const initialMode = deps.fs.read(deps.paths.mode);
+  const initialPlan = deps.fs.read(deps.paths.plan);
   if (opts.serviceOnly && (desired.kind !== "official" || deps.fs.read(deps.paths.mode)?.trim() !== "official")) {
     return { kind: "refused", error: { kind: "mode-changed" } };
   }
@@ -928,7 +932,7 @@ export async function reconcile(
   if (wrapFromSource(raw).kind === "foreign-opengrok" && peeled.kind === "still-foreign") {
     return { kind: "refused", error: { kind: "foreign-opengrok" } };
   }
-  const source = peeled.kind === "stock" ? peeled.source : raw;
+  let source = peeled.kind === "stock" ? peeled.source : raw;
 
   for (const pid of deps.procs.opengrokHopPids()) {
     deps.procs.stop(pid);
@@ -996,7 +1000,50 @@ export async function reconcile(
   // the wrap header itself would otherwise be byte-identical.
   const payloadFp = currentPayloadFingerprint(deps);
 
+  // Explicit Local saves must select the retained real BOX runner BEFORE
+  // census. A recovery watcher only runs after Custom is saved, which otherwise
+  // deadlocks a stock host whose latest upstream removed the factory.
+  let engine: EngineSelection | undefined;
+  try {
+    engine = selectLocalEngine(deps, desired.kind, raw, payloadFp);
+  } catch (error) {
+    return { kind: "refused", error: { kind: "local-engine-refused", reason: String(error) } };
+  }
+  if (engine !== undefined) {
+    const tmp = writeTemp(deps.fs, deps.paths.sandData, "host-engine.openbot-check.cjs", engine.source);
+    const check = deps.procs.syntaxCheck(tmp);
+    deps.fs.remove(tmp);
+    if (!check.ok) return { kind: "refused", error: { kind: "syntax-check-failed", stderr: check.stderr } };
+    const dependencies = deps.procs.dependencyCheck?.(engine.source, deps.paths.hostMain);
+    if (dependencies === undefined || !dependencies.ok) {
+      return { kind: "refused", error: { kind: "local-engine-refused", reason: dependencies?.reason ?? "Native dependency preflight is unavailable" } };
+    }
+    try {
+      if (deps.fs.read(deps.paths.mode) !== initialMode) return { kind: "refused", error: { kind: "mode-changed" } };
+      if (deps.fs.read(deps.paths.hostMain) !== raw || deps.fs.read(deps.paths.plan) !== initialPlan ||
+          currentPayloadFingerprint(deps) !== payloadFp || !engine.unchanged()) {
+        return { kind: "refused", error: { kind: "source-changed" } };
+      }
+    } catch (error) {
+      return { kind: "refused", error: { kind: "local-engine-refused", reason: String(error) } };
+    }
+    source = engine.source;
+  }
+
   if (desired.kind === "official") {
+    if (engine?.officialRestore) {
+      // A composed engine's stock half still runs locally. Restore the exact
+      // independently preserved vendor, even if its optional tap no longer
+      // exists. Keep the saved logging preference and provider catalog.
+      deps.fs.writeAtomic!(deps.paths.hostMain, source, 0o644);
+      deps.fs.writeAtomic!(deps.paths.knownBackup, source, 0o644);
+      appendAudit(deps, opts, "wrap", "local-engine", "official-vendor");
+      writeMode(deps, "official", opts);
+      const service = await ensureService(deps, before.uiListen.kind, opts);
+      if (service) return refusalKeepingTheWrapChange(deps, opts, raw !== source, payloadFp, service);
+      const result = await finishOk(deps, desired, raw !== source, opts, payloadFp);
+      return result.kind === "ok" && loggingEnabledFromDisk(deps) ? { ...result, officialLogging: "unavailable-host-hook" } : result;
+    }
     writeMode(deps, "official", opts);
     if (loggingEnabledFromDisk(deps)) {
       const toWrap = sourceForMarkedWrap(source);
@@ -1030,11 +1077,20 @@ export async function reconcile(
     };
   }
 
-  const wrapped = installCustomWrap(deps, source, opts, payloadFp);
-  if ("kind" in wrapped) {
-    return wrapped;
+  if (engine !== undefined) {
+    // Already-marked retained sources can have the current stamp. In that case
+    // installCustomWrap correctly reports no stamp change, but the active
+    // vendor still needs replacement by these verified bytes.
+    publishOfficialSnapshot(deps, engine);
+    deps.fs.writeAtomic!(deps.paths.knownBackup, engine.vendor!, 0o644);
+    if (raw !== source) deps.fs.writeAtomic!(deps.paths.hostMain, source, 0o644);
+    wrapBytesChanged = raw !== source;
+    if (wrapBytesChanged) appendAudit(deps, opts, "wrap", wrapFromSource(raw).kind, "local-engine");
+  } else {
+    const wrapped = installCustomWrap(deps, source, opts, payloadFp);
+    if ("kind" in wrapped) return wrapped;
+    wrapBytesChanged = wrapped.changed || raw !== source;
   }
-  wrapBytesChanged = wrapped.changed || raw !== source;
   writeMode(deps, "custom", opts);
   const planBefore = fileState(deps, deps.paths.plan);
   deps.fs.write(deps.paths.plan, planToJson(compileCustomPlan(desired)), 0o644);

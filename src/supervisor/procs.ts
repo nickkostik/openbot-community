@@ -9,10 +9,17 @@ import {
   LOOPBACK,
 } from "../domain/types.ts";
 import { parseAbsPath, type BoxPaths } from "./paths.ts";
+import { checkNativeDependencies } from "./native-dependencies.ts";
 
 export type FsDeps = {
   read(path: AbsPath): string | undefined;
+  /** Bounded, owned, nonsymlinked artifacts; required for pinned engine selection. */
+  readOwned?(path: AbsPath, limit: number, directories: readonly AbsPath[]): string | undefined;
+  /** Cheap change token for bounded read-only status caches, never write authorization. */
+  identity?(path: AbsPath): string | undefined;
   write(path: AbsPath, body: string, mode?: number): void;
+  /** Publish a complete file by fsynced sibling plus rename. */
+  writeAtomic?(path: AbsPath, body: string, mode?: number): void;
   copy(from: AbsPath, to: AbsPath): void;
   remove(path: AbsPath): void;
   exists(path: AbsPath): boolean;
@@ -64,6 +71,7 @@ export type ProcDeps = {
   hopServerPids?(hopServer: AbsPath): OwnedPid[];
   opengrokHopPids(): OwnedPid[];
   term(pid: OwnedPid): void;
+  dependencyCheck?(source: string, hostMain: AbsPath): { ok: true } | { ok: false; reason: string };
   syntaxCheck(file: AbsPath): { ok: true } | { ok: false; stderr: string };
 };
 
@@ -83,6 +91,38 @@ export function parseForeignPid(raw: number): ForeignPid {
 
 export function nodeFs(): FsDeps {
   return {
+    identity(path) {
+      try {
+        const info = fs.lstatSync(path, { bigint: true });
+        return [info.dev, info.ino, info.uid, info.mode, info.size, info.mtimeNs, info.ctimeNs].join(":");
+      } catch (error) { if (isEnoent(error)) return undefined; throw error; }
+    },
+    readOwned(path, limit, directories) {
+      const uid = process.getuid?.();
+      if (uid === undefined) throw new Error("Owned engine artifacts require a local uid");
+      for (const directory of directories) {
+        const info = fs.lstatSync(directory);
+        if (!info.isDirectory() || info.uid !== uid) throw new Error("Engine directory must be owned and nonsymlinked");
+      }
+      let fd: number;
+      try { fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+      catch (error) { if (isEnoent(error)) return undefined; throw error; }
+      try {
+        const info = fs.fstatSync(fd);
+        if (!info.isFile() || info.uid !== uid || info.size > limit) throw new Error("Engine artifact must be an owned bounded regular file");
+        const data = Buffer.alloc(Math.min(limit + 1, info.size + 1));
+        let length = 0;
+        while (length < data.length) {
+          const n = fs.readSync(fd, data, length, data.length - length, null);
+          if (n === 0) break;
+          length += n;
+        }
+        const after = fs.fstatSync(fd);
+        if (length > limit || length !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs ||
+            after.ino !== info.ino || after.dev !== info.dev) throw new Error("Engine artifact changed while reading");
+        return new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(0, length));
+      } finally { fs.closeSync(fd); }
+    },
     read(path) {
       try {
         return fs.readFileSync(path, "utf8");
@@ -95,6 +135,18 @@ export function nodeFs(): FsDeps {
     },
     write(path, body, mode = 0o644) {
       fs.writeFileSync(path, body, { encoding: "utf8", mode });
+    },
+    writeAtomic(path, body, mode = 0o644) {
+      const temporary = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+      try {
+        try {
+          fs.writeFileSync(fd, body, "utf8");
+          fs.fchmodSync(fd, mode);
+          fs.fsyncSync(fd);
+        } finally { fs.closeSync(fd); }
+        fs.renameSync(temporary, path);
+      } finally { try { fs.unlinkSync(temporary); } catch (error) { if (!isEnoent(error)) throw error; } }
     },
     append(path, body, mode = 0o644) {
       fs.appendFileSync(path, body, { encoding: "utf8", mode });
@@ -257,6 +309,7 @@ export function readPidArgs(pid: number): string {
 
 export function nodeProcs(): ProcDeps {
   return {
+    dependencyCheck: checkNativeDependencies,
     port: portOpen,
     readPidFile(path) {
       try {

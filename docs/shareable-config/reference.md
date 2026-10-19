@@ -292,7 +292,7 @@ Loopback `POST /api/save`, `Content-Type: application/json`:
 | `remove-provider`, `remove-model` | Explicit `providerId`/`modelId`; last account/model removal can choose Official and remove the plan. |
 | `set-expose` | `expose:"cloudflare"` or `"off"`. |
 
-Success returns `{ok,wrapBytesChanged,snapshot,providers,models,keyedProviders,activeModelId,logSettings}`, with `createdProviderId` for additive onboarding. Saves use reconcile and serialized state authority. Refusals include `host-missing`, foreign listener/wrap, `census-refused`, `syntax-check-failed`, `listen-failed`, `mode-changed`. Refusal is not permission to adopt, force ownership or reset configuration.
+Success returns `{ok,wrapBytesChanged,snapshot,providers,models,keyedProviders,activeModelId,logSettings}`, with `createdProviderId` for additive onboarding. Saves use reconcile and serialized state authority. Refusals include `host-missing`, foreign listener/wrap, `census-refused`, `syntax-check-failed`, `listen-failed`, `mode-changed`, `source-changed` and `local-engine-refused` with a reason. Refusal is not permission to adopt, force ownership or reset configuration. An invalid selected engine can refuse before any mode or plan write; preserve its policy and artifacts for review instead of deleting the pin or hand-writing Custom.
 
 Other APIs include GET `/api/state` or `/api/snapshot`, GET `/api/bots`, logs/settings, pause controls, provider discovery and skills/OAuth APIs documented here. Hop `/v1/chat/completions` is inference, not configuration. A successful HTTP response is not native end-to-end delivery.
 
@@ -452,6 +452,37 @@ Engine policy `openbot-local-engine.json` is private bounded owned regular nonsy
 | `boxCompatibilityBase` | Managed `{stockSha256,wrappedSha256,generationId?}` preserving the verified baseline and bounded prior-policy history. |
 
 Directories/files must be owned and nonsymlinked; source is regular, at most 48 MiB, exact-hash checked and has required native send/scheduled runner/wrap structure. Keep immutable stock/wrapped files and referenced baseline/prior generations private and encrypted in recovery. No exported vendor source or hash edits to bless unknown interfaces.
+
+### Checked panel local-engine selection
+
+The existing normal Custom save/reconcile path can select an already enabled trusted `openbot-local-engine.json` pin before native wrap census. This breaks the dependency in which an updated marker-free vendor host no longer has a usable BOX factory, census rejects a Custom save, and Custom-only recovery never starts because mode remains Official. It adds no save kind, automatic first binding or permission to invent a local runner. Use the existing `use-model` or other intentional Custom save through the owned panel/API; do not hand-write `openbot-mode` to bypass census. Missing policy or an explicitly disabled policy retains the ordinary checked census path.
+
+Selection requires schema 1, boolean enabled and both exact lowercase source hashes. The optional generation chooses the existing fixed pair or its strictly validated 32-hex immutable generation. Each selected directory is current-user-owned and nonsymlinked. Source files are current-user-owned no-follow regular files, bounded to 48 MiB, fully UTF-8 decoded and checked for changed size/mtime/inode/device during the read. The complete bytes must match the pin. Both stock and wrapped sources must retain the reviewed native `sendPrompt` body structure and scheduled/turn runner anchors; a marker or version string alone does not satisfy the check.
+
+The stock half must have no OpenBot wrapper marker, and the wrapped half exactly one. Rebuilding the canonical wrapper from that stock with this installation’s runtime path and current payload fingerprint must exactly equal the selected wrapped bytes after only the defined payload-stamp refresh. An arbitrary marked bundle or a mismatched runtime path is refused. Reconcile syntax-checks the complete selected source before publishing it, then compares the original raw mode, active host bytes and every read policy/artifact/snapshot against their captured values. A changed mode returns `mode-changed`; changed host/artifact authority returns `source-changed` or `local-engine-refused`. Invalid structure, ownership, hash, policy or original vendor authority returns `local-engine-refused`; syntax failure retains `syntax-check-failed`. These failures do not grant a bypass, downgrade or Temporal fallback. They are pre-write checks, not a filesystem transaction against every possible external writer.
+
+The panel/API can expose optional `localEngine` on state and save responses:
+
+```json
+{"localEngine":{"state":"ready","nativeDeliveryVerified":false}}
+```
+
+`state` is `ready`, `unavailable` or `not-pinned`. It is a read-only hint, not selected mode, a loaded process or a transfer receipt. The service can cache this inspection for five seconds, invalidating it on observed host/mode/plan/policy/payload/artifact metadata or dependency-checker changes. A direct save never trusts the cache: it repeats exact artifact checks, current payload/catalog/mode/source comparisons and the dependency/syntax preflight before writes. Re-enable Custom uses the saved valid `activeModelId`, preserving the user’s chosen route rather than taking the first catalog entry. Intentional per-bot assignments remain in force. The panel can permit an otherwise unknown native census only for a ready pin; foreign listeners and foreign wraps remain refused.
+
+Before selection, eager top-level static non-relative native `require` dependencies are parsed and resolved from the actual native host path without executing or booting vendor code. Missing required imports refuse through `local-engine-refused` before host/mode/plan publication. Resolution stays live even when the parsed import list is cached. Deferred callbacks, class/function bodies and optional imports inside `try` are outside this minimum boot preflight; it does not establish full native module/API compatibility or successful chat execution. The readiness response always keeps `nativeDeliveryVerified: false`, including `ready`.
+
+The native vendor source is preserved independently before selecting the composed local engine. Private files in the selected data root are:
+
+| File | Contract |
+|---|---|
+| `openbot-official-host.cjs` | Exact original unwrapped vendor bytes, saved 0600; never the composed local engine’s `stock.cjs`. |
+| `openbot-official-host.json` | Owned bounded regular nonsymlink JSON, maximum 16 KiB: `{schemaVersion:1,sha256,localNormalizedSha256}`. Both hashes are lowercase SHA256; the latter identifies the selected local source with its payload stamp normalized. |
+
+These files contain vendor runtime source/provenance and stay outside public source and examples. Existing composed installations without the independent snapshot can recover vendor authority only from their owned bounded upstream-sync state or engine policy’s exact `upstreamVersion` and `upstreamSourceSha256`, plus matching owned `openbot-upstream/releases/<version>/vendor.json` and `host-main.cjs`. The capture’s metadata and bytes must match that exact source hash and contain neither the OpenBot wrapper nor local compatibility marker. Missing or invalid capture refuses rather than treating local `stock.cjs` as vendor stock. All authority read during selection is included in the pre-publication comparison.
+
+A later explicit Official reconcile restores this independent vendor only when the active source is a recognized composed local engine: the compatibility marker or exact saved normalized local-source hash identifies it. A fresh ordinary marker-free vendor update remains authoritative; it is not replaced with an older saved vendor. Restore keeps the saved provider plan, credentials, local artifacts and logging preference. When the restored vendor cannot supply an optional logging tap, successful controls can report `officialLogging: "unavailable-host-hook"`; this is capability disclosure, not captured stock traffic. Host loading and restart still follow the existing supervisor ownership/deferred-idle rules.
+
+No engine selection edits bot identities, sections, history databases, SDK/session roots, instructions, routines or their switches. A successful save can establish selected mode and validated on-disk engine bytes; it does not establish current BOX ownership, loaded-runtime identity, a live history/context union, native app admission, actual tool-return/reply delivery, metering or prune safety. Preserve every source branch and private recovery evidence, inspect the loaded runtime separately and complete an actual intended-client local message/tool/delivered-reply test before claiming the handoff works.
 
 ### Prepare a reviewed BOX engine from public vendor source
 

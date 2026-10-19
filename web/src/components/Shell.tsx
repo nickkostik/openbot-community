@@ -115,7 +115,9 @@ export function Shell({ route, onNavigate }: { route: Route; onNavigate: (r: Rou
           <div className="blocked-banner__body">
             <span className="blocked-banner__kind">{refusalKindLabel(blocked)}</span>
             <div className="blocked-banner__remedy">
-              {refusalRemedy(blocked)} All changes are disabled.{" "}
+              {refusalRemedy(blocked)} {state.localEngine?.state === "ready" && blocked.kind === "census-refused"
+                ? "A verified Local engine is ready; use Re-enable custom on Dashboard."
+                : "Repair the host or prepare a verified Local engine before switching."}{" "}
               <button className="link" type="button" onClick={() => setShowDiagnostics((s) => !s)}>
                 {showDiagnostics ? "Hide diagnostics" : "View diagnostics"}
               </button>

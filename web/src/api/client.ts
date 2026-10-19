@@ -31,6 +31,7 @@ import type {
   LogUsage,
   LogUsageRow,
   ModelCatalog,
+  Model,
   RefreshCatalogResult,
   ReasoningLevel,
   RefusalError,
@@ -540,4 +541,18 @@ export function hostBlocked(state: BoxState): RefusalError | null {
     default:
       return null;
   }
+}
+
+
+/** Only an explicit Custom activation may use the independently verified pin. */
+export function customActivationBlocked(state: BoxState): RefusalError | null {
+  if (state.snapshot.uiListen.kind === "foreign") return { kind: "foreign-hop" };
+  const blocked = hostBlocked(state);
+  if (blocked?.kind === "census-refused" && state.localEngine?.state === "ready") return null;
+  return blocked;
+}
+
+/** Returning from Official preserves the saved global selection. */
+export function customActivationModel(state: BoxState): Model | undefined {
+  return modelById(state, state.activeModelId) ?? state.models[0];
 }

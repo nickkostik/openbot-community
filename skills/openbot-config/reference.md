@@ -388,6 +388,37 @@ Activation verifies destinations before retiring sources, preserves sidebar/main
 
 Existing journals are retained. Only an explicitly requested next generation can roll an entirely active journal forward while keeping prior mapping/backups and rejecting cycles/conflicts. No user/fleet IDs, fixed roster, copy artifacts or credentials belong in product exports.
 
+### Durable publication reload
+
+An authorized `remint-box-fleet.py publish` rechecks the registered copies' owned BOX bindings and requests the native startup publication sweep through [publication-reload.py](../../recovery/hooks/publication-reload.py). It no longer sets `computer-recovery-state.json.pendingHostReload` for publication. That state file remains recovery telemetry and may still contain pending reloads for other repairs; do not edit it to create, acknowledge or repair a publication request.
+
+The separate durable authority is `<data>/openbot-publication-reload.json` with sibling `openbot-publication-reload.json.lock`. Both must be current-user-owned regular nonsymlink files with no group/other permissions; the marker is bounded to 64 KiB. The writer and consumer hold the same exclusive lock. Marker writes use a private temporary file, file fsync, atomic replacement and directory fsync so telemetry rewrites cannot lose the request. Keep these files and the remint journal private; never copy another installation's request.
+
+| Field | Contract |
+|---|---|
+| `schema` | Exactly `1`. |
+| `requestId` | Fresh canonical UUID for this request, independent of bot/conversation IDs. |
+| `mode` | Exactly `custom`. |
+| `phase` | Persisted `pending`, `signal-issued` or `acknowledged`. Waiting observations do not replace this phase. |
+| `target` | Native process identity `{pid,startTicks}`; PID is a positive integer and `startTicks` is the `/proc/<pid>/stat` start identity string. PID alone cannot authorize a reload. |
+| `hostSha256` | SHA256 of the exact selected owned native host source when requested. |
+| `requestedAtMs` | Request creation time in Unix milliseconds. |
+| `signalIssuedAtMs` | Latest durably recorded signal-intent time in Unix milliseconds; also starts the ten-second retry grace. It does not prove SIGTERM reached the host. |
+| `signalAttempts` | Count of durably recorded signal intents, incremented before the initial attempt and each retry; not a successful-signal count. |
+| `acknowledgedAtMs`, `replacement` | Added on acknowledgement with the replacement native `{pid,startTicks}` identity. Acknowledgement does not prove publication or client delivery. |
+
+Request creation requires owned local-only opt-in, literal trimmed Custom and one native host. It captures the host source and process start identity, then rechecks mode and process authority before writing. The durable marker is published before `publish` saves `publicationReloadRequestedAtMs` and `publicationReloadRequestId` in `openbot-box-remint.json` and returns its request receipt. Compare the same request ID across marker, journal, publish result and watcher observation. If interrupted between marker publication and journal/result completion, inspect the retained marker before repeating the operation; a successful journal save is not required for the marker to survive.
+
+The Custom computer watcher consumes the request under its lock. It requires owned local-only opt-in and Custom mode, the exact requested host hash and source mtime quiet for at least two seconds. Missing, multiple or unidentifiable native hosts remain waiting. For the recorded native PID/start identity, the authenticated gateway must report literal `isBusy: false`; busy or unknown is not idle. After that potentially slow call it rechecks mode/local-only authority, source hash and quiet age, and exact native process identity before signalling.
+
+Before the initial SIGTERM and each retry, the watcher durably writes `phase: "signal-issued"`, updates `signalIssuedAtMs` and increments `signalAttempts` under the same `requestId`. While the same PID/start identity remains, ticks within ten seconds of the latest intent report `waiting-native-replacement` without signalling. After that grace, the watcher repeats the exact expected source hash, two-second source quiet age, Custom/local-only, unique process and gateway-idle checks, including every post-gateway authority recheck, before retrying SIGTERM against that same target. Busy or unknown gateway state waits for idle. There is no SIGKILL escalation. A failed signal call returns that request to `pending` and surfaces the failure; a persisted intent alone is not a successful signal receipt.
+
+Watcher `publicationReload` observations can report `absent`, a persisted phase, or `waiting-custom`, `waiting-request-refresh`, `waiting-stable-source`, `waiting-native-host`, `waiting-native-replacement`, `waiting-idle` or `waiting-authority`. In Official, the computer watcher does not consume or clear this Custom request. A changed host hash leaves it waiting for a request refresh; finish the checked source change and use an explicitly authorized `publish` to capture fresh source/process authority. The legacy `pendingHostReload` branch runs only when the durable observation is `absent` or `acknowledged`; an active durable request, including one waiting for source refresh, prevents that telemetry branch from bypassing these guards. Do not hand-edit the hash, target, mode, phase or request ID, remove the lock, or poll by repeatedly invoking mutating `publish`.
+
+The durable intent closes the telemetry-loss problem but still permits a crash between writing `signal-issued` and calling SIGTERM. Automatic recovery uses the same ten-second grace and fresh authority checks before retrying against the unchanged target identity. Retries are limited by this interval and ownership/idle/source conditions, not a fixed attempt-count ceiling. Once a unique owned native identity differs from `target`, the watcher rechecks Custom/native authority and acknowledges that request without signalling the replacement; an already replaced process can also acknowledge on the first consumer tick. A same PID with different `startTicks` is a replacement, so recycled PIDs do not authorize another bounce. No acknowledgement is written while the same target remains. Preserve the marker through Official selection, watcher restart and telemetry updates rather than resetting it or creating repeated requests to manufacture progress.
+
+`publish` reports `supervisedReloadRequested: true`, `publicationReloadRequestId`, `publicationVerified: false` and `nativeAppDeliveryVerified: false`. An `acknowledged` reload means a replacement native process was observed under the checked authority. It does not prove that the startup sweep completed, that copied transcript payloads reached the platform, that the UI displays them, or that chat sends/replies work. Run the separate full ordered paginated publication `verify` before activation, preserve incomplete/divergent history and test actual intended-client delivery separately. No acknowledgement authorizes activation, pruning, inferred billing or a live SDK/context merge.
+
 ### Reviewed terminal return and history merge receipts
 
 This is an explicit recovery after a completed journal’s Local copy was later migrated to Temporal while the original stock conversation was selected again. It is not an automatic save/model update, a first migration or permission to discard either branch. With separately authorized Custom/local-only recovery, initialize a new generation using:

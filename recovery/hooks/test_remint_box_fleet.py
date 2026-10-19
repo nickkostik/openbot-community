@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import json
 import pathlib
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -27,6 +28,9 @@ class RemintTests(unittest.TestCase):
     def setUp(self):
         t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup);self.root=pathlib.Path(t.name)
         self.r=M.Reminter()
+        host=self.root/'native-host.cjs';host.write_text('fixture native host')
+        for name,value in [('HOST',host),('host_pids',lambda _: [os.getpid()])]:
+            patch=mock.patch.object(self.r.reload,name,value);patch.start();self.addCleanup(patch.stop)
         for mod,name,value in [(M,'SD',self.root),(M,'JOURNAL',self.root/'openbot-box-remint.json'),
                               (self.r.m,'SD',self.root)]:
             p=mock.patch.object(mod,name,value);p.start();self.addCleanup(p.stop)
@@ -630,9 +634,29 @@ class RemintTests(unittest.TestCase):
     def test_publication_requests_idle_supervision_without_claiming_delivery(self):
         self.r.stage(OLD);self.r.register(OLD)
         self.write(self.root/'computer-recovery-state.json',{'pendingHostReload':False,'other':'preserve'})
-        result=self.r.publish();state=json.loads((self.root/'computer-recovery-state.json').read_text())
-        self.assertTrue(state['pendingHostReload']);self.assertEqual(state['other'],'preserve')
+        host=self.root/'host.cjs';host.write_text('native')
+        with mock.patch.object(self.r.reload,'HOST',host), mock.patch.object(self.r.reload,'host_pids',return_value=[os.getpid()]):
+            result=self.r.publish()
+        state=json.loads((self.root/'computer-recovery-state.json').read_text())
+        self.assertFalse(state['pendingHostReload']);self.assertEqual(state['other'],'preserve')
+        marker=json.loads((self.root/self.r.reload.NAME).read_text())
+        self.assertEqual(marker['requestId'],self.r.read()['publicationReloadRequestId'])
+        self.assertEqual(marker['requestId'],result['publicationReloadRequestId'])
+        self.assertEqual(marker['phase'],'pending')
         self.assertFalse(result['publicationVerified']);self.assertFalse(result['nativeAppDeliveryVerified'])
+
+    def test_publication_marker_survives_a_failed_journal_acknowledgement(self):
+        self.r.stage(OLD); self.r.register(OLD)
+        host = self.root / 'host.cjs'; host.write_text('native')
+        before = M.JOURNAL.read_bytes()
+        with mock.patch.object(self.r.reload, 'HOST', host), \
+                mock.patch.object(self.r.reload, 'host_pids', return_value=[os.getpid()]), \
+                mock.patch.object(self.r, 'save', side_effect=OSError('journal unavailable')):
+            with self.assertRaises(OSError): self.r.publish()
+        marker = json.loads((self.root / self.r.reload.NAME).read_text())
+        self.assertEqual(marker['phase'], 'pending')
+        self.assertEqual(M.JOURNAL.read_bytes(), before)
+        self.assertFalse((self.root / 'computer-recovery-state.json').exists())
 
     def test_official_mode_refuses_remint_writes(self):
         (self.root/'openbot-mode').write_text('official')

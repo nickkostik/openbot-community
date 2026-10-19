@@ -159,6 +159,27 @@ class Recovery:
                     self.sleep(delay)
         return paced
 
+    def refresh_publication_bindings(self, rows=None):
+        """Refresh publisher authority from real owned BOX rows, without cutover."""
+        self.require()
+        rows = self.r.rows() if rows is None else rows
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError('Malformed platform roster; publication authority was not changed')
+        box = {}
+        for row in rows:
+            if row.get('harness') != 'box' or row.get('viewerIsOwner') is not True:
+                continue
+            aid = self.module.canonical(row['agentId'])
+            sid = self.r.publisher.require_box_row(row, aid)
+            if aid in box:
+                raise RuntimeError('Ambiguous BOX publication authority')
+            box[aid] = sid
+        value = {'schemaVersion': 1, 'checkedAtMs': int(time.time()*1000), 'boxAgents': box}
+        self.r.m.atomic_bytes(self.root / 'openbot-publication-bindings.json',
+                              self.r.m.json_bytes(value), pre_commit=self.require)
+        return {'phase': 'publication-bindings-refreshed', 'boxAgentCount': len(box),
+                'checkedAtMs': value['checkedAtMs'], 'nativeAppDeliveryVerified': False}
+
     def run(self):
         self.require()
         self.r.m.rpc = self.pace(self.r.m.rpc)
@@ -170,17 +191,7 @@ class Recovery:
         original_rows = self.r.rows
         def rows():
             result = original_rows()
-            box = {}
-            for row in result:
-                if row.get('harness') != 'box' or row.get('viewerIsOwner') is not True:
-                    continue
-                aid = self.module.canonical(row['agentId'])
-                sid = self.r.publisher.require_box_row(row, aid)
-                if aid in box:
-                    raise RuntimeError('Ambiguous BOX publication authority')
-                box[aid] = sid
-            self.r.m.write(self.root / 'openbot-publication-bindings.json',
-                           {'schemaVersion': 1, 'checkedAtMs': int(time.time()*1000), 'boxAgents': box})
+            self.refresh_publication_bindings(result)
             return result
         self.r.rows = rows
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
@@ -247,11 +258,16 @@ class Recovery:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=pathlib.Path, default=pathlib.Path('/home/box/sand-data'))
+    parser.add_argument('--refresh-publication-bindings', action='store_true',
+                        help='Refresh owned BOX publisher authority only; do not mint, copy, activate or send.')
     args = parser.parse_args()
     with lock(args.root):
         recovery = Recovery(args.root)
         try:
-            recovery.run()
+            if args.refresh_publication_bindings:
+                print(json.dumps(recovery.refresh_publication_bindings()))
+            else:
+                recovery.run()
         except Exception as error:
             recovery.r.m.write(args.root / 'openbot-custom-dispatch-error.json', {
                 'phase': recovery.progress['phase'], 'errorType': type(error).__name__,

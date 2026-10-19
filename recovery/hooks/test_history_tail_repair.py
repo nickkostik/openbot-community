@@ -256,3 +256,56 @@ class ApplyTests(ReceiptTests):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class IdentifierThenTailTests(unittest.TestCase):
+    def test_child_drops_only_revision_specific_field_and_does_not_mutate_parent(self):
+        parent = {'schema':H.IDENTIFIER_SCHEMA, 'identifierProof':{'path':'prior-proof','sha256':'a'*64},
+                  'sources':[{'agentId':OLD}], 'previousReceipt':{'path':'older','sha256':'b'*64},
+                  'unknownFutureSemanticField':'must remain so strict validator refuses it'}
+        before = json.loads(json.dumps(parent)); reference={'path':'parent','sha256':'c'*64}
+        child=T.incremental_receipt(parent,reference,{'store':{},'blobs':{}})
+        self.assertNotIn('identifierProof',child);self.assertEqual(parent,before)
+        self.assertEqual(child['previousReceipt'],reference);self.assertEqual(child['schema'],H.DELTA_SCHEMA)
+        self.assertEqual(child['sources'],parent['sources'])
+        self.assertEqual(child['unknownFutureSemanticField'],parent['unknownFutureSemanticField'])
+
+    def test_real_identifier_receipt_then_incremental_is_canonically_validated(self):
+        from test_history_identifier_projection import IdentifierProjectionTests
+        fixture=IdentifierProjectionTests();fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        original,path,parent,proof,*_=fixture.prepare_projection()
+        empty=original.parent/'platform-empty.json';fixture.write(empty,{'generation':1,'entries':[]})
+        source={'agentId':OLD,'kind':'platform',**T.reference(empty),'generation':1,'sdkRootSha256':None,'blobSnapshot':None}
+        # Establish platform authority in the immutable original before pinning it.
+        original_value=json.loads(original.read_text());original_value['sources'].append(source)
+        original_value['sourceOrders'].append({'sourceId':OLD,'sourceKind':'platform','entryIds':[]})
+        fixture.write(original,original_value);journal=fixture.r.read();journal['entries'][0].pop('historyMergeReceipt');fixture.r.save(journal)
+        active=fixture.root/'agents'/NEW/'store.db'
+        projected_rows=T.rows(active)
+        with contextlib.closing(sqlite3.connect(active))as sql:
+            sql.execute('DELETE FROM transcript_entries');sql.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',T.rows(original_value['baseline']['store']['path']));sql.commit()
+        fixture.r.accept_history_merge(NEW,str(original));parent['previousReceipt']=T.reference(original)
+        with contextlib.closing(sqlite3.connect(active))as sql:
+            sql.execute('DELETE FROM transcript_entries');sql.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',projected_rows);sql.commit()
+        evidence=json.loads(proof.read_text());evidence['previousReceipt']=T.reference(original);fixture.write(proof,evidence)
+        parent['identifierProof']=T.reference(proof);parent['sources'].append(source)
+        parent['sourceOrders'].append({'sourceId':OLD,'sourceKind':'platform','entryIds':[]});fixture.write(path,parent)
+        fixture.r.accept_history_merge(NEW,str(path));parent_bytes=path.read_bytes();proof_bytes=proof.read_bytes()
+        folder=path.parent/'tail';folder.mkdir();store=folder/'store.db';T.snapshot(pathlib.Path(parent['baseline']['store']['path']),store)
+        event=json.loads(base64.b64decode(item(3)['body']))
+        for target in(store,fixture.root/'agents'/NEW/'store.db'):
+            with contextlib.closing(sqlite3.connect(target))as sql:
+                sql.execute('INSERT INTO transcript_entries VALUES(3,?,?)',(event['id'],json.dumps(event)));sql.commit()
+        capture=folder/'platform.json';fixture.write(capture,{'generation':1,'entries':[item(3)]})
+        child=T.incremental_receipt(parent,T.reference(path),{**parent['baseline'],'store':T.reference(store)})
+        child['sources'][-1]={**source,**T.reference(capture)}
+        child['sourceOrders'][-1]['entryIds']=[event['id']]
+        child['projections'].append({'sourceId':OLD,'sourceKind':'platform','sourceEntryId':event['id'],'targetEntryId':event['id']})
+        result=folder/'receipt.json';fixture.write(result,child)
+        self.assertEqual(fixture.r.accept_history_merge(NEW,str(result))['baselineEntries'],3)
+        self.assertEqual(path.read_bytes(),parent_bytes);self.assertEqual(proof.read_bytes(),proof_bytes)
+        # An inherited revision-only field still fails; no validator loosening.
+        child['identifierProof']=parent['identifierProof'];fixture.write(result,child)
+        with self.assertRaisesRegex(RuntimeError,'Unknown history merge evidence schema'):
+            H.validate(fixture.r,fixture.r.read(),fixture.r.read()['entries'][0],T.reference(result))

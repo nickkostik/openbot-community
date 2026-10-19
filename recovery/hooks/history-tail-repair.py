@@ -46,6 +46,15 @@ def reference(path):
     return {'path': str(path), 'sha256': sha(path.read_bytes())}
 
 
+def incremental_receipt(receipt, parent, baseline):
+    """Revision-specific evidence stays immutable in the parent receipt."""
+    updated = copy.deepcopy(receipt)
+    updated.pop('identifierProof', None)
+    updated.update(schema=module('history-merge-receipt').DELTA_SCHEMA,
+                   previousReceipt=parent, baseline=baseline)
+    return updated
+
+
 def owned(path, limit=128 * 1024 * 1024):
     path = pathlib.Path(path)
     for ancestor in [*reversed(path.parents), path]:
@@ -350,8 +359,8 @@ class TailRepair:
                 any(native.get('files', {}).get(name, {}).get('sha256') != sha(owned(folder / name)) for name in ('store.db','conversation-blobs.db')) or
                 any(context.get(key) is not True for key in ('roundtrip','literalEquality','originalPrefixPreserved','otherRootFieldsPreserved'))):
             raise RuntimeError('Invalid detached native tail proof')
-        updated = copy.deepcopy(receipt); updated.update(schema=self.validator.DELTA_SCHEMA, previousReceipt=parent,
-            baseline={'store': reference(folder / 'store.db'), 'blobs': reference(folder / 'conversation-blobs.db')})
+        updated = incremental_receipt(receipt, parent,
+            {'store': reference(folder / 'store.db'), 'blobs': reference(folder / 'conversation-blobs.db')})
         for source, fresh in captures:
             path = folder / ('cloud-' + source['agentId'] + '.json'); write(path, fresh, True)
             for item in updated['sources']:

@@ -4,10 +4,25 @@ Local profile reads are intentionally forced to BOX for execution. They cannot
 classify the server's old Temporal archives for the sequential bulk publisher.
 """
 import pathlib
+import re
 
 MARK = 'openbot-local-publication: authoritative-roster'
 ANCHOR = 'var transcriptPublishExtension = defineHostExtension({'
 STOCK = 'isTemporalAgent: (agentId) => readSandProfileHarness(getSandProfilePath((0, import_node_path172.join)(agentsRootDir, agentId))) === "temporal",'
+STOCK_PATTERN = re.compile(r'^[ \t]*(?P<policy>' + re.escape(STOCK).replace(
+    'import_node_path172', r'(?P<path_alias>import_node_path[0-9]*)') + r')$', re.MULTILINE)
+
+
+def native_publication_policy(source):
+    """Accept bundler alias renumbering, not a changed native predicate."""
+    matches = list(STOCK_PATTERN.finditer(source))
+    if len(matches) != 1:
+        raise RuntimeError('Expected one native transcript publisher policy')
+    match = matches[0]
+    declaration = 'var ' + match['path_alias'] + ' = require("node:path");'
+    if len(re.findall(r'^[ \t]*' + re.escape(declaration) + r'$', source, re.MULTILINE)) != 1:
+        raise RuntimeError('Expected one native publisher node:path binding')
+    return match['policy']
 HELPER = '''function openbotSkipTranscriptPublication(agentId, agentsRootDir) {
   if (!openbotLocalFleetEnabled()) return false;
   const fs = require("node:fs"), root = "/home/box/sand-data/";
@@ -58,12 +73,13 @@ OBSERVED_STOP = '    context2.onStop(() => {\n      openbotPublicationObserver.d
 
 def patch(source):
     if MARK not in source:
-        if source.count(ANCHOR) != 1 or source.count(STOCK) != 1:
+        if source.count(ANCHOR) != 1:
             raise RuntimeError('Expected one native transcript publisher policy')
+        stock = native_publication_policy(source)
         if 'function openbotLocalFleetEnabled()' not in source:
             raise RuntimeError('Local publication requires the explicit mode policy')
         source = source.replace(ANCHOR, HELPER + '\n' + ANCHOR, 1)
-        source = source.replace(STOCK, STOCK.replace('readSandProfileHarness',
+        source = source.replace(stock, stock.replace('readSandProfileHarness',
             'openbotSkipTranscriptPublication(agentId, agentsRootDir) || readSandProfileHarness'), 1)
     if source.count(MARK) != 1 or HELPER not in source:
         raise RuntimeError('Incomplete native publication ownership policy')

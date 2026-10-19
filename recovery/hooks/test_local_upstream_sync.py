@@ -29,6 +29,16 @@ RUNNER = ('  async sendPrompt(prompt, options2) {\n' + '    // native retained r
 
 
 class UpstreamSyncTests(unittest.TestCase):
+    def test_routine_writer_dependency_invalidates_cached_engine_assessment(self):
+        original = pathlib.Path.read_bytes
+        before = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        def revised_dependency(path):
+            raw = original(path)
+            return raw + b'\n# revised writer contract\n' if path.name == 'native-routine-trigger-preservation.py' else raw
+        with mock.patch.object(pathlib.Path, 'read_bytes', revised_dependency):
+            after = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        self.assertNotEqual(before, after)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         self.root = pathlib.Path(temp.name); folder = self.root / 'openbot-local-engine'; folder.mkdir()

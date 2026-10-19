@@ -20,6 +20,22 @@ spec.loader.exec_module(m)
 
 
 class ComputerRecoveryTests(unittest.TestCase):
+    def test_unknown_routine_writer_refuses_before_host_backup_or_replacement(self):
+        with tempfile.TemporaryDirectory() as root:
+            host = pathlib.Path(root) / 'host-main.cjs'
+            original = b'Unknown native automation serializer'
+            host.write_bytes(original)
+            engine = SimpleNamespace(select_source=lambda *_: original.decode(),
+                                     preserve_payload_stamp=lambda source, _: source)
+            with mock.patch.object(m, 'local_engine', return_value=engine), \
+                    mock.patch.object(m, 'PATCHES', ('native-routine-trigger-inject.py',)):
+                with self.assertRaisesRegex(RuntimeError, 'boundary|dependency'):
+                    m.repair_bundle(host, pathlib.Path(root) / 'backups',
+                                    lambda _: self.fail('Unknown writer reached syntax staging'),
+                                    lambda: self.fail('Unknown writer reached host replacement'))
+            self.assertEqual(host.read_bytes(), original)
+            self.assertFalse((pathlib.Path(root) / 'backups').exists())
+
     def official_fixture(self, root):
         sd = pathlib.Path(root); host = sd / 'host-main.cjs'
         composed = b'/* openbot-latest-box-compatibility-v1 */\nLOCAL'

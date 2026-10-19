@@ -255,7 +255,7 @@ class ApplyTests(ReceiptTests):
         with self.assertRaisesRegex(RuntimeError,'symlink'):T.owned(link)
 
 
-if __name__=='__main__':unittest.main()
+
 
 
 class IdentifierThenTailTests(unittest.TestCase):
@@ -309,3 +309,5 @@ class IdentifierThenTailTests(unittest.TestCase):
         child['identifierProof']=parent['identifierProof'];fixture.write(result,child)
         with self.assertRaisesRegex(RuntimeError,'Unknown history merge evidence schema'):
             H.validate(fixture.r,fixture.r.read(),fixture.r.read()['entries'][0],T.reference(result))
+
+if __name__ == '__main__': unittest.main()

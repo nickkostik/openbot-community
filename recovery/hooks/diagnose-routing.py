@@ -1,6 +1,7 @@
 import argparse
 import collections
 import json
+import os
 import pathlib
 import re
 import urllib.error
@@ -22,7 +23,34 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def open_no_redirect(request, timeout):
-    return urllib.request.build_opener(NoRedirectHandler()).open(request, timeout=timeout)
+    proxies = urllib.request.getproxies()
+    # Keep an operator's proxy and no_proxy policy. The Computer's sanctioned
+    # egress listener is a fallback only; direct Internet access can be absent.
+    if not any(proxies.get(kind) for kind in ('http', 'https', 'all')):
+        address = os.environ.get('SAND_EGRESS_TUNNEL_PROXY_ADDR')
+        if address:
+            proxies = {**proxies, 'https': egress_proxy_url(address)}
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxies), NoRedirectHandler()).open(request, timeout=timeout)
+
+
+def egress_proxy_url(value):
+    """Accept only the provided plaintext loopback CONNECT listener."""
+    if not isinstance(value, str) or not value or any(c.isspace() or ord(c) < 32 for c in value):
+        raise ValueError('invalid-egress-proxy')
+    if any(c in value for c in ('\\', '?', '#')):
+        raise ValueError('invalid-egress-proxy')
+    try:
+        parts = urllib.parse.urlsplit(value if '://' in value else 'http://' + value)
+        port = parts.port
+    except ValueError:
+        raise ValueError('invalid-egress-proxy') from None
+    if (parts.scheme != 'http' or parts.hostname not in ('127.0.0.1', '::1', 'localhost')
+            or parts.username is not None or parts.password is not None
+            or port is None or not 1 <= port <= 65535 or parts.path not in ('', '/')
+            or parts.netloc.lower() not in (parts.hostname + ':' + str(port), '[::1]:' + str(port))):
+        raise ValueError('invalid-egress-proxy')
+    return urllib.parse.urlunsplit(('http', parts.netloc, '', '', ''))
 
 
 def client_version(bundle, app_version=None, namespace='prod'):

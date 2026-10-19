@@ -35,6 +35,55 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(manifest['boxAgents'], {fleet.NEW:'456'})
         self.assertFalse(recovery.progress['nativeAppDeliveryVerified'])
 
+    def test_refresh_publication_authority_requires_no_journal_and_only_reads_roster(self):
+        (self.root/'openbot-box-remint.json').unlink()
+        self.roster.extend([fleet.row(fleet.NEW, 'box', '456'),
+                            {**fleet.row(fleet.OTHER, 'box', '789'), 'viewerIsOwner': False}])
+        protected = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        result = self.recovery().refresh_publication_bindings()
+        self.assertEqual(result['phase'], 'publication-bindings-refreshed')
+        self.assertEqual(result['boxAgentCount'], 1)
+        self.assertFalse(result['nativeAppDeliveryVerified'])
+        self.assertEqual(json.loads((self.root/'openbot-publication-bindings.json').read_text())['boxAgents'],
+                         {fleet.NEW: '456'})
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})])
+        self.assertEqual(self.gateway_calls, [])
+        self.assertEqual({p: p.read_bytes() for p in protected}, protected)
+        self.assertFalse((self.root/'openbot-box-remint.json').exists())
+
+    def test_refresh_refuses_duplicate_or_invalid_box_authority_without_overwriting_manifest(self):
+        manifest = self.root/'openbot-publication-bindings.json'
+        self.write(manifest, {'schemaVersion': 1, 'boxAgents': {'existing': '456'}})
+        before = manifest.read_bytes()
+        invalid = [
+            [fleet.row(fleet.NEW, 'box', '456'), fleet.row(fleet.NEW, 'box', '456')],
+            [{**fleet.row(fleet.NEW, 'box', '456'), 'legacyAgentId': fleet.OLD}],
+            [fleet.row(fleet.NEW, 'box', 'not-numeric')],
+            [None],
+        ]
+        for rows in invalid:
+            with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                self.recovery().refresh_publication_bindings(rows)
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_refresh_does_not_publish_authority_after_mode_changes_during_roster_read(self):
+        original = self.r.rows
+        def changed():
+            result = original()
+            (self.root/'openbot-mode').write_text('official')
+            return result
+        self.r.rows = changed
+        with self.assertRaisesRegex(RuntimeError, 'withdrawn'):
+            self.recovery().refresh_publication_bindings()
+        self.assertFalse((self.root/'openbot-publication-bindings.json').exists())
+
+    def test_refresh_respects_existing_manifest_symlink_and_does_not_change_target(self):
+        target = self.root/'target.json'; target.write_text('protected')
+        (self.root/'openbot-publication-bindings.json').symlink_to(target)
+        with self.assertRaisesRegex(RuntimeError, 'symlink'):
+            self.recovery().refresh_publication_bindings()
+        self.assertEqual(target.read_text(), 'protected')
+
     def test_unpublished_history_never_hides_source_and_resume_uses_same_id(self):
         self.server_transcripts[fleet.NEW]=[]
         recovery=self.recovery()

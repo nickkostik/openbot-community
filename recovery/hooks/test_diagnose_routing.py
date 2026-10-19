@@ -3,6 +3,7 @@ import contextlib
 import http.server
 import io
 import json
+import os
 import pathlib
 import threading
 import urllib.error
@@ -295,6 +296,53 @@ class RedirectProtectionTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
         self.assertEqual([path for path, _, _ in received], ['/301', '/302', '/303', '/307', '/308'])
+
+
+class EgressProxyTests(unittest.TestCase):
+    def test_provided_loopback_addresses_are_normalized(self):
+        for address in ('127.0.0.1:8791', 'http://127.0.0.1:8791', 'http://localhost:8791/',
+                        '[::1]:8791', 'http://[::1]:8791'):
+            with self.subTest(address=address):
+                self.assertEqual(routing.egress_proxy_url(address),
+                                 'http://' + address.removeprefix('http://').rstrip('/'))
+
+    def test_external_credentialed_malformed_and_non_http_proxies_are_refused(self):
+        for address in ('', 'https://127.0.0.1:8791', 'http://evil.invalid:8791',
+                        'http://127.0.0.1.evil.invalid:8791', 'http://0.0.0.0:8791',
+                        'http://127.0.0.1', 'http://127.0.0.1:0', 'http://127.0.0.1:65536',
+                        'http://user:secret@127.0.0.1:8791', 'http://127.0.0.1:8791/path',
+                        'http://127.0.0.1:8791?query', 'http://127.0.0.1:8791#fragment',
+                        'http://127.0.0.1:8791\\evil', ' http://127.0.0.1:8791',
+                        'http://127.0.0.1:8791\n'):
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, '^invalid-egress-proxy$'):
+                routing.egress_proxy_url(address)
+
+    def call(self, proxies, address):
+        request = urllib.request.Request('https://api2.cursor.sh/health')
+        with mock.patch.object(routing.urllib.request, 'getproxies', return_value=proxies), \
+                mock.patch.dict(os.environ, {'SAND_EGRESS_TUNNEL_PROXY_ADDR': address}), \
+                mock.patch.object(routing.urllib.request, 'build_opener') as opened:
+            routing.open_no_redirect(request, timeout=7)
+        args = opened.call_args.args
+        self.assertIsInstance(args[0], urllib.request.ProxyHandler)
+        self.assertIsInstance(args[1], routing.NoRedirectHandler)
+        opened.return_value.open.assert_called_once_with(request, timeout=7)
+        return args[0].proxies
+
+    def test_https_uses_provided_proxy_when_no_operator_proxy_is_set(self):
+        self.assertEqual(self.call({}, '127.0.0.1:8791'), {'https': 'http://127.0.0.1:8791'})
+
+    def test_existing_operator_proxy_wins_without_reading_invalid_fallback(self):
+        for scheme in ('http', 'https', 'all'):
+            proxies = {scheme: 'http://operator-proxy.invalid:3128', 'no': 'localhost'}
+            self.assertEqual(self.call(proxies, 'invalid-secret-proxy'), proxies)
+
+    def test_no_proxy_exclusions_survive_fallback(self):
+        self.assertEqual(self.call({'no': 'localhost,.internal'}, '127.0.0.1:8791'),
+                         {'no': 'localhost,.internal', 'https': 'http://127.0.0.1:8791'})
+
+    def test_absent_provided_proxy_keeps_direct_behavior(self):
+        self.assertEqual(self.call({}, ''), {})
 
 
 if __name__ == '__main__':

@@ -35,6 +35,55 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(manifest['boxAgents'], {fleet.NEW:'456'})
         self.assertFalse(recovery.progress['nativeAppDeliveryVerified'])
 
+    def test_refresh_publication_authority_requires_no_journal_and_only_reads_roster(self):
+        (self.root/'openbot-box-remint.json').unlink()
+        self.roster.extend([fleet.row(fleet.NEW, 'box', '456'),
+                            {**fleet.row(fleet.OTHER, 'box', '789'), 'viewerIsOwner': False}])
+        protected = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        result = self.recovery().refresh_publication_bindings()
+        self.assertEqual(result['phase'], 'publication-bindings-refreshed')
+        self.assertEqual(result['boxAgentCount'], 1)
+        self.assertFalse(result['nativeAppDeliveryVerified'])
+        self.assertEqual(json.loads((self.root/'openbot-publication-bindings.json').read_text())['boxAgents'],
+                         {fleet.NEW: '456'})
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})])
+        self.assertEqual(self.gateway_calls, [])
+        self.assertEqual({p: p.read_bytes() for p in protected}, protected)
+        self.assertFalse((self.root/'openbot-box-remint.json').exists())
+
+    def test_refresh_refuses_duplicate_or_invalid_box_authority_without_overwriting_manifest(self):
+        manifest = self.root/'openbot-publication-bindings.json'
+        self.write(manifest, {'schemaVersion': 1, 'boxAgents': {'existing': '456'}})
+        before = manifest.read_bytes()
+        invalid = [
+            [fleet.row(fleet.NEW, 'box', '456'), fleet.row(fleet.NEW, 'box', '456')],
+            [{**fleet.row(fleet.NEW, 'box', '456'), 'legacyAgentId': fleet.OLD}],
+            [fleet.row(fleet.NEW, 'box', 'not-numeric')],
+            [None],
+        ]
+        for rows in invalid:
+            with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                self.recovery().refresh_publication_bindings(rows)
+            self.assertEqual(manifest.read_bytes(), before)
+
+    def test_refresh_does_not_publish_authority_after_mode_changes_during_roster_read(self):
+        original = self.r.rows
+        def changed():
+            result = original()
+            (self.root/'openbot-mode').write_text('official')
+            return result
+        self.r.rows = changed
+        with self.assertRaisesRegex(RuntimeError, 'withdrawn'):
+            self.recovery().refresh_publication_bindings()
+        self.assertFalse((self.root/'openbot-publication-bindings.json').exists())
+
+    def test_refresh_respects_existing_manifest_symlink_and_does_not_change_target(self):
+        target = self.root/'target.json'; target.write_text('protected')
+        (self.root/'openbot-publication-bindings.json').symlink_to(target)
+        with self.assertRaisesRegex(RuntimeError, 'symlink'):
+            self.recovery().refresh_publication_bindings()
+        self.assertEqual(target.read_text(), 'protected')
+
     def test_unpublished_history_never_hides_source_and_resume_uses_same_id(self):
         self.server_transcripts[fleet.NEW]=[]
         recovery=self.recovery()
@@ -198,7 +247,7 @@ class DispatchTests(fleet.RemintTests):
 
     def test_worker_lock_excludes_duplicate_spawn(self):
         with M.lock(self.root), mock.patch.object(M.subprocess,'Popen',side_effect=AssertionError('duplicate worker')):
-            self.assertTrue(M.maybe_start(self.root).get('workerRunning'))
+            self.assertTrue(M.maybe_start(self.root).get('lockHeld'))
 
     def test_long_cutover_renews_once_on_401_without_recreating_agents(self):
         recovery=self.recovery();self.r.m.H={'Authorization':'private'};calls=[]
@@ -261,7 +310,8 @@ class DispatchTests(fleet.RemintTests):
         self.assertFalse(M.snapshot(self.root)['workerRunning'])
         with M.lock(self.root):
             result = M.snapshot(self.root)
-            self.assertTrue(result['workerRunning'])
+            self.assertTrue(result['lockHeld'])
+            self.assertFalse(result['workerRunning'])
             self.assertEqual(result['diagnosticAssistant'], 'unavailable')
         (self.root/'openbot-mode').write_text('official')
         self.assertFalse(M.snapshot(self.root)['enabled'])
@@ -295,11 +345,65 @@ class DispatchTests(fleet.RemintTests):
                 M.maybe_start(self.root, requested=True)
             with self.assertRaises(BlockingIOError):
                 with M.lock(self.root): pass
-            self.assertTrue(M.snapshot(self.root)['workerRunning'])
+            self.assertTrue(M.snapshot(self.root)['lockHeld'])
+            self.assertFalse(M.snapshot(self.root)['workerRunning'])
         finally:
             for child in workers:
                 child.terminate(); child.wait(timeout=5)
         self.assertFalse(M.snapshot(self.root)['workerRunning'])
+
+    def test_status_refreshes_registered_counts_instead_of_stale_success(self):
+        journal = self.r.read()
+        journal['entries'] = [{**journal['entries'][0], 'phase': 'registered-box',
+            'oldId': '00000000-0000-4000-8000-' + str(i + 100).zfill(12),
+            'newId': '00000000-0000-4000-8000-' + str(i + 200).zfill(12)} for i in range(34)]
+        self.write(self.root/'openbot-box-remint.json', journal)
+        self.write(self.root/M.STATE, {'phase':'bound-box', 'agentCount':99, 'counts':{'active':99},
+                                     'nativeAppDeliveryVerified':True, 'billingVerified':True})
+        before = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with M.lock(self.root):
+            state = M.snapshot(self.root)
+        self.assertEqual(state['phase'], 'waiting-for-publication')
+        self.assertEqual(state['agentCount'], 34)
+        self.assertEqual(state['counts'], {'planned':0, 'copied':0, 'registered-box':34, 'active':0})
+        self.assertEqual(state['verifiedAgents'], 0)
+        self.assertTrue(state['lockHeld'])
+        self.assertFalse(state['workerRunning'])
+        self.assertFalse(state['publicationVerified'])
+        self.assertFalse(state['nativeAppDeliveryVerified'])
+        self.assertFalse(state['billingVerified'])
+        self.assertEqual({p:p.read_bytes() for p in before}, before)
+        self.assertEqual(self.calls, [])
+
+    def test_completed_status_requires_current_journal_and_exact_publication_receipt(self):
+        self.recovery().run()
+        state = M.snapshot(self.root)
+        self.assertEqual(state['phase'], 'bound-box')
+        self.assertTrue(state['publicationVerified'])
+        proof = self.root/'openbot-custom-dispatch-verification.json'
+        self.write(proof, {'results':[{'oldId':fleet.OTHER, 'newId':fleet.NEW, 'status':'verified-box'}]})
+        stale = M.snapshot(self.root)
+        self.assertEqual(stale['phase'], 'waiting-for-publication')
+        self.assertFalse(stale['publicationVerified'])
+        self.assertEqual(stale['counts']['active'], 1)
+        self.assertEqual(stale['verifiedAgents'], 0)
+
+    def test_worker_identity_must_match_owned_process_script_and_root(self):
+        import io
+        argv = ['/usr/bin/python3', str(M.HERE/'custom-dispatch-recovery.py'), '--root', str(self.root), '--worker-lock-fd', '3']
+        with mock.patch.object(pathlib.Path, 'open', return_value=io.BytesIO(('\0'.join(argv)+'\0').encode())):
+            self.assertTrue(M.verified_worker(self.root, {'workerPid':M.os.getpid()}))
+        argv[3] = '/tmp/other-data'
+        with mock.patch.object(pathlib.Path, 'open', return_value=io.BytesIO(('\0'.join(argv)+'\0').encode())):
+            self.assertFalse(M.verified_worker(self.root, {'workerPid':M.os.getpid()}))
+        self.assertFalse(M.verified_worker(self.root, {'workerPid':-1}))
+
+    def test_refresh_cli_dispatch_survives_transfer_cli_integration(self):
+        recovery = self.recovery()
+        with mock.patch.object(M, 'Recovery', return_value=recovery), mock.patch.object(recovery, 'refresh_publication_bindings', return_value={'phase':'publication-bindings-refreshed'}) as refresh:
+            with mock.patch('sys.argv', ['recovery', '--root', str(self.root), '--refresh-publication-bindings']), mock.patch('builtins.print'):
+                M.main()
+            refresh.assert_called_once_with()
 
     def test_opt_in_cannot_be_a_symlink(self):
         flag=self.root/'openbot-local-only.enable';flag.unlink();flag.symlink_to(self.root/'openbot-mode')

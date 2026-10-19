@@ -18,7 +18,7 @@ try {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const jobId = '00000000-0000-4000-8000-000000000001';
-  let progress = { available: true, enabled: true, phase: 'idle', workerRunning: false,
+  let progress = { available: true, enabled: true, phase: 'idle', workerRunning: false, lockHeld: false, publicationVerified: false,
     nativeAppDeliveryVerified: false, billingVerified: false, diagnosticAssistant: 'unavailable',
     diagnosticReason: 'No bounded local diagnostic assistant adapter is installed.' };
   const actions = [];
@@ -55,11 +55,16 @@ try {
   await page.getByRole('button', { name: 'Resume Local transfer' }).click();
   assert.deepEqual(actions, [{ action: 'start' }, { action: 'resume' }]);
   assert.match(await card.innerText(), new RegExp(jobId));
-  progress = { ...progress, workerRunning: true, phase: 'copying' };
+  progress = { ...progress, workerRunning: true, lockHeld: true, phase: 'copying' };
   await page.reload();
   await page.getByRole('button', { name: 'Resume Local transfer' }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Resume Local transfer' }).isDisabled(), true);
-  progress = { ...progress, workerRunning: false, enabled: false };
+  progress = { ...progress, workerRunning: false, lockHeld: true };
+  await page.reload();
+  await card.getByText('Transfer locked', { exact: true }).waitFor();
+  await card.getByText(/A running transfer worker has not been confirmed/).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Resume Local transfer' }).isDisabled(), true);
+  progress = { ...progress, workerRunning: false, lockHeld: false, enabled: false };
   state.snapshot.alignment.desired = 'official';
   await page.reload();
   await card.getByText('Custom mode and Local opt-in are required to resume.').waitFor();

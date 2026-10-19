@@ -81,3 +81,14 @@ test("real helper status remains read-only and sanitizes existing recovery state
   assert.equal(JSON.stringify(status).includes("private-detail"), false);
   assert.equal(fs.readFileSync(stateFile, "utf8"), state);
 });
+
+
+test("saved completion without current proof is pending and a maintenance hold is not a worker", () => {
+  const status = publicTransfer({ enabled: true, phase: "bound-box", lockHeld: true, workerRunning: false,
+    publicationVerified: false, agentCount: 34, counts: { "registered-box": 34, active: 0 } });
+  assert.equal(status.phase, "waiting-for-publication");
+  assert.equal(status.lockHeld, true);
+  assert.equal(status.workerRunning, false);
+  assert.equal(status.publicationVerified, false);
+  assert.equal(publicTransfer({ phase: "bound-box", publicationVerified: true }).phase, "bound-box");
+});

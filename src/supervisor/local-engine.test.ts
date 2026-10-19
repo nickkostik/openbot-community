@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { wrapHostSource } from "../host/wrap.ts";
+import { parseUiProviderSave } from "../parse/ui.ts";
 import { customBoxFromProvider, officialBox, parseUpstreamOrigin } from "../parse/argv.ts";
 import { nodeFs, parseOwnedPid, type ProcDeps } from "./procs.ts";
 import { boxPathsFrom, joinAbs } from "./paths.ts";
@@ -283,4 +284,91 @@ test("readiness cache avoids large source rereads and invalidates on policy meta
   unchangedControls(ctx);
   ctx.real.write(ctx.policy, JSON.stringify({ ...ctx.manifest, enabled: false }));
   assert.equal(localEngineReadiness(ctx.deps).state, "not-pinned");
+});
+
+
+test("secret and model saves preserve newer post-wrap repairs instead of causing a recovery reload loop", async (t) => {
+  const ctx = setup(t);
+  assert.equal((await reconcile(ctx.desired, ctx.deps)).kind, "ok");
+  const original = ctx.real.read(ctx.paths.hostMain)!;
+  // Represent a newer owned injector's idempotent native repair. Its source
+  // postdates the retained artifact and must survive ordinary panel saves.
+  const patch = (source: string): string => source.includes("/* newer-native-repair */") ? source
+    : source.replace("class Box {", "/* newer-native-repair */\nfunction nativeBackupRepair() { return true; }\nclass Box {");
+  const repaired = patch(original);
+  assert.notEqual(repaired, original);
+  ctx.real.write(ctx.paths.hostMain, repaired);
+  // Recovery also owns a canonical stock backup. Do not reset it to the
+  // independently preserved Official vendor on every ordinary Custom save.
+  const repairedBackup = patch(stock);
+  ctx.real.write(ctx.paths.knownBackup, repairedBackup);
+  const policyBefore = ctx.real.read(ctx.policy);
+  const pinBefore = ctx.real.read(joinAbs(ctx.engine, "wrapped.cjs"));
+  ctx.stops.length = 0;
+  const first = ctx.desired.catalog.models[0]!;
+  const alternate = { ...first, id: `${first.id}-alternate` as typeof first.id, slug: "alternate" as typeof first.slug,
+    reasoningLevels: ["default", "high", "max"] as const, activeReasoning: "high" as const };
+  let catalog: typeof ctx.desired.catalog = { ...ctx.desired.catalog, models: [...ctx.desired.catalog.models, alternate] };
+  const providerId = catalog.providers[0]!.id;
+  const modelId = alternate.id;
+  for (const command of [
+    { kind: "set-secret" as const, providerId, secret: "fixture-rotated-key" },
+    { kind: "use-model" as const, modelId, reasoning: "max" },
+    { kind: "set-secret" as const, providerId, secret: "fixture-second-key" },
+  ]) {
+    const parsed = parseUiProviderSave(command, ctx.paths, catalog, { mode: "custom" });
+    assert.equal(parsed.desired.kind, "custom");
+    const result = await reconcile(parsed.desired, ctx.deps, { source: `ui:save:${command.kind}` });
+    assert.equal(result.kind, "ok");
+    if (result.kind === "ok") {
+      assert.equal(result.wrapBytesChanged, false);
+      assert.equal(result.hostBounce, "none");
+    }
+    assert.equal(ctx.real.read(ctx.paths.hostMain), repaired);
+    assert.equal(ctx.real.read(ctx.paths.knownBackup), repairedBackup);
+    // The next idempotent recovery pass must have nothing to repair/reload.
+    assert.equal(patch(ctx.real.read(ctx.paths.hostMain)!), repaired);
+    assert.equal(ctx.real.read(ctx.paths.mode), "custom\n");
+    if (parsed.desired.kind === "custom") catalog = parsed.desired.catalog;
+  }
+  assert.deepEqual(ctx.stops, []);
+  assert.equal(ctx.real.read(ctx.policy), policyBefore);
+  assert.equal(ctx.real.read(joinAbs(ctx.engine, "wrapped.cjs")), pinBefore);
+  assert.equal(ctx.real.read(ctx.paths.knownBackup), repairedBackup);
+  const saved = JSON.parse(ctx.real.read(ctx.paths.plan)!);
+  assert.equal(saved.catalog.bindings.find((b: { conversation: { kind: string } }) => b.conversation.kind === "wildcard").modelId, alternate.id);
+  assert.equal(saved.catalog.models.find((m: { id: string }) => m.id === alternate.id).activeReasoning, "max");
+  assert.equal((await reconcile(officialBox(ctx.paths), ctx.deps)).kind, "ok");
+  assert.equal(ctx.real.read(ctx.paths.hostMain), vendor);
+});
+
+for (const [name, edit] of [
+  ["foreign runtime", (source: string) => source.replace(/require\([^\n]+\)/, 'require("/foreign/runtime.cjs")')],
+  ["partial runner", (source: string) => source.replace("  async sendPrompt(prompt, options2) {", "  async sendPrompt(prompt) {")],
+] as const) {
+  test(`marked ${name} refuses rather than bypassing pin validation`, async (t) => {
+    const ctx = setup(t);
+    await reconcile(ctx.desired, ctx.deps);
+    const changed = edit(ctx.real.read(ctx.paths.hostMain)!);
+    const plan = ctx.real.read(ctx.paths.plan);
+    ctx.real.write(ctx.paths.hostMain, changed);
+    ctx.stops.length = 0;
+    const result = await reconcile(ctx.desired, ctx.deps);
+    assert.equal(result.kind, "refused");
+    if (result.kind === "refused") assert.equal(result.error.kind, "local-engine-refused");
+    assert.equal(ctx.real.read(ctx.paths.hostMain), changed);
+    assert.equal(ctx.real.read(ctx.paths.plan), plan);
+    assert.equal(ctx.real.read(ctx.paths.mode), "custom\n");
+    assert.deepEqual(ctx.stops, []);
+  });
+}
+
+test("a current complete runner cannot bypass a corrupt retained pin", async (t) => {
+  const ctx = setup(t);
+  await reconcile(ctx.desired, ctx.deps);
+  const current = ctx.real.read(ctx.paths.hostMain);
+  ctx.real.write(joinAbs(ctx.engine, "wrapped.cjs"), "corrupt artifact");
+  const result = await reconcile(ctx.desired, ctx.deps);
+  assert.equal(result.kind, "refused");
+  assert.equal(ctx.real.read(ctx.paths.hostMain), current);
 });

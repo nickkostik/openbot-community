@@ -31,7 +31,7 @@ export function LocalTransferCard() {
   };
   return <section className="card col-12" aria-labelledby="h-local-transfer">
     <div className="card__head"><span className="card__label" id="h-local-transfer">Local transfer</span>
-      <Badge tone={review ? "warning" : "info"}>{progress?.workerRunning ? "Running" : progress?.phase === "bound-box" ? "Transfer recorded" : "Resumable"}</Badge></div>
+      <Badge tone={review ? "warning" : "info"}>{progress?.workerRunning ? "Running" : progress?.lockHeld ? "Transfer locked" : progress?.phase === "bound-box" && progress.publicationVerified ? "Transfer recorded" : "Resumable"}</Badge></div>
     <div className="card__body stack" style={{ gap: 12 }}>
       <div aria-live="polite" role="status">
         <p>{progress ? progress.phase.replaceAll("-", " ") : "Checking transfer…"}
@@ -39,13 +39,14 @@ export function LocalTransferCard() {
         {progress?.counts ? <p className="mono">{Object.entries(progress.counts).map(([phase, count]) => `${phase}: ${count}`).join(" · ")}</p> : null}
         {progress?.verifiedAgents !== undefined ? <p>{progress.verifiedAgents} publication checks passed at the last check.</p> : null}
         {progress?.jobId ? <p className="mono">Job {progress.jobId}</p> : null}
+        {progress?.lockHeld && !progress.workerRunning ? <p>Another process holds the transfer lock. A running transfer worker has not been confirmed.</p> : null}
         {review ? <p>Review required during {progress.refusalPhase?.replaceAll("-", " ") ?? "preflight"}: {progress.diagnosticCode?.replaceAll("-", " ") ?? "preflight refused"}. Resolve the conflict, then resume this job.</p> : null}
       </div>
       {review ? <p>{progress?.diagnosticReason} Automatic AI review is unavailable.</p> : null}
       <p>Transfer preserves its recorded copies and saved settings when resumed. Native app delivery and billing have not been verified.</p>
       {progress && !progress.enabled ? <p>Custom mode and Local opt-in are required to resume.</p> : null}
       {progress && !progress.available ? <p>The Local transfer helper is missing from this installation.</p> : null}
-      <div><Button variant="secondary" loading={busy} disabled={!progress?.enabled || !progress.available || progress.workerRunning} onClick={() => void resume()}>
+      <div><Button variant="secondary" loading={busy} disabled={!progress?.enabled || !progress.available || progress.lockHeld || progress.workerRunning} onClick={() => void resume()}>
         {progress?.jobId ? "Resume Local transfer" : "Start Local transfer"}</Button></div>
       {error ? <p role="alert">{error}</p> : null}
     </div>

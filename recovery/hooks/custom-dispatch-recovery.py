@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import fcntl
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -64,20 +65,93 @@ def lock(root):
         os.close(fd)
 
 
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def journal_progress(root):
+    journal = read(root, 'openbot-box-remint.json')
+    entries = journal.get('entries')
+    phases = ('planned', 'copied', 'registered-box', 'active')
+    if not isinstance(entries, list) or not entries or any(
+            not isinstance(e, dict) or e.get('phase') not in phases or
+            not isinstance(e.get('oldId'), str) or not isinstance(e.get('newId'), str) for e in entries):
+        raise RuntimeError('Unrecognized transfer journal')
+    if len({(e['oldId'], e['newId']) for e in entries}) != len(entries):
+        raise RuntimeError('Ambiguous transfer journal')
+    return journal, {phase: sum(e['phase'] == phase for e in entries) for phase in phases}
+
+
+def publication_proof(root, journal):
+    proof = read(root, 'openbot-custom-dispatch-verification.json')
+    results = proof.get('results')
+    pairs = {(e['oldId'], e['newId']) for e in journal['entries']}
+    if (not isinstance(results, list) or len(results) != len(pairs) or
+            any(not isinstance(r, dict) or r.get('status') != 'verified-box' for r in results) or
+            {(r.get('oldId'), r.get('newId')) for r in results} != pairs):
+        return None
+    return {'journalSha256': fingerprint(journal), 'verificationSha256': fingerprint(proof)}
+
+
+def verified_worker(root, progress):
+    """A held flock can be a maintenance keeper; it does not identify a worker."""
+    pid = progress.get('workerPid')
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        proc = pathlib.Path('/proc') / str(pid) / 'cmdline'
+        if proc.stat().st_uid != os.getuid():
+            return False
+        with proc.open('rb') as stream:
+            command = stream.read(8193)
+        if len(command) > 8192:
+            return False
+        argv = command.decode().rstrip('\0').split('\0')
+        if argv[:4] != ['/usr/bin/python3', str(HERE / 'custom-dispatch-recovery.py'), '--root', str(root)]:
+            return False
+        return not argv[4:] or (len(argv[4:]) == 2 and argv[4] == '--worker-lock-fd' and argv[5].isdigit())
+    except (OSError, UnicodeError):
+        return False
+
+
 def snapshot(root):
-    """Public progress contains no exception bodies, credentials or agent IDs."""
+    """Refresh journal counts without network work or any success from a lock."""
     try:
         progress = read(root, STATE)
     except FileNotFoundError:
         progress = {}
-    progress = {**progress, "enabled": allowed(root),
-                "diagnosticAssistant": "unavailable",
-                "diagnosticReason": "No bounded local diagnostic assistant adapter is installed"}
+    progress = {**progress, 'enabled': allowed(root), 'publicationVerified': False,
+                'nativeAppDeliveryVerified': False, 'billingVerified': False,
+                'diagnosticAssistant': 'unavailable',
+                'diagnosticReason': 'No bounded local diagnostic assistant adapter is installed'}
+    progress.pop('counts', None)
+    progress.pop('agentCount', None)
+    progress['verifiedAgents'] = 0
+    try:
+        journal, counts = journal_progress(root)
+        progress.update(counts=counts, agentCount=len(journal['entries']))
+        try:
+            proof = publication_proof(root, journal)
+        except FileNotFoundError:
+            proof = None
+        complete = counts['active'] == len(journal['entries'])
+        progress['publicationVerified'] = bool(complete and proof and progress.get('publicationProof') == proof)
+        if progress['publicationVerified']:
+            progress['verifiedAgents'] = len(journal['entries'])
+        if progress.get('phase', 'idle') in ('bound-box', 'idle') and not progress['publicationVerified']:
+            progress['phase'] = ('copying' if counts['planned'] else 'registering' if counts['copied']
+                                 else 'waiting-for-publication')
+    except FileNotFoundError:
+        if progress.get('phase') == 'bound-box':
+            progress['phase'] = 'waiting-for-publication'
+    except Exception:
+        progress.update(phase='review-needed', diagnosticCode='preflight-refused')
     try:
         with lock(root):
-            progress["workerRunning"] = False
+            progress['lockHeld'] = False
     except BlockingIOError:
-        progress["workerRunning"] = True
+        progress['lockHeld'] = True
+    progress['workerRunning'] = progress['lockHeld'] and verified_worker(root, progress)
     return progress
 
 
@@ -115,7 +189,7 @@ def maybe_start(root, now=None, requested=False):
                 os.close(fd)
             return {**claimed, 'pid': child.pid}
     except BlockingIOError:
-        return {**snapshot(root), 'workerRunning': True}
+        return snapshot(root)
 
 
 class Recovery:
@@ -132,7 +206,7 @@ class Recovery:
             previous = read(root, STATE)
         except FileNotFoundError:
             previous = {}
-        self.progress = {'jobId': previous.get('jobId') or str(uuid.uuid4()), 'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
+        self.progress = {'workerPid': os.getpid(), 'jobId': previous.get('jobId') or str(uuid.uuid4()), 'phase': 'checking-bindings', 'startedAtMs': int(time.time() * 1000),
                          'rateLimitRetries': 0, 'nativeAppDeliveryVerified': False, 'billingVerified': False,
                          'liveHistoryMerged': False, 'sdkContextsMerged': False}
 
@@ -153,6 +227,12 @@ class Recovery:
             except Exception:
                 # A refused/corrupt journal must still publish its review state.
                 self.progress.pop('counts', None)
+        if phase == 'bound-box':
+            journal, counts = journal_progress(self.root)
+            proof = publication_proof(self.root, journal)
+            if counts['active'] != len(journal['entries']) or not proof:
+                raise RuntimeError('Publication proof missing for completed transfer')
+            self.progress['publicationProof'] = proof
         write(self.root, self.progress)
 
     def pace(self, call):
@@ -199,8 +279,30 @@ class Recovery:
                     self.sleep(delay)
         return paced
 
+    def refresh_publication_bindings(self, rows=None):
+        """Refresh publisher authority from real owned BOX rows, without cutover."""
+        self.require()
+        rows = self.r.rows() if rows is None else rows
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError('Malformed platform roster; publication authority was not changed')
+        box = {}
+        for row in rows:
+            if row.get('harness') != 'box' or row.get('viewerIsOwner') is not True:
+                continue
+            aid = self.module.canonical(row['agentId'])
+            sid = self.r.publisher.require_box_row(row, aid)
+            if aid in box:
+                raise RuntimeError('Ambiguous BOX publication authority')
+            box[aid] = sid
+        value = {'schemaVersion': 1, 'checkedAtMs': int(time.time()*1000), 'boxAgents': box}
+        self.r.m.atomic_bytes(self.root / 'openbot-publication-bindings.json',
+                              self.r.m.json_bytes(value), pre_commit=self.require)
+        return {'phase': 'publication-bindings-refreshed', 'boxAgentCount': len(box),
+                'checkedAtMs': value['checkedAtMs'], 'nativeAppDeliveryVerified': False}
+
     def run(self):
         self.require()
+        self.status('checking-bindings')
         self.r.m.rpc = self.pace(self.r.m.rpc)
         original_gateway = self.r.m.gateway
         def gateway(method, body):
@@ -210,17 +312,7 @@ class Recovery:
         original_rows = self.r.rows
         def rows():
             result = original_rows()
-            box = {}
-            for row in result:
-                if row.get('harness') != 'box' or row.get('viewerIsOwner') is not True:
-                    continue
-                aid = self.module.canonical(row['agentId'])
-                sid = self.r.publisher.require_box_row(row, aid)
-                if aid in box:
-                    raise RuntimeError('Ambiguous BOX publication authority')
-                box[aid] = sid
-            self.r.m.write(self.root / 'openbot-publication-bindings.json',
-                           {'schemaVersion': 1, 'checkedAtMs': int(time.time()*1000), 'boxAgents': box})
+            self.refresh_publication_bindings(result)
             return result
         self.r.rows = rows
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
@@ -244,6 +336,11 @@ class Recovery:
                 self.r.restore_routines()
                 self.r.finalize_preferences()
                 self.r.refresh_peer_roster()
+                results = self.r.verify()
+                self.r.m.write(self.root / 'openbot-custom-dispatch-verification.json', {'results': results})
+                if len(results) != len(expected) or any(row['status'] != 'verified-box' for row in results):
+                    self.status('waiting-for-publication')
+                    return self.progress
                 self.status('bound-box', agentCount=len(expected), nextCheckAtMs=int(time.time()*1000)+120000)
                 return self.progress
             self.status('copying', agentCount=len(sources))
@@ -290,13 +387,15 @@ def main():
     parser.add_argument('--request', action='store_true')
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--worker-lock-fd', type=int)
+    parser.add_argument('--refresh-publication-bindings', action='store_true',
+                        help='Refresh owned BOX publisher authority only; do not mint, copy, activate or send.')
     args = parser.parse_args()
     if args.status:
         print(json.dumps(snapshot(args.root)))
         return
     if args.request:
         result = maybe_start(args.root, requested=True)
-        print(json.dumps({**snapshot(args.root), **result}))
+        print(json.dumps(snapshot(args.root)))
         return
     # A requested worker inherits the parent's flock with no unlock/spawn gap.
     if args.worker_lock_fd is not None:
@@ -309,7 +408,10 @@ def main():
     with held:
         recovery = Recovery(args.root)
         try:
-            recovery.run()
+            if args.refresh_publication_bindings:
+                print(json.dumps(recovery.refresh_publication_bindings()))
+            else:
+                recovery.run()
         except Exception as error:
             recovery.r.m.write(args.root / 'openbot-custom-dispatch-error.json', {
                 'phase': recovery.progress['phase'], 'errorType': type(error).__name__,

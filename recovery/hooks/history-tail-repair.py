@@ -391,6 +391,11 @@ class TailRepair:
                             sdk.execute('UPDATE blobs SET data=?WHERE id=?', (data, identifier))
                 self.require(); sdk.commit()
             write(marker, {'phase': 'sdk-appended', 'intent': intent_ref}); self.fault('sdk-appended')
+        if (rows(target / 'store.db') != planned_rows or kv(target / 'store.db') != planned_kv or
+                graph(target / 'conversation-blobs.db') != planned_graph):
+            raise RuntimeError('Tail native state changed before receipt pin')
+        if self.identity(self.r.read(), entry) != intent['guards'] or self.route(entry) != intent['selectedRoute']:
+            raise RuntimeError('Tail settings changed before receipt pin')
         self.fresh_cloud(intent['sourceHeads']); self.require()
         self.r.accept_history_merge(entry['newId'], intent['newReceipt']['path'])
         write(marker, {'phase': 'accepted', 'intent': intent_ref}); self.fault('accepted')

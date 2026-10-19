@@ -148,6 +148,16 @@ class ApplyTests(ReceiptTests):
         with self.assertRaisesRegex(RuntimeError,'SDK CAS'):repair.apply(self.r.read(),intent)
         self.assertIn('other',T.graph(target/'conversation-blobs.db'))
 
+    def test_state_changed_after_sdk_commit_is_not_pinned(self):
+        repair,intent,target,_=self.setup_apply()
+        def fault(phase):
+            if phase=='sdk-appended':
+                with contextlib.closing(sqlite3.connect(target/'store.db'))as sql:
+                    sql.execute('UPDATE transcript_entries SET entry=?WHERE seq=2',(json.dumps({'id':'new-tail','kind':'message','role':'user','content':'changed'}),));sql.commit()
+        repair.fault=fault
+        with self.assertRaisesRegex(RuntimeError,'changed before receipt pin'):repair.apply(self.r.read(),intent)
+        self.assertEqual(self.r.read()['entries'][0]['historyMergeReceipt'],json.loads(T.owned(intent['path']))['oldReceipt'])
+
     def test_active_copy_is_never_modified(self):
         repair,intent,target,_=self.setup_apply();journal=self.r.read();journal['entries'][0]['phase']='active';self.r.save(journal)
         before=T.rows(target/'store.db')

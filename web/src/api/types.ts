@@ -127,6 +127,7 @@ export type DeliverySettingsResult = DeliverySettings & { ok: true };
 
 export type BoxState = {
   snapshot: Snapshot;
+  localEngine?: { state: "ready" | "unavailable" | "not-pinned"; nativeDeliveryVerified: false };
   providers: Provider[];
   models: Model[];
   keyedProviders: string[];
@@ -436,6 +437,9 @@ export type RefusalError =
   | { kind: "foreign-hop" }
   | { kind: "foreign-ui" }
   | { kind: "foreign-opengrok" }
+  | { kind: "mode-changed" }
+  | { kind: "source-changed" }
+  | { kind: "local-engine-refused"; reason: string }
   | { kind: "census-refused"; reason: string }
   | { kind: "syntax-check-failed"; stderr: string }
   | { kind: "listen-failed"; port: number };

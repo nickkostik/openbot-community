@@ -9,7 +9,7 @@ import {
   Rocket,
   Zap,
 } from "lucide-react";
-import { getPause, hasKey, listLogs, modelById, providerById, setPause } from "../api/client";
+import { customActivationBlocked, customActivationModel, getPause, hasKey, listLogs, modelById, providerById, setPause } from "../api/client";
 import type { GatewayPause, LogRecord, Model, SaveResult } from "../api/types";
 import { channelLabel, formatLatency, formatTime, labelReasoning } from "../lib/format";
 import { modelGroupsForState } from "../lib/model-options";
@@ -47,6 +47,8 @@ export function Dashboard() {
 
   const custom = state.snapshot.alignment.desired === "custom";
   const active = modelById(state, state.activeModelId);
+  const reenable = customActivationModel(state);
+  const customBlocked = customActivationBlocked(state);
   const activeProvider = active ? providerById(state, active.providerId) : undefined;
   const health = deriveHealth(state, service);
   const empty = state.providers.length === 0;
@@ -275,15 +277,17 @@ export function Dashboard() {
               </div>
               <p className="hero-sub" style={{ color: "var(--body)" }}>
                 {state.models.length
-                  ? `Ready to re-enable (last model: ${state.models[0]?.slug ?? "—"}).`
+                  ? `Ready to re-enable (last model: ${reenable?.slug ?? "—"}).`
                   : "Chat is running on stock xAI."}
               </p>
               {state.models.length ? (
                 <div className="row gap-2">
                   <Button
                     variant="secondary"
+                    disabled={busy !== null || customBlocked !== null}
+                    title={customBlocked ? "Repair the host or prepare a verified Local engine before switching." : undefined}
                     onClick={() => {
-                      const last = state.models[0];
+                      const last = reenable;
                       if (last) void useModel(last);
                     }}
                   >

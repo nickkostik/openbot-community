@@ -71,7 +71,7 @@ export function printRefused(result: Extract<ReconcileResult, { kind: "refused" 
     console.error(err.stderr);
     return;
   }
-  console.error(`OpenBot: ${err.kind}${err.kind === "census-refused" ? ` (${err.reason})` : ""}`);
+  console.error(`OpenBot: ${err.kind}${(err.kind === "census-refused" || err.kind === "local-engine-refused") ? ` (${err.reason})` : ""}`);
 }
 
 export function printResult(result: ReconcileResult, json: boolean): void {

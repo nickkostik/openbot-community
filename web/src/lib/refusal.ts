@@ -14,6 +14,11 @@ export function refusalRemedy(refusal: RefusalError): string {
       return "Another process owns port 9280. Stop it, then retry.";
     case "foreign-opengrok":
       return "A foreign opengrok wrap is present; remove it before OpenBot can manage the host.";
+    case "mode-changed":
+    case "source-changed":
+      return "The saved mode, host, catalog, or engine changed during validation. Reload and retry.";
+    case "local-engine-refused":
+      return "The selected Local engine could not be verified. Repair or prepare the pinned engine, then retry; mode and catalog were preserved.";
     case "census-refused":
       return `Host file layout not recognized: ${refusal.reason}.`;
     case "syntax-check-failed":
@@ -35,6 +40,7 @@ export function refusalDetail(refusal: RefusalError): string | undefined {
     case "syntax-check-failed":
       return refusal.stderr;
     case "census-refused":
+    case "local-engine-refused":
       return refusal.reason;
     case "host-missing":
       return refusal.path;

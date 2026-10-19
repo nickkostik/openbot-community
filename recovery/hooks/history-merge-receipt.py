@@ -16,6 +16,9 @@ import stat
 
 SCHEMA='openbot-history-merge-receipt/v1'
 DELTA_SCHEMA='openbot-history-merge-receipt/incremental-v1'
+IDENTIFIER_SCHEMA='openbot-history-merge-receipt/identifier-projection-v1'
+IDENTIFIER_PROOF='openbot-unpublished-identifier-projection/v1'
+IDENTIFIER_WORKER_SHA='e7d54d24d6ce6e82fb0c1b76d7572dbbb51b9437f958f04e6057b59e673a80fb'
 MAX_RECEIPT_DEPTH=16
 MAX_FILE=128*1024*1024
 MAX_RECORDS=200000
@@ -127,21 +130,25 @@ def chat_event(value):
     if kind in ('voice-call','spend-initiation','event','feedback','notice'):return False
     raise RuntimeError('Unclassified event kind requires a reviewed ordering policy')
 
-def validate(r,journal,entry,reference=None,_depth=0):
+def validate(r,journal,entry,reference=None,_depth=0,_check_live=True):
     if _depth>MAX_RECEIPT_DEPTH:raise RuntimeError('History merge receipt chain exceeds bound')
     reference=reference or entry.get('historyMergeReceipt')
     if not reference:raise RuntimeError('Divergent same-ID history requires a reviewed immutable merge receipt')
     root=pathlib.Path(journal['backup'])
     receipt=json.loads(referenced(root,reference))
     incremental=receipt.get('schema')==DELTA_SCHEMA
+    identifier_revision=receipt.get('schema')==IDENTIFIER_SCHEMA
+    chained=incremental or identifier_revision
     fields='schema oldId newId selectionSourceId backup baseline sources projections sourceOrders orderResolutions sdkProof'
-    exact(receipt,fields+(' previousReceipt' if incremental else ''))
-    if incremental:
+    exact(receipt,fields+(' previousReceipt' if chained else '')+(' identifierProof' if identifier_revision else ''))
+    if chained:
         previous=receipt['previousReceipt']
         if previous==reference:raise RuntimeError('History merge receipt cycle')
-        validate(r,journal,entry,previous,_depth+1)
-        validate_extension(root,receipt,json.loads(referenced(root,previous)))
-    if (receipt['schema'] not in (SCHEMA,DELTA_SCHEMA) or receipt['backup']!=str(root) or
+        validate(r,journal,entry,previous,_depth+1,False)
+        prior=json.loads(referenced(root,previous))
+        if incremental:validate_extension(root,receipt,prior)
+        else:validate_identifier_projection(r,root,receipt,prior)
+    if (receipt['schema'] not in (SCHEMA,DELTA_SCHEMA,IDENTIFIER_SCHEMA) or receipt['backup']!=str(root) or
             receipt['oldId']!=entry['oldId'] or receipt['newId']!=entry['newId'] or
             receipt['selectionSourceId']!=entry.get('selectionSourceId',entry['oldId'])):
         raise RuntimeError('Merge receipt belongs to a different lineage or journal')
@@ -247,19 +254,20 @@ def validate(r,journal,entry,reference=None,_depth=0):
         raise RuntimeError('Merge baseline metadata points at a different SDK root')
     elif actual.get(sdk['rootSlot'])!=sha(sdk['rootSha256']):
         raise RuntimeError('SDK baseline root differs from native proof')
-    active_path=r.m.SD/'agents'/entry['newId']/'store.db'
-    for directory in (r.m.SD/'agents',active_path.parent):
-        info=directory.lstat()
-        if info.st_uid!=os.getuid() or not stat.S_ISDIR(info.st_mode):
-            raise RuntimeError('Live merge target directory is foreign or symlinked')
-    info=active_path.lstat()
-    if info.st_uid!=os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_size>MAX_FILE:
-        raise RuntimeError('Live merge target must be a bounded owned regular file')
-    active=db_entries(active_path,immutable=False)
-    wanted=[payload(r,value,mapping) for value in baseline];cursor=0
-    for value in active:
-        if cursor<len(wanted) and payload(r,value,mapping)==wanted[cursor]:cursor+=1
-    if cursor!=len(wanted):raise RuntimeError('Live transcript lost or changed a baseline message or order')
+    if _check_live:
+        active_path=r.m.SD/'agents'/entry['newId']/'store.db'
+        for directory in (r.m.SD/'agents',active_path.parent):
+            info=directory.lstat()
+            if info.st_uid!=os.getuid() or not stat.S_ISDIR(info.st_mode):
+                raise RuntimeError('Live merge target directory is foreign or symlinked')
+        info=active_path.lstat()
+        if info.st_uid!=os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_size>MAX_FILE:
+            raise RuntimeError('Live merge target must be a bounded owned regular file')
+        active=db_entries(active_path,immutable=False)
+        wanted=[payload(r,value,mapping) for value in baseline];cursor=0
+        for value in active:
+            if cursor<len(wanted) and payload(r,value,mapping)==wanted[cursor]:cursor+=1
+        if cursor!=len(wanted):raise RuntimeError('Live transcript lost or changed a baseline message or order')
     return {'baselineEntries':len(baseline),'sourceCount':len(sources),'receiptSha256':reference['sha256'],
             'pruneAllowed':False}
 
@@ -365,15 +373,84 @@ def source_freshness(r,journal,entry,cache=None):
     return {'reviewedSources':len(receipt['sources']),'receiptPresent':True,'sourceHeadsUnchanged':True}
 
 
+
+def validate_identifier_projection(r,root,current,previous):
+    """Only rename proven-unpublished synthetic IDs; preserve every other byte."""
+    for key in ('oldId','newId','selectionSourceId','backup','sources','sourceOrders','orderResolutions','sdkProof'):
+        if current[key]!=previous[key]:raise RuntimeError('Identifier projection changes preserved evidence')
+    exact(current['baseline'],'store blobs')
+    referenced(root,current['baseline']['store']);referenced(root,current['baseline']['blobs'])
+    if current['baseline']['blobs']!=previous['baseline']['blobs']:
+        raise RuntimeError('Identifier projection cannot replace SDK bytes')
+    proof=json.loads(referenced(root,current['identifierProof']))
+    exact(proof,'schema previousReceipt publishedPrefix changes nativeSdkProof')
+    if proof['schema']!=IDENTIFIER_PROOF or proof['previousReceipt']!=current['previousReceipt']:
+        raise RuntimeError('Identifier projection proof belongs to another receipt')
+    prefix=json.loads(referenced(root,proof['publishedPrefix']))
+    exact(prefix,'schema agentId generation capturedAtMs entries')
+    if prefix['schema']!='openbot-platform-transcript-prefix/v1' or prefix['agentId']!=current['newId'] or type(prefix['generation'])not in(int,str):
+        raise RuntimeError('Unknown published-prefix evidence')
+    def rows(path):
+        with contextlib.closing(sqlite3.connect('file:'+path+'?mode=ro&immutable=1',uri=True))as db:
+            return db.execute('SELECT seq,id,entry FROM transcript_entries ORDER BY seq').fetchall()
+    old_rows=rows(previous['baseline']['store']['path']);new_rows=rows(current['baseline']['store']['path'])
+    if len(old_rows)!=len(new_rows):raise RuntimeError('Identifier projection cannot add or remove records')
+    published=prefix['entries']
+    if not isinstance(published,list)or len(published)>len(old_rows):raise RuntimeError('Published prefix exceeds baseline')
+    for index,item in enumerate(published):
+        seq,identifier,body=old_rows[index]
+        if int(item['seq'])!=seq or seq!=index+1 or item['entryId']!=identifier or base64.b64decode(item['body'],validate=True)!=body.encode():
+            raise RuntimeError('Published prefix differs from the immutable raw baseline')
+    changes=proof['changes']
+    if not isinstance(changes,list)or not 1<=len(changes)<=MAX_RECORDS:raise RuntimeError('Invalid identifier projection changes')
+    indexed={}
+    for change in changes:
+        exact(change,'seq oldId newId')
+        if type(change['seq'])is not int or change['seq']in indexed:raise RuntimeError('Duplicate identifier projection sequence')
+        indexed[change['seq']]=change
+    renamed={};used=set();occupied={row[1]for row in old_rows}
+    for old,new in zip(old_rows,new_rows):
+        seq,identifier,body=old;new_seq,new_id,new_body=new
+        if seq!=new_seq:raise RuntimeError('Identifier projection reorders transcript sequence')
+        if seq not in indexed:
+            if old!=new:raise RuntimeError('Identifier projection changed an unlisted row')
+            continue
+        change=indexed[seq]
+        if seq<=len(published):raise RuntimeError('Cannot reproject an already published identifier')
+        if (identifier!=change['oldId']or new_id!=change['newId']or len(identifier.encode())<=128 or
+                not re.fullmatch(r'.+~openbot-branch-[0-9a-f]{64}~*',identifier)):
+            raise RuntimeError('Only oversized synthetic branch identities may be reprojected')
+        expected=r.merger.compact_branch_identifier(identifier,occupied)
+        if new_id!=expected or len(new_id.encode())>128:raise RuntimeError('Identifier projection is not deterministic and bounded')
+        occupied.add(new_id);a=json.loads(body);b=json.loads(new_body)
+        if a.get('id')!=identifier or b.get('id')!=new_id or {k:v for k,v in a.items()if k!='id'}!={k:v for k,v in b.items()if k!='id'}:
+            raise RuntimeError('Identifier projection altered a message payload')
+        renamed[identifier]=new_id;used.add(seq)
+    if used!=set(indexed):raise RuntimeError('Identifier projection references an absent row')
+    expected_projections=[{**p,'targetEntryId':renamed.get(p['targetEntryId'],p['targetEntryId'])}for p in previous['projections']]
+    if current['projections']!=expected_projections:raise RuntimeError('Identifier projection changed source variant coverage')
+    native=json.loads(referenced(root,proof['nativeSdkProof']))
+    sdk=json.loads(referenced(root,current['sdkProof']))
+    expected_graph=digest(json.dumps(sorted(sdk['blobs'].items()),separators=(',',':'),ensure_ascii=False).encode())
+    if (native.get('schema')!='openbot-identifier-sdk-reference-proof/v1'or native.get('workerSha256')!=IDENTIFIER_WORKER_SHA or
+            native.get('graphSha256')!=expected_graph or native.get('graphBlobs')!=len(sdk['blobs'])or
+            native.get('rootSha256')!=sdk['rootSha256']or native.get('checkedIds')!=sorted(renamed)or
+            native.get('structuralReferences')!=[]or native.get('graphUnchanged')is not True or native.get('sourceUpdated')is not False or
+            any(native.get(key)!=0 for key in('liveWrites','providerCalls','networkAttempts','toolAttempts'))or
+            (sdk['rootSha256']is None and native.get('rootAbsent')is not True)or
+            (sdk['rootSha256']is not None and native.get('rootRoundtrip')is not True)):
+        raise RuntimeError('Identifier projection lacks a native proof of unchanged SDK references')
+
+
 def accept(r,journal,entry,path):
     raw=checked(journal['backup'],path)
     reference={'path':str(path),'sha256':digest(raw)}
     pinned=entry.get('historyMergeReceipt')
     if pinned not in (None,reference):
         candidate=json.loads(raw)
-        if candidate.get('schema')!=DELTA_SCHEMA or candidate.get('previousReceipt')!=pinned:
+        if candidate.get('schema')not in(DELTA_SCHEMA,IDENTIFIER_SCHEMA)or candidate.get('previousReceipt')!=pinned:
             raise RuntimeError('A different immutable merge receipt is already pinned')
-    elif pinned is None and json.loads(raw).get('schema')==DELTA_SCHEMA:
+    elif pinned is None and json.loads(raw).get('schema')in(DELTA_SCHEMA,IDENTIFIER_SCHEMA):
         raise RuntimeError('Incremental merge requires a previously pinned immutable receipt')
     result=validate(r,journal,entry,reference)
     entry['historyMergeReceipt']=reference

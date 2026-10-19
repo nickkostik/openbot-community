@@ -15,6 +15,8 @@ import sqlite3
 import stat
 
 SCHEMA='openbot-history-merge-receipt/v1'
+DELTA_SCHEMA='openbot-history-merge-receipt/incremental-v1'
+MAX_RECEIPT_DEPTH=16
 MAX_FILE=128*1024*1024
 MAX_RECORDS=200000
 
@@ -125,13 +127,21 @@ def chat_event(value):
     if kind in ('voice-call','spend-initiation','event','feedback','notice'):return False
     raise RuntimeError('Unclassified event kind requires a reviewed ordering policy')
 
-def validate(r,journal,entry,reference=None):
+def validate(r,journal,entry,reference=None,_depth=0):
+    if _depth>MAX_RECEIPT_DEPTH:raise RuntimeError('History merge receipt chain exceeds bound')
     reference=reference or entry.get('historyMergeReceipt')
     if not reference:raise RuntimeError('Divergent same-ID history requires a reviewed immutable merge receipt')
     root=pathlib.Path(journal['backup'])
     receipt=json.loads(referenced(root,reference))
-    exact(receipt,'schema oldId newId selectionSourceId backup baseline sources projections sourceOrders orderResolutions sdkProof')
-    if (receipt['schema']!=SCHEMA or receipt['backup']!=str(root) or
+    incremental=receipt.get('schema')==DELTA_SCHEMA
+    fields='schema oldId newId selectionSourceId backup baseline sources projections sourceOrders orderResolutions sdkProof'
+    exact(receipt,fields+(' previousReceipt' if incremental else ''))
+    if incremental:
+        previous=receipt['previousReceipt']
+        if previous==reference:raise RuntimeError('History merge receipt cycle')
+        validate(r,journal,entry,previous,_depth+1)
+        validate_extension(root,receipt,json.loads(referenced(root,previous)))
+    if (receipt['schema'] not in (SCHEMA,DELTA_SCHEMA) or receipt['backup']!=str(root) or
             receipt['oldId']!=entry['oldId'] or receipt['newId']!=entry['newId'] or
             receipt['selectionSourceId']!=entry.get('selectionSourceId',entry['oldId'])):
         raise RuntimeError('Merge receipt belongs to a different lineage or journal')
@@ -254,11 +264,117 @@ def validate(r,journal,entry,reference=None):
             'pruneAllowed':False}
 
 
+
+def validate_extension(root,current,previous):
+    """An explicit new receipt extends evidence; it never edits prior artifacts."""
+    for key in ('oldId','newId','selectionSourceId','backup'):
+        if current[key]!=previous[key]:raise RuntimeError('Incremental receipt changes identity')
+    exact(current['baseline'],'store blobs')
+    referenced(root,current['baseline']['store']);referenced(root,current['baseline']['blobs'])
+    old_rows=db_entries(previous['baseline']['store']['path'])
+    new_rows=db_entries(current['baseline']['store']['path'])
+    if len(new_rows)<=len(old_rows) or new_rows[:len(old_rows)]!=old_rows:
+        raise RuntimeError('Incremental transcript must strictly append the immutable prefix')
+    old_sources={(s['agentId'],s['kind']):s for s in previous['sources']}
+    new_sources={(s['agentId'],s['kind']):s for s in current['sources']}
+    if set(old_sources)!=set(new_sources):raise RuntimeError('Incremental source identities changed')
+    for key,source in old_sources.items():
+        target=new_sources[key]
+        for field in ('generation','sdkRootSha256','blobSnapshot'):
+            if source[field]!=target[field]:raise RuntimeError('Incremental source generation or SDK changed')
+        old_records=source_records(root,source);new_records=source_records(root,target)
+        if new_records[:len(old_records)]!=old_records:
+            raise RuntimeError('Incremental source changed its immutable prefix')
+        if source['kind']=='sqlite' and source!=target:
+            raise RuntimeError('Incremental import cannot replace original SQLite evidence')
+    for field in ('projections','orderResolutions'):
+        if current[field][:len(previous[field])]!=previous[field]:
+            raise RuntimeError('Incremental provenance changed earlier projections')
+    old_orders={(v['sourceId'],v['sourceKind']):v['entryIds'] for v in previous['sourceOrders']}
+    new_orders={(v['sourceId'],v['sourceKind']):v['entryIds'] for v in current['sourceOrders']}
+    if set(old_orders)!=set(new_orders) or any(new_orders[k][:len(v)]!=v for k,v in old_orders.items()):
+        raise RuntimeError('Incremental provenance changed earlier source order')
+    old_sdk=json.loads(referenced(root,previous['sdkProof']))
+    new_sdk=json.loads(referenced(root,current['sdkProof']))
+    if any(old_sdk[k]!=new_sdk[k] for k in ('engineSha256','rootSlot','sourceRoots')):
+        raise RuntimeError('Incremental SDK source provenance changed')
+    for blob,sha256 in old_sdk['blobs'].items():
+        if blob==old_sdk['rootSlot']:
+            if sha256 not in new_sdk['blobs'].values():
+                raise RuntimeError('Incremental SDK must archive its previous exact root')
+        elif new_sdk['blobs'].get(blob)!=sha256:
+            raise RuntimeError('Incremental SDK lost or changed an archived blob')
+
+
+
+def source_freshness(r,journal,entry,cache=None):
+    """Refuse a cutover if any reviewed source acquired a later history head.
+
+    Platform generation and append-only head are compared through the owner RPC.
+    This is a freshness gate, not a merge or a publication/delivery assertion.
+    """
+    reference=entry.get('historyMergeReceipt')
+    if not reference:return {'reviewedSources':0,'receiptPresent':False}
+    validate(r,journal,entry,reference)
+    root=pathlib.Path(journal['backup']);receipt=json.loads(referenced(root,reference))
+    cache={} if cache is None else cache
+    for source in receipt['sources']:
+        key=(source['kind'],source['agentId'])
+        if source['kind']=='platform':
+            captured=json.loads(referenced(root,{k:source[k]for k in ('path','sha256')}))
+            rows=captured['entries'] if isinstance(captured,dict)else captured
+            expected_row=max(rows,key=lambda x:int(x['seq'])) if rows else None
+            expected={'generation':source['generation'],'head':None if expected_row is None else
+                (int(expected_row['seq']),digest(base64.b64decode(expected_row['body'],validate=True)))}
+            if key not in cache:
+                response=r.m.rpc('ListGrokBotTranscriptEntries',{'agentId':source['agentId'],'limit':1})
+                live=response.get('entries',[])
+                latest=max(live,key=lambda x:int(x['seq'])) if live else None
+                cache[key]={'generation':response.get('generation'),'head':None if latest is None else
+                    (int(latest['seq']),digest(base64.b64decode(latest['body'],validate=True)))}
+        else:
+            def head(path):
+                with contextlib.closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True))as db:
+                    count=db.execute('SELECT COUNT(*) FROM transcript_entries').fetchone()[0]
+                    row=db.execute('SELECT seq,entry FROM transcript_entries ORDER BY seq DESC LIMIT 1').fetchone()
+                return {'count':count,'head':None if row is None else(int(row[0]),digest(json.dumps(json.loads(row[1]),sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()))}
+            expected=head(source['path']);expected['sdkRootSha256']=source['sdkRootSha256']
+            if key not in cache:
+                directory=r.m.SD/'agents'/source['agentId']
+                for candidate in (r.m.SD/'agents',directory,directory/'store.db'):
+                    info=candidate.lstat()
+                    if info.st_uid!=os.getuid() or candidate.is_symlink():raise RuntimeError('Source history path is foreign or symlinked')
+                current=head(directory/'store.db')
+                with contextlib.closing(sqlite3.connect('file:'+str(directory/'store.db')+'?mode=ro',uri=True))as db:
+                    row=db.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()
+                if not row:raise RuntimeError('Source SDK metadata missing during freshness check')
+                slot=json.loads(bytes.fromhex(row[0])).get('latestRootBlobId')
+                row=None
+                # Retained engines can keep the graph in either native store.
+                for blob_path in (directory/'conversation-blobs.db',directory/'store.db'):
+                    if not(blob_path.exists()or blob_path.is_symlink()):continue
+                    info=blob_path.lstat()
+                    if info.st_uid!=os.getuid()or not stat.S_ISREG(info.st_mode):raise RuntimeError('Source SDK path is foreign or symlinked')
+                    with contextlib.closing(sqlite3.connect('file:'+str(blob_path)+'?mode=ro',uri=True))as db:
+                        has_blobs=db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='blobs'").fetchone()[0]
+                        row=db.execute('SELECT data FROM blobs WHERE id=?',(slot,)).fetchone() if slot is not None and has_blobs else None
+                    if row:break
+                current['sdkRootSha256']=digest(row[0])if row else None;cache[key]=current
+        if cache[key]!=expected:
+            raise RuntimeError('Source history changed after reviewed merge; incremental preservation required before activation')
+    return {'reviewedSources':len(receipt['sources']),'receiptPresent':True,'sourceHeadsUnchanged':True}
+
+
 def accept(r,journal,entry,path):
     raw=checked(journal['backup'],path)
     reference={'path':str(path),'sha256':digest(raw)}
-    if entry.get('historyMergeReceipt') not in (None,reference):
-        raise RuntimeError('A different immutable merge receipt is already pinned')
+    pinned=entry.get('historyMergeReceipt')
+    if pinned not in (None,reference):
+        candidate=json.loads(raw)
+        if candidate.get('schema')!=DELTA_SCHEMA or candidate.get('previousReceipt')!=pinned:
+            raise RuntimeError('A different immutable merge receipt is already pinned')
+    elif pinned is None and json.loads(raw).get('schema')==DELTA_SCHEMA:
+        raise RuntimeError('Incremental merge requires a previously pinned immutable receipt')
     result=validate(r,journal,entry,reference)
     entry['historyMergeReceipt']=reference
     return result

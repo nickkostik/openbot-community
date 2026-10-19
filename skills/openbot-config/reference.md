@@ -375,6 +375,50 @@ Activation verifies destinations before retiring sources, preserves sidebar/main
 
 Existing journals are retained. Only an explicitly requested next generation can roll an entirely active journal forward while keeping prior mapping/backups and rejecting cycles/conflicts. No user/fleet IDs, fixed roster, copy artifacts or credentials belong in product exports.
 
+### Reviewed terminal return and history merge receipts
+
+This is an explicit recovery after a completed journal’s Local copy was later migrated to Temporal while the original stock conversation was selected again. It is not an automatic save/model update, a first migration or permission to discard either branch. With separately authorized Custom/local-only recovery, initialize a new generation using:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/remint-box-fleet.py init \
+  --next-generation --return-from-terminal
+```
+
+Both flags apply only to `init`, require an existing entirely active journal and retain previous generations and private snapshots. Let `O` name the original stock conversation, `L` its recorded terminal copy and `N` the new destination; these symbols are not actual IDs. Planning retains the proven `O → L → N` chain, checks owner/legacy UUID/server-ID/profile bindings and requires the observed source rows to be Temporal with the recorded kinds. The original selected visible stock conversation remains `selectionSourceId` with its exact `selectionSourceServerId`; the new entry’s `oldId` is `L`, so stage copies only the terminal `L` data instead of overlapping copies from both ancestors. Entries set `requiresHistoryMerge: true` and remain copied until explicit review. Preserve originals and separately reconcile any changed instructions, routine definitions/settings, tools and private sessions; selecting a terminal source does not prove all source state is already equivalent.
+
+`stage` still records original `copyProof.historyIdConflicts`, including nonzero conflicts. Do not zero that counter, edit journal phases or delete conflicting messages to pass registration. Prepare coherent immutable transcript/SDK baselines and source snapshots privately through a separately reviewed merge, then explicitly accept its evidence while the entry is copied:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/remint-box-fleet.py accept-history-merge \
+  --agent-id '<destination-id-from-journal>' \
+  --receipt '/absolute/journal-backup/reviewed/receipt.json'
+```
+
+This command requires Custom/local-only authority and the migration lock. It validates and pins `historyMergeReceipt: {path,sha256}` without changing original conflict counts. A different receipt cannot replace a pin. Subsequent registration/verification revalidates pinned evidence rather than trusting an accepted flag. A successful result reports baseline/source counts, pinned digest and `pruneAllowed: false`; it does not claim native app or billing verification. The command accepts reviewed evidence; it does not construct a context merge or run native tools.
+
+#### Exact immutable evidence contract
+
+`history-merge-receipt.py` requires schema `openbot-history-merge-receipt/v1` and exactly these top-level fields: `schema,oldId,newId,selectionSourceId,backup,baseline,sources,projections,sourceOrders,orderResolutions,sdkProof`. IDs and `backup` must match the current journal entry and its proven lineage. Every file reference is exactly `{path,sha256}` with lowercase SHA256. Paths must be absolute within that journal backup, contain no parent traversal or symlink components and identify bounded current-user-owned regular files; intermediate backup directories must be current-user-owned. Every referenced byte digest is checked. The per-file bound is 128 MiB and the transcript/SDK-record bound is 200000; evidence outside those limits refuses. Keep real IDs, snapshots, receipts, native reports and context blobs outside public source and logs.
+
+| Field | Checked contract |
+|---|---|
+| `baseline` | Exactly `{store,blobs}` file references to the merged SQLite store and blob snapshot. Store integrity, unique nonempty transcript IDs, target metadata owner and SDK root pointer are checked. |
+| `sources` | 1–512 unique source/kind rows, exactly `{agentId,kind,path,sha256,generation,sdkRootSha256,blobSnapshot}`. Both selected original and terminal source IDs must be represented within the proven lineage. `kind` is `sqlite` or `platform`; generation is null, a bounded string or integer. |
+| SQLite source | Immutable store plus mandatory referenced `blobSnapshot`; metadata root slot must contain the exact claimed source SDK root digest. A null source root requires an empty source blob store. |
+| Platform source | Privately captured base64 transcript bodies, optionally wrapped as exactly `{generation,entries}` matching the captured generation. `blobSnapshot` must be null; a visible transcript capture is not hidden cloud SDK state. |
+| `projections` | Exact `{sourceId,sourceKind,sourceEntryId,targetEntryId}` rows covering every captured source event once, with no unknown/duplicate projections. Only top-level transcript ownership and the projected entry ID may differ; full remaining payloads must match. Distinct entries within one source cannot collapse to one target. |
+| `sourceOrders` | Exact `{sourceId,sourceKind,entryIds}` rows retaining each full source sequence as provenance. Source chat-event order must remain in the baseline except the narrow reviewed correction below. Unclassified event kinds refuse. |
+| `orderResolutions` | At most 32 exact `{sourceId,sourceKind,beforeId,afterId,beforePayloadSha256,afterPayloadSha256,reason}` rows; unused or unknown resolutions refuse. |
+| `sdkProof` | Reference to exact `openbot-sdk-merge-proof/v1` JSON with fields `schema,engineSha256,rootSlot,rootSha256,blobs,sourceRoots,nativeReport`. `blobs` must equal every actual baseline blob ID/digest, `sourceRoots` must match captured SQLite roots, archived source-root bytes must remain present and baseline metadata/root bytes must agree. `nativeReport` is a pinned JSON file reference; engine digest syntax/provenance and report retention are not execution of a native reader by this helper. |
+
+The only supported chat-order correction is `reason: "cross-turn-adjacent-arrival"`: an adjacent previous-turn sent reply (`t<number>s<number>`) and distinct next-turn user record (`t<number>u`) with a positive timestamp reversal of at most 1000 ms, bound to both exact normalized payload hashes. It is not permission to sort arbitrary conversations, alter timestamps or reorder genuine same-turn messages. Voice/spend/status records retain source-order provenance even when their arrival ordering differs from chat ordering. Other contradictions require separate review.
+
+The live destination may add fresh turns after the immutable baseline: all baseline events must still occur with exact normalized payloads in the same ordered subsequence. Equal row counts, an ID set, a matching fixed root slot or a complete but divergent SDK blob graph do not qualify. The helper binds byte/provenance evidence; separately review actual native root decoding, full prompt/turn/tool/task coverage, current destination SDK state and changed instructions/routines/session authority. Do not treat an arbitrary report file or digest as proof that these semantic checks ran. Preserve source roots and pending tool/routine evidence; never replay recovered actions to manufacture success.
+
+Activation derives preferences and retirement only from complete proven chains ending at the selected destinations. It transfers every ancestor reference to the new target while preserving original sections/order, pins, main selection and existing collapse/notification choices; partial activation does not retire unrelated prior generations. Original and intermediate duplicate server schedules are paused, their enabled local routine definitions are privately backed up and disabled, and the target’s captured routine-restoration progress remains authoritative. Do not re-enable previously disabled outbound routines, replay missed slots or overwrite later user switches. Peer-roster consolidation permits many ancestors only for the proven lineage and equal metadata; conflicting or unrelated duplicates refuse.
+
+A future explicitly requested Official roster repair uses the original `selectionSourceId` and exact server binding, not the intermediate terminal copy. Before changing visibility/preferences it requires the merged destination’s current transcript, including later new messages, to appear in that stock counterpart as full normalized payloads in ordered subsequence. Otherwise it refuses with `Merged local history must reach its stock counterpart before hiding`; mode save alone is not a completed handoff. This guard neither publishes the missing messages nor proves full stock SDK/instruction/routine equivalence. Preserve Local data and complete separately authorized reconciliation rather than hiding the richer branch. Actual intended-client Local or Official send/tool-return/reply and billing remain independent tests; no receipt authorizes pruning.
+
 ### Portable migration identity protection
 
 The legacy `migrate-local-bots.py` planner has no built-in working-bot UUID and no automatic role/name exception. For an explicitly authorized migration it snapshots every actual owned BOX row whose agent/legacy UUIDs match into the private journal's `protectedProfiles`, keyed by canonical UUID. Each value is the full captured local profile; verification requires that same profile unchanged. Changed/missing profiles or invalid authority fail rather than choosing a special bot from another installation. The journal/backup contains real deployment data and must remain private.

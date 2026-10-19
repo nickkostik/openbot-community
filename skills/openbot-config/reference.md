@@ -352,6 +352,19 @@ A mutation result reports `state: "reselected"`, count, private backup path, `li
 
 This is bounded identity/preference reuse when the destination already contains the current required history/role payloads. It is not an SDK/context union, routine-definition merge, Temporal-to-BOX server migration, new native admission guarantee, deletion/prune workflow or proof that every mobile/tool/session path works. If all actual destinations are Temporal or source branches differ, stop at the reported guard and complete separate authorized reconciliation rather than labelling the fleet local or clearing held evidence. A fresh-copy workflow remains a different explicit recovery with its own proof requirements.
 
+### Manifest-only BOX publication authority refresh
+
+The reviewed `custom-dispatch-recovery.py --refresh-publication-bindings` command refreshes only `openbot-publication-bindings.json` from a fresh authenticated owner roster, without running the handoff coordinator. Use the installed reviewed helper on the authenticated Computer with literal Custom and its owned local-only opt-in already selected:
+
+```bash
+python3 /home/box/sand-data/openbot-hooks/custom-dispatch-recovery.py \
+  --refresh-publication-bindings
+```
+
+It uses the coordinator's existing dispatch lock/ownership contract and refuses a held/unsafe lock. No remint journal is required or created. Rows must be a well-formed list; only actual `harness: "box"` rows with `viewerIsOwner: true` qualify. Each included UUID/legacy UUID and numeric server binding must pass the real BOX-row validator, and duplicate owned BOX authority refuses the entire refresh. Do not infer authority from locally forced profile labels, names, a previous generation or hop health. Recheck Custom/local-only authority before the atomic manifest commit; a mode change, unsafe manifest path or invalid roster leaves the manifest unrefreshed.
+
+The private manifest retains schema `{schemaVersion:1,checkedAtMs,boxAgents:{UUID:numericServerIdString}}`; preserve its privacy and do not edit it to bless a Temporal identity. CLI JSON reports `phase: "publication-bindings-refreshed"`, `boxAgentCount`, `checkedAtMs` and `nativeAppDeliveryVerified: false`. The aggregate receipt is not a publication or delivery receipt. This operation does not mint/copy/activate identities, edit profiles/routines/history/mode, send a canary or prove publisher execution, client delivery or billing. Native `exportGrokBotWorkingState` canonical backfill remains a separate operation with its own authority/evidence; refreshing this manifest neither performs nor certifies it.
+
 ## Complete fresh BOX remint workflow
 
 Identity copies/remints are a separate explicit user-authorized recovery, not a source/model update or an automatic response to drift. The installed `remint-box-fleet.py` retains migration authority and writes its own private `openbot-box-remint.json`; do not import somebody else's fleet journal or roster.
@@ -410,6 +423,12 @@ Original assistant reasoning stays separate `reasoning_content`, including tool-
 Retention is 1–365 days; capture 1024–1048576 bytes; records 1–10000. Prefer PUT `/api/logs/settings` for pruning and Official tap reconcile; GET settings/logs/by-ID and POST `/api/logs/clear` are separate controls. Body logging requires authorized private handling. Never print credentials, full transcripts or summary sidecars.
 
 Hop and custom-host records share request identity for correlation, but harness observation is not a second provider request. Usage uses actual provider/model and reported input/output/cache fields; cached metadata and UI health are not billing/quota/phone proof. Read-only roster diagnostics/profile repairs do not establish native identity admission or delivery.
+
+### Routing diagnostic egress
+
+`diagnose-routing.py.open_no_redirect` preserves detected operator `http`/`https`/`all` proxy choices and no-proxy exclusions. If any operator proxy is present, it skips the Computer fallback even when that fallback value is invalid. Only when none is configured may the provided `SAND_EGRESS_TUNNEL_PROXY_ADDR` supply the HTTPS diagnostic proxy; no address retains the existing direct behavior. This is a per-process diagnostic transport choice, not a saved networking, exit-node or mode change.
+
+The provided fallback accepts only a plain HTTP loopback listener at `127.0.0.1`, `::1` or `localhost` with an explicit port from 1 to 65535, optionally supplied without the HTTP scheme. Credentials, remote/lookalike hosts, non-HTTP schemes, non-root paths, query/fragment, backslashes and whitespace/control characters refuse with `invalid-egress-proxy`. Existing operator policy is not rewritten or replaced. The helper keeps HTTPS certificate verification and rejects redirects instead of following credentials to another endpoint. A successful diagnostic network request still does not establish BOX admission, native publication, intended-client send/reply or billing.
 
 ## Injection
 

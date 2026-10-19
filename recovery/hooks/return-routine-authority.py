@@ -154,7 +154,9 @@ def runtime_history(actual,baseline,projection):
                 not all(isinstance(item,str)for item in value['coalescedRunIds'])):return False
         return True
     def window(rows):
-        return (isinstance(rows,list)and len(rows)<=20 and all(record(value)for value in rows)and
+        return (isinstance(rows,list)and len(rows)<=20 and all(isinstance(value,dict)and
+                isinstance(value.get('id'),str)and type(value.get('startedAt'))in(int,float)and
+                math.isfinite(value['startedAt'])for value in rows)and
                 all(rows[i]['startedAt']>=rows[i+1]['startedAt']for i in range(len(rows)-1)))
     if not window(actual)or not window(projection):return False
     prior={}
@@ -166,13 +168,13 @@ def runtime_history(actual,baseline,projection):
     for value in actual:
         candidates=prior.get(value['id'])
         if candidates is None:
-            if value['id']in archived or value['id']in new_ids or value['startedAt']<head:return False
+            if not record(value)or value['id']in archived or value['id']in new_ids or value['startedAt']<head:return False
             new_ids.add(value['id']);new.append(value);continue
         def stable(row):return {key:item for key,item in row.items()if key not in('status','finishedAt','detail','errorKind')}
         matched=None
         for index,old in candidates:
             if index in updates:continue
-            if value==old or(old['status']=='running'and value['status']in('ok','error')and stable(old)==stable(value)):
+            if value==old or(record(value)and old.get('status')=='running'and value['status']in('ok','error')and stable(old)==stable(value)):
                 matched=index;break
         if matched is None:return False
         updates[matched]=value

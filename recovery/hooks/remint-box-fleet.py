@@ -337,9 +337,30 @@ class Reminter:
         self.require_local_mode()
         with self.m.migration_lock():
             journal=self.read();entry=self.entry(journal,aid)
-            if entry['phase']!='copied':
+            validator=helper('history-merge-receipt')
+            if entry['phase']=='registered-box':
+                # A hidden registered copy can receive a reviewed late source
+                # tail before activation, with every previous receipt retained.
+                candidate=json.loads(validator.checked(journal['backup'],receipt))
+                directory=self.m.SD/'agents'/entry['newId']
+                settings=self.m.read(directory/'settings.json',{})
+                profile=self.m.read(directory/'profile.json',{})
+                if (candidate.get('schema')!=validator.DELTA_SCHEMA or
+                        settings.get('hiddenFromSidebar') is not True or
+                        profile.get('harness')!='box' or
+                        any(self.m.read(path,{}).get('enabled') is not False
+                            for path in (directory/'automations').rglob('automation.json'))):
+                    raise RuntimeError('Incremental registered merge requires a hidden paused BOX copy')
+                rows=[row for row in self.rows() if row.get('agentId')==entry['newId']]
+                if len(rows)!=1:raise RuntimeError('Incremental BOX binding is ambiguous')
+                sid=self.publisher.require_box_row(rows[0],entry['newId'])
+                if sid!=entry.get('serverId') or sid!=profile.get('serverId'):
+                    raise RuntimeError('Incremental BOX binding changed')
+                self.m.rpc('SetGrokBotAgentClientState',{'agentId':entry['newId'],'hiddenFromSidebar':True})
+                entry['historyMergeServerHiddenAcknowledgedAtMs']=int(time.time()*1000)
+            elif entry['phase']!='copied':
                 raise RuntimeError('Only a staged copy may accept reviewed history evidence')
-            proof=helper('history-merge-receipt').accept(self,journal,entry,receipt)
+            proof=validator.accept(self,journal,entry,receipt)
             self.save(journal)
             return proof
 
@@ -534,6 +555,10 @@ class Reminter:
             if any(r['status'] != 'verified-box' for r in results):
                 raise RuntimeError('Every destination must be verified before fleet activation')
             selected={r['newId'] for r in results}
+            freshness_cache={}
+            for entry in journal['entries']:
+                if entry['phase']!='active' and entry['newId'] in selected:
+                    helper('history-merge-receipt').source_freshness(self,journal,entry,freshness_cache)
             # Copies stay paused while they are hidden and their BOX handoff is
             # unverified. Capture the source's CURRENT switches before retiring
             # it, then restore those switches only after the handoff succeeds.

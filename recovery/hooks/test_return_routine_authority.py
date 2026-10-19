@@ -451,6 +451,23 @@ class RoutineAuthorityTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             R.authority_for(self.r, journal, entry, self.validator)
 
+    def test_native_projection_json_hash_count_and_window_limit_are_exact(self):
+        journal, entry, authority = self.prepare()
+        proof_path = pathlib.Path(authority['nativeProof']['path'])
+        original = json.loads(proof_path.read_bytes())
+        for change in ('hash', 'json-array', 'count', 'limit'):
+            proof = copy.deepcopy(original); row = proof['routines'][0]
+            if change == 'hash': row['nativeVisibleProjectionSha256'] = '0' * 64
+            if change == 'json-array':
+                row['nativeVisibleProjectionJson'] = '[]'
+                row['nativeVisibleProjectionSha256'] = self.tail.sha(b'[]')
+            if change == 'count': row['nativeVisibleRunCount'] += 1
+            if change == 'limit': row['nativeRunHistoryLimit'] = 21
+            self.tail.write(proof_path, proof); authority['nativeProof'] = self.tail.reference(proof_path)
+            self.pin_authority(journal, entry, authority)
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                R.authority_for(self.r, journal, entry, self.validator)
+
     def test_codec_helper_and_output_hashes_are_bound_to_the_captured_plan(self):
         original = self.materializer
         def wrong(folder, plan):

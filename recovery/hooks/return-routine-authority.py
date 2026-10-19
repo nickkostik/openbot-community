@@ -155,24 +155,28 @@ def runtime_history(actual,baseline,projection):
         return True
     def window(rows):
         return (isinstance(rows,list)and len(rows)<=20 and all(record(value)for value in rows)and
-                len({value['id']for value in rows})==len(rows)and
                 all(rows[i]['startedAt']>=rows[i+1]['startedAt']for i in range(len(rows)-1)))
     if not window(actual)or not window(projection):return False
-    prior={value['id']:value for value in projection};updates={};new=[]
+    prior={}
+    for index,value in enumerate(projection):prior.setdefault(value['id'],[]).append((index,value))
+    updates={};new=[];new_ids=set()
     head=max((value['startedAt']for value in projection),default=0)
     # A previously archived old ID cannot be invented as a fresh observation.
     archived={value.get('id')for value in baseline if isinstance(value,dict)}
     for value in actual:
-        old=prior.get(value['id'])
-        if old is None:
-            if value['id']in archived or value['startedAt']<head:return False
-            new.append(value);continue
-        if value!=old:
-            def stable(row):return {key:item for key,item in row.items()if key not in('status','finishedAt','detail','errorKind')}
-            if not(old['status']=='running'and value['status']in('ok','error')and stable(old)==stable(value)):
-                return False
-        updates[value['id']]=value
-    expected=new+[updates.get(value['id'],value)for value in projection]
+        candidates=prior.get(value['id'])
+        if candidates is None:
+            if value['id']in archived or value['id']in new_ids or value['startedAt']<head:return False
+            new_ids.add(value['id']);new.append(value);continue
+        def stable(row):return {key:item for key,item in row.items()if key not in('status','finishedAt','detail','errorKind')}
+        matched=None
+        for index,old in candidates:
+            if index in updates:continue
+            if value==old or(old['status']=='running'and value['status']in('ok','error')and stable(old)==stable(value)):
+                matched=index;break
+        if matched is None:return False
+        updates[matched]=value
+    expected=new+[updates.get(index,value)for index,value in enumerate(projection)]
     expected.sort(key=lambda value:value['startedAt'],reverse=True)
     return actual==expected[:20]
 

@@ -16,6 +16,7 @@ import pathlib
 import shutil
 import sqlite3
 import unittest
+import types
 from unittest import mock
 
 import test_remint_box_fleet as fleet
@@ -38,7 +39,13 @@ def cloud(values):
 
 class FreshReturnTests(unittest.TestCase):
     write = fleet.RemintTests.write
-    rpc = fleet.RemintTests.rpc
+    def rpc(self,method,body):
+        if method!='ListGrokBotTranscriptEntries':return fleet.RemintTests.rpc(self,method,body)
+        self.calls.append((method,copy.deepcopy(body)))
+        values=copy.deepcopy(self.server_transcripts.get(body['agentId'],[]))
+        if 'beforeSeq'in body:values=[row for row in values if int(row['seq'])<int(body['beforeSeq'])]
+        values=sorted(values,key=lambda row:int(row['seq']),reverse=True)[:body.get('limit',500)]
+        return {'generation':1,'entries':values}
     def gateway(self, method, body):
         if method != 'listAgents':
             return fleet.RemintTests.gateway(self, method, body)
@@ -83,8 +90,8 @@ class FreshReturnTests(unittest.TestCase):
         self.addCleanup(os.close, self.fd)
         self.rec = self.recovery()
         self.builder = H.FreshReturn(self.rec, self.fd, checkpoint=self.checkpoint, append=self.append,
-                                     activity=lambda ids: {'freshIdle': True, 'syntheticBoundary': True})
-        self.checkpoint_calls = []; self.append_calls = []
+                                     activity=self.activity)
+        self.checkpoint_calls = []; self.append_calls = []; self.activity_calls = []
         self.calls.clear(); self.gateway_calls.clear()
 
     def set_rows(self, folder, values):
@@ -102,6 +109,14 @@ class FreshReturnTests(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(folder / 'conversation-blobs.db')) as db:
             db.execute('CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,data BLOB)')
             db.execute('INSERT OR REPLACE INTO blobs VALUES(?,?)', (ROOT_SLOT, raw)); db.commit()
+
+    def activity(self, identities):
+        # Synthetic observation boundary; no native Watch or live status is
+        # claimed by this coordinator fixture, and admission remains unfenced.
+        self.activity_calls.append(list(identities))
+        return {'checkedSources': len(identities), 'scope': 'known-default-session', 'knownSessionId': '',
+                'observedNotRunning': True, 'admissionFenced': False, 'sampledAtMs': int(H.time.time() * 1000),
+                'sessionCounts': {aid: 0 for aid in identities}}
 
     def checkpoint(self, folder, plan):
         self.checkpoint_calls.append(copy.deepcopy(plan))
@@ -168,7 +183,7 @@ class FreshReturnTests(unittest.TestCase):
         self.builder.validator.validate(self.r, result, entry)
         state = json.loads((self.root / H.STATE).read_bytes())
         self.assertEqual(state['phase'], 'waiting-for-publication')
-        self.assertFalse(state['liveApplied']); self.assertFalse(state['nativeAppDeliveryVerified'])
+        self.assertTrue(state['authorityCommitted']); self.assertFalse(state['nativeAppDeliveryVerified'])
         self.assert_protected(before)
 
     def test_temporal_harness_drift_without_messages_still_uses_fresh_identity(self):
@@ -182,6 +197,95 @@ class FreshReturnTests(unittest.TestCase):
         self.assertEqual(result['previousGenerations'][-1], previous)
         self.assertEqual(len(self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')), 2)
         self.assert_protected(before)
+
+    def test_actual_temporal_current_source_keeps_advanced_local_checkpoint_and_cloud_tail(self):
+        self.roster[1]['harness'] = 'temporal'
+        self.live_listing = [{'id': fleet.NEW, 'harness': 'temporal', 'isRunning': False, 'isRunningTurn': False}]
+        self.server_transcripts[fleet.OLD] = cloud([self.first])
+        tail = message('current-temporal-cloud-tail', 3, fleet.NEW, 'new current Temporal branch literal')
+        self.server_transcripts[fleet.NEW] = cloud([{**self.first, 'agentId': fleet.NEW}, self.local, tail])
+        before = self.protected(); previous = self.r.read()
+        result = self.builder.run(); entry = result['entries'][0]
+        self.assertNotIn(entry['newId'], (fleet.OLD, fleet.NEW))
+        values = self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')
+        self.assertEqual([value['content'] for value in values],
+                         ['original literal', 'Local advanced checkpoint', 'new current Temporal branch literal'])
+        self.assertEqual(result['previousGenerations'][-1], previous)
+        self.assertTrue(self.activity_calls)
+        self.assertTrue(all(fleet.NEW in identities for identities in self.activity_calls))
+        inventory = json.loads(self.builder.validator.referenced(result['backup'], entry['returnRetainedSources']))
+        self.assertEqual(inventory['schema'], 'openbot-retained-return-sources/v1')
+        self.assertEqual(inventory['destinationId'], entry['newId'])
+        self.assertEqual(inventory['knownSessionId'], '')
+        self.assertFalse(inventory['admissionFenced']); self.assertFalse(inventory['futureMessagesMerged'])
+        self.assertEqual({row['agentId']: row['serverId'] for row in inventory['sources']}, {fleet.OLD: '123', fleet.NEW: '456'})
+        for source in inventory['sources']:
+            self.assertEqual(source['sessionId'], '')
+            self.builder.validator.referenced(result['backup'], source['platform'])
+            self.builder.validator.referenced(result['backup'], source['store'])
+            self.builder.validator.referenced(result['backup'], source['blobs'])
+        self.assert_protected(before)
+
+    def test_known_nondefault_viewer_or_routine_session_refuses_before_install(self):
+        for source in ('viewer', 'routine'):
+            with self.subTest(source=source):
+                if source == 'viewer':
+                    self.roster[0]['viewerSessionId'] = 'known-secondary-session'
+                else:
+                    self.roster[0].pop('viewerSessionId', None)
+                    self.cloud_routines[fleet.OLD] = [{'automationId': fleet.OTHER, 'recordJson': json.dumps(
+                        {'id': 'known-routine', 'sessionId': 'known-routine-session', 'isEnabled': False})}]
+                before = self.protected(); journal = self.r.read()
+                with self.assertRaisesRegex(RuntimeError, 'known nondefault'):
+                    self.builder.run()
+                self.assertEqual(self.r.read(), journal)
+                self.assertEqual(set(path.name for path in (self.root / 'agents').iterdir()), {fleet.OLD, fleet.NEW})
+                self.assert_protected(before)
+        self.assertEqual(self.checkpoint_calls, []); self.assertEqual(self.append_calls, [])
+
+    def test_coordinator_supported_official_return_registers_publishes_resumes_and_activates(self):
+        previous = self.r.read()
+        stores = {path: path.read_bytes() for source in (self.source, self.target)
+                  for path in source.iterdir() if path.name in ('store.db', 'conversation-blobs.db')}
+        original_load = dispatch.M.load
+        def factory(recovery, inherited_fd):
+            # Inject only native observation/codec boundaries. The complete
+            # capture, immutable planning, install and coordinator remain real.
+            builder = H.FreshReturn(recovery, inherited_fd, checkpoint=self.checkpoint,
+                                    append=self.append, activity=self.activity)
+            self.builder = builder
+            return builder
+        def load(name):
+            return types.SimpleNamespace(FreshReturn=factory) if name == 'official-return-handoff' else original_load(name)
+        def rpc(method, body):
+            if method == 'CreateGrokBotAgent':
+                self.created = fleet.row(body['agentId'], 'box', '789')
+            return self.rpc(method, body)
+        self.r.m.rpc = rpc; self.r.m.gateway = self.gateway
+        with mock.patch.object(dispatch.M, 'load', side_effect=load):
+            first = self.recovery().run()
+            self.assertEqual(first['phase'], 'waiting-for-publication')
+            journal = self.r.read(); entry = journal['entries'][0]; fresh = entry['newId']
+            self.assertEqual(entry['phase'], 'registered-box')
+            self.assertNotIn(fresh, (fleet.OLD, fleet.NEW))
+            self.assertEqual(journal['previousGenerations'][-1], previous)
+            destination = self.root / 'agents' / fresh
+            self.assertTrue(json.loads((destination / 'settings.json').read_bytes())['hiddenFromSidebar'])
+            self.server_transcripts[fresh] = cloud(self.builder.validator.db_entries(destination / 'store.db'))
+            marker = self.r.reload.read(self.root)
+            self.assertEqual(marker['requestId'], journal['publicationReloadRequestId'])
+            marker['phase'] = 'acknowledged'; self.r.reload.write(self.root, marker)
+            second = self.recovery().run()
+        self.assertEqual(second['phase'], 'bound-box')
+        self.assertEqual(self.r.read()['entries'][0]['newId'], fresh)
+        self.assertEqual(self.r.read()['entries'][0]['phase'], 'active')
+        self.assertEqual(sum(method == 'CreateGrokBotAgent' for method, _ in self.calls), 1)
+        self.assertEqual([value['content'] for value in self.builder.validator.db_entries(destination / 'store.db')],
+                         ['original literal', 'Local advanced checkpoint', 'Official literal\nkeep exactly'])
+        self.assertEqual(self.server_settings['pinnedAgents']['agentIds'], [fresh])
+        self.assertEqual(self.server_settings['mainAgentId'], fresh)
+        self.assertEqual({path: path.read_bytes() for path in stores}, stores)
+        self.assertFalse(second['nativeAppDeliveryVerified'])
 
     def test_crash_after_hidden_install_resumes_exact_immutable_intent(self):
         previous = self.r.read(); before = self.protected(); install = self.builder.install
@@ -364,6 +468,10 @@ class FreshReturnTests(unittest.TestCase):
         self.write(third / 'profile.json', profile)
         self.set_rows(third, [{**self.first, 'agentId': terminal}, {**self.local, 'agentId': terminal}])
         self.set_root(third, b'synthetic-third-current-checkpoint')
+        with contextlib.closing(sqlite3.connect(third / 'store.db')) as db:
+            row = db.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()
+            metadata = json.loads(bytes.fromhex(row[0])); metadata['agentId'] = terminal
+            db.execute("UPDATE kv SET value=? WHERE key='metadata'", (H.encoded(metadata).hex(),)); db.commit()
         self.roster.append(fleet.row(terminal, 'box', '789'))
         self.server_transcripts[terminal] = cloud([{**self.first, 'agentId': terminal}, {**self.local, 'agentId': terminal}])
         prior = self.r.read(); entry = prior['entries'][0]
@@ -599,13 +707,73 @@ class FreshReturnTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in native}, native)
         self.assertEqual(self.r.read(), authority); self.assert_protected(before)
 
+    def test_retained_default_scope_detects_same_id_middle_edit_and_deletion(self):
+        self.test_coordinator_supported_official_return_registers_publishes_resumes_and_activates()
+        journal=self.r.read();entry=journal['entries'][0]
+        inventory_path=pathlib.Path(entry['returnRetainedSources']['path']);inventory=inventory_path.read_bytes()
+        original=copy.deepcopy(self.server_transcripts[fleet.OLD])
+        stores={path:path.read_bytes()for root in(self.source,self.target,self.root/'agents'/entry['newId'])
+                for path in root.iterdir()if path.name in('store.db','conversation-blobs.db')}
+        for action in('edit','delete'):
+            with self.subTest(action=action):
+                values=copy.deepcopy(original)
+                if action=='edit':
+                    body=json.loads(base64.b64decode(values[0]['body']));body['content']='edited earlier literal'
+                    values[0]['body']=base64.b64encode(H.encoded(body)).decode()
+                else:values.pop(0)
+                self.server_transcripts[fleet.OLD]=values
+                # The last row/generation remain unchanged. A complete source
+                # comparison must still refuse the already-selected fast path.
+                self.builder.validator.source_freshness(self.r,journal,entry,{})
+                with self.assertRaisesRegex(fleet.M.ReturnHistoryRequired,'Retained source history changed'):
+                    self.r.reselect_active()
+                self.assertEqual(self.r.read(),journal)
+                self.assertEqual(inventory_path.read_bytes(),inventory)
+                self.assertEqual({path:path.read_bytes()for path in stores},stores)
+                self.assertEqual(json.loads((self.root/H.STATE).read_bytes())['reconciliation'],'changed')
+        self.server_transcripts[fleet.OLD]=original
+        self.assertEqual(H.retained_source_changes(self.r,journal),set())
+        self.assertEqual(json.loads((self.root/H.STATE).read_bytes())['reconciliation'],'current')
+
+    def test_retained_sdk_archive_change_cannot_hide_behind_same_root_and_ui_head(self):
+        self.test_coordinator_supported_official_return_registers_publishes_resumes_and_activates()
+        journal=self.r.read();entry=journal['entries'][0]
+        target=self.root/'agents'/entry['newId'];current={p:p.read_bytes()for p in target.rglob('*')if p.is_file()}
+        with contextlib.closing(sqlite3.connect(self.target/'conversation-blobs.db'))as db:
+            db.execute('INSERT INTO blobs(id,data)VALUES(?,?)',('retained-new-archive',b'inert new checkpoint archive'));db.commit()
+        self.builder.validator.source_freshness(self.r,journal,entry,{})
+        with self.assertRaisesRegex(fleet.M.ReturnHistoryRequired,'Retained source history changed'):
+            self.r.reselect_active()
+        self.assertEqual(self.r.return_source_changed_ids,{entry['newId']})
+        self.assertEqual({p:p.read_bytes()for p in current},current)
+        self.assertEqual(self.r.read(),journal)
+
+    def test_retained_inventory_tracks_accepted_incremental_cutoff_without_editing_original(self):
+        journal=self.builder.run();entry=journal['entries'][0];fresh=entry['newId']
+        rpc=self.r.m.rpc
+        def register_rpc(method,body):
+            if method=='CreateGrokBotAgent':self.created=fleet.row(body['agentId'],'box','789')
+            return rpc(method,body)
+        self.r.m.rpc=register_rpc;self.r.register(entry['oldId'])
+        inventory_path=pathlib.Path(entry['returnRetainedSources']['path']);before=inventory_path.read_bytes()
+        later=message('later-before-activation',4,fleet.OLD,'bounded late literal');later.pop('agentId')
+        self.server_transcripts[fleet.OLD]=cloud([self.first,self.late,later])
+        repair=self.builder.tail.TailRepair(self.recovery(),self.fd,codec=self.append)
+        repair.run()
+        updated=self.r.read();active=updated['entries'][0]
+        self.assertNotEqual(active['historyMergeReceipt'],entry['historyMergeReceipt'])
+        self.assertEqual(H.retained_source_changes(self.r,updated),set())
+        self.assertEqual(inventory_path.read_bytes(),before)
+        self.assertFalse(json.loads(before)['futureMessagesMerged'])
+        self.assertEqual(self.builder.validator.db_entries(self.root/'agents'/fresh/'store.db')[-1]['content'],later['content'])
+
     def test_live_local_running_or_unknown_manager_state_refuses_without_old_store_changes(self):
         idle = {'id': fleet.NEW, 'harness': 'box', 'isRunning': False, 'isRunningTurn': False}
         listings = [[], [dict(idle, isRunning=True)], [dict(idle, isRunningTurn=True)],
                     [{key: value for key, value in idle.items() if key != 'isRunning'}],
                     [{key: value for key, value in idle.items() if key != 'isRunningTurn'}],
                     [dict(idle, isRunning=0)], [dict(idle, isRunningTurn=None)],
-                    [dict(idle, harness='temporal')], [idle, idle]]
+                    [dict(idle, harness='unknown')], [idle, idle]]
         for listing in listings:
             with self.subTest(listing=listing):
                 self.live_listing = listing

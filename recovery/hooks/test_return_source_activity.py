@@ -18,9 +18,14 @@ TWO = '00000000-0000-4000-8000-000000000002'
 NOW = 1000
 
 
-def live(aid=ONE, session='main', **values):
+def live(aid=ONE, session='', **values):
     return {'agentId': aid, 'sessionId': session, 'updatedAtMs': str(NOW - 100),
             'staleAfterMs': '30000', **values}
+
+
+def observation(counts):
+    return {'checkedSources': len(counts), 'scope': 'known-default-session', 'knownSessionId': '',
+            'observedNotRunning': True, 'admissionFenced': False, 'sampledAtMs': NOW, 'sessionCounts': counts}
 
 
 def snapshot(*rows, **values):
@@ -33,65 +38,110 @@ def frame(value, flags=0):
 
 
 class IdleSnapshotTests(unittest.TestCase):
-    def test_present_typed_rows_use_native_false_defaults_and_count_every_session(self):
-        value = snapshot(live(), live(session='routine'), live(TWO, isRunning=False,
+    def test_present_typed_default_rows_use_native_false_defaults(self):
+        value = snapshot(live(), live(TWO, isRunning=False,
             isComposingMessage=False, isRetrying=False, hasRunningSubagents=False))
-        self.assertEqual(A.idle_snapshot(value, {ONE, TWO}, NOW), {ONE: 2, TWO: 1})
+        self.assertEqual(A.default_snapshot(value, {ONE, TWO}, NOW), {ONE: 1, TWO: 1})
+
+    def test_any_known_nondefault_session_refuses_even_if_observed_not_running(self):
+        with self.assertRaises(A.ActivityUnverified):
+            A.default_snapshot(snapshot(live(), live(session='routine')), {ONE}, NOW)
 
     def test_non_snapshot_messages_do_not_assert_idle(self):
         for value in ({}, None, {'agentState': {}}, {'agentState': {'snapshot': False}},
                       {'agentState': {'snapshot': 1}}):
             with self.subTest(value=value):
-                self.assertIsNone(A.idle_snapshot(value, {ONE}, NOW))
+                self.assertIsNone(A.default_snapshot(value, {ONE}, NOW))
 
-    def test_snapshot_without_requested_live_row_refuses(self):
-        for value in (snapshot(), snapshot(live(TWO)), snapshot(live(), live())):
-            with self.subTest(value=value), self.assertRaises(A.ActivityUnverified):
-                A.idle_snapshot(value, {ONE}, NOW)
+    def test_absent_watch_overlay_only_reports_zero_for_status_companion_to_check(self):
+        self.assertEqual(A.default_snapshot(snapshot(), {ONE}, NOW), {ONE: 0})
+        self.assertEqual(A.default_snapshot(snapshot(live(TWO)), {ONE}, NOW), {ONE: 0})
         with self.assertRaises(A.ActivityUnverified):
-            A.idle_snapshot(snapshot(live()), {ONE, TWO}, NOW)
+            A.default_snapshot(snapshot(live(), live()), {ONE}, NOW)
+        self.assertEqual(A.default_snapshot(snapshot(live()), {ONE, TWO}, NOW), {ONE: 1, TWO: 0})
 
     def test_malformed_live_rows_or_unknown_sessions_refuse(self):
         for value in (snapshot(live(), live=None), snapshot(None), snapshot(live(session=1)),
                       snapshot(live(session='line\nbreak')), snapshot(live(session='x' * 1025))):
             with self.subTest(value=value), self.assertRaises(A.ActivityUnverified):
-                A.idle_snapshot(value, {ONE}, NOW)
+                A.default_snapshot(value, {ONE}, NOW)
 
     def test_missing_and_non_integer_timestamps_refuse(self):
         for key in ('updatedAtMs', 'staleAfterMs'):
             for bad in (None, True, 1.5, '1.5', '-1', '١', {}, ''):
                 value = live(); value[key] = bad
                 with self.subTest(key=key, bad=bad), self.assertRaises(A.ActivityUnverified):
-                    A.idle_snapshot(snapshot(value), {ONE}, NOW)
-            value = live(); value.pop(key)
-            with self.subTest(missing=key), self.assertRaises(A.ActivityUnverified):
-                A.idle_snapshot(snapshot(value), {ONE}, NOW)
+                    A.default_snapshot(snapshot(value), {ONE}, NOW)
+            if key == 'updatedAtMs':
+                value = live(); value.pop(key)
+                with self.subTest(missing=key), self.assertRaises(A.ActivityUnverified):
+                    A.default_snapshot(snapshot(value), {ONE}, NOW)
 
     def test_stale_future_or_unbounded_freshness_refuses(self):
         # Use cases invalid under either duration or absolute expiry semantics;
         # the native staleAfterMs interpretation is verified separately.
         for values in ({'updatedAtMs': '0', 'staleAfterMs': str(NOW)},
-                       {'updatedAtMs': str(NOW + 1)}, {'staleAfterMs': '0'},
+                       {'updatedAtMs': str(NOW + 1)},
                        {'staleAfterMs': str(2 ** 64)}):
             with self.subTest(values=values), self.assertRaises(A.ActivityUnverified):
-                A.idle_snapshot(snapshot(live(**values)), {ONE}, NOW)
+                A.default_snapshot(snapshot(live(**values)), {ONE}, NOW)
+
+    def test_present_live_row_uses_confirmed_native_default_stale_duration(self):
+        for value in ({key: item for key, item in live().items() if key != 'staleAfterMs'},
+                      live(staleAfterMs=0), live(staleAfterMs='0')):
+            with self.subTest(value=value):
+                self.assertEqual(A.default_snapshot(snapshot(value), {ONE}, NOW), {ONE: 1})
+                self.assertEqual(A.default_snapshot(snapshot(value), {ONE}, NOW + 89899), {ONE: 1})
+                with self.assertRaises(A.ActivityUnverified):
+                    A.default_snapshot(snapshot(value), {ONE}, NOW + 89900)
 
     def test_running_retrying_composing_or_subagents_refuse(self):
         for key in ('isRunning', 'isComposingMessage', 'isRetrying', 'hasRunningSubagents'):
             for value in (True, None, 0, 'false'):
                 with self.subTest(key=key, value=value), self.assertRaises(A.ActivityUnverified):
-                    A.idle_snapshot(snapshot(live(**{key: value})), {ONE}, NOW)
+                    A.default_snapshot(snapshot(live(**{key: value})), {ONE}, NOW)
 
     def test_pending_activity_or_handoff_never_counts_as_idle(self):
         for key in ('activity', 'awaiting', 'boxHandoffRequestId', 'boxHandoffInstruction',
                     'activeGroupMemberId', 'surfaceTaskId'):
             with self.subTest(key=key), self.assertRaises(A.ActivityUnverified):
-                A.idle_snapshot(snapshot(live(**{key: 'pending'})), {ONE}, NOW)
-        self.assertEqual(A.idle_snapshot(snapshot(live(activity='', awaiting=None)), {ONE}, NOW), {ONE: 1})
+                A.default_snapshot(snapshot(live(**{key: 'pending'})), {ONE}, NOW)
+        for key in ('activity', 'awaiting'):
+            for value in ('', None, {}):
+                with self.subTest(key=key, value=value), self.assertRaises(A.ActivityUnverified):
+                    A.default_snapshot(snapshot(live(**{key: value})), {ONE}, NOW)
+        self.assertEqual(A.default_snapshot(snapshot(live(boxHandoffRequestId='')), {ONE}, NOW), {ONE: 1})
 
     def test_unrequested_agents_do_not_supply_or_replace_requested_evidence(self):
         unrelated = {'agentId': TWO, 'isRunning': True}
-        self.assertEqual(A.idle_snapshot(snapshot(unrelated, live()), {ONE}, NOW), {ONE: 1})
+        self.assertEqual(A.default_snapshot(snapshot(unrelated, live()), {ONE}, NOW), {ONE: 1})
+
+
+class StatusSampleTests(unittest.TestCase):
+    def test_present_typed_status_uses_proto_false_default_without_claiming_a_fence(self):
+        for row in ({'agentId': ONE}, {'agentId': ONE, 'isRunning': False},
+                    {'agentId': ONE, 'isRunning': False, 'live': live()}):
+            with self.subTest(row=row):
+                self.assertIsNone(A.status_sample({'statuses': [row]}, {ONE}, NOW))
+
+    def test_missing_duplicate_or_wrong_status_identity_refuses(self):
+        for value in ({}, {'statuses': []}, {'statuses': None}, {'statuses': [None]},
+                      {'statuses': [{'agentId': TWO}]}, {'statuses': [{'agentId': ONE}, {'agentId': ONE}]}):
+            with self.subTest(value=value), self.assertRaises(A.ActivityUnverified):
+                A.status_sample(value, {ONE}, NOW)
+
+    def test_running_or_malformed_proto_bool_refuses(self):
+        for value in (True, None, 0, 'false'):
+            with self.subTest(value=value), self.assertRaises(A.ActivityUnverified):
+                A.status_sample({'statuses': [{'agentId': ONE, 'isRunning': value}]}, {ONE}, NOW)
+
+    def test_present_live_container_requires_same_owner_fresh_default_and_no_pending_fields(self):
+        for value in ({}, None, live(TWO), live(session='routine'), live(isRunning=True),
+                      live(updatedAtMs=str(NOW - 30000)), live(activity={}), live(awaiting={}),
+                      live(boxHandoffRequestId='pending'), live(activeGroupMemberId='pending')):
+            with self.subTest(value=value), self.assertRaises(A.ActivityUnverified):
+                A.status_sample({'statuses': [{'agentId': ONE, 'live': value}]}, {ONE}, NOW)
+
 
 
 class ChunkedStream:
@@ -115,7 +165,8 @@ class ChunkedStream:
 class WatchReaderTests(unittest.TestCase):
     def recovery(self, opener):
         return types.SimpleNamespace(require=mock.Mock(), r=types.SimpleNamespace(m=types.SimpleNamespace(
-            H={'authorization': 'opaque-fixture-session'}, routing=types.SimpleNamespace(open_no_redirect=opener))))
+            H={'authorization': 'opaque-fixture-session'}, routing=types.SimpleNamespace(open_no_redirect=opener),
+            rpc=mock.Mock(side_effect=lambda method, body: {'statuses': [{'agentId': aid} for aid in body['agentIds']]}))))
 
     def check(self, data, ids=None, chunk=7, **kwargs):
         self.stream = ChunkedStream(data, chunk)
@@ -126,7 +177,8 @@ class WatchReaderTests(unittest.TestCase):
     def test_partial_reads_skip_non_snapshot_and_return_only_activity_metadata(self):
         data = frame({'entries': [{'body': 'opaque discarded transcript body'}]}) + frame(snapshot(live()))
         result = self.check(data, chunk=1)
-        self.assertEqual(result, {'checkedSources': 1, 'freshIdle': True, 'sessionCounts': {ONE: 1}})
+        self.assertEqual(result, observation({ONE: 1}))
+        self.assertEqual(self.rec.r.m.rpc.call_args_list, [mock.call('ListGrokBotAgentStatuses', {'agentIds': [ONE]})] * 2)
         self.assertTrue(self.stream.closed)
         self.assertGreater(self.rec.require.call_count, 4)
         request = self.opener.call_args.args[0]
@@ -140,16 +192,36 @@ class WatchReaderTests(unittest.TestCase):
         self.assertEqual(headers['content-type'], 'application/connect+json')
         self.assertEqual(headers['connect-timeout-ms'], '10000')
 
+    def test_absent_watch_rows_need_present_typed_status_before_and_after(self):
+        self.assertEqual(self.check(frame(snapshot())), observation({ONE: 0}))
+        self.assertEqual(self.rec.r.m.rpc.call_args_list, [mock.call('ListGrokBotAgentStatuses', {'agentIds': [ONE]})] * 2)
+        for before, after in (({'statuses': []}, {'statuses': [{'agentId': ONE}]}),
+                              ({'statuses': [{'agentId': ONE}]}, {'statuses': []}),
+                              ({'statuses': [{'agentId': ONE}]}, {'statuses': [{'agentId': ONE, 'isRunning': True}]})):
+            stream = ChunkedStream(frame(snapshot())); opener = mock.Mock(return_value=stream)
+            rec = self.recovery(opener); rec.r.m.rpc.side_effect = [before, after]
+            with self.subTest(before=before, after=after), self.assertRaises(A.ActivityUnverified):
+                A.check(rec, {ONE}, now=NOW)
+            if not before['statuses']:
+                opener.assert_not_called()
+            else:
+                self.assertEqual(rec.r.m.rpc.call_count, 2)
+
+    def test_busy_or_nondefault_watch_row_cannot_be_overridden_by_default_status(self):
+        for row in (live(isRunning=True), live(session='routine'), live(activity={}), live(awaiting={})):
+            with self.subTest(row=row), self.assertRaises(A.ActivityUnverified):
+                self.check(frame(snapshot(row)))
+
     def test_explicit_opener_is_used_instead_of_configured_transport(self):
         configured = mock.Mock(side_effect=AssertionError('must use supplied test boundary'))
         rec = self.recovery(configured); stream = ChunkedStream(frame(snapshot(live())))
         opener = mock.Mock(return_value=stream)
-        self.assertTrue(A.check(rec, {ONE}, opener=opener, now=NOW)['freshIdle'])
+        self.assertTrue(A.check(rec, {ONE}, opener=opener, now=NOW)['observedNotRunning'])
         configured.assert_not_called(); opener.assert_called_once()
 
     def test_absent_sources_need_no_adapter_or_network(self):
         rec = types.SimpleNamespace(require=mock.Mock())
-        self.assertEqual(A.check(rec, []), {'checkedSources': 0, 'freshIdle': True})
+        self.assertEqual(A.check(rec, [], now=NOW), observation({}))
         rec.require.assert_not_called()
 
     def test_authenticated_adapter_is_required_without_opening_stream(self):

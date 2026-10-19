@@ -1,8 +1,8 @@
-"""Capture an Official return for a future reviewed fresh-generation builder.
+"""Build a bounded fresh Local generation from retained default-session sources.
 
-This is evidence collection, never an executable merge or admission fence.
-Only the dispatch coordinator calls it while holding its single-writer lock.
-No active agent, journal, preference or visibility is changed.
+Only the Custom coordinator writes new hidden candidates under its dispatch
+lock. Native current checkpoints remain byte-exact; literal history is appended
+offline. Samples and complete double captures are not an admission fence.
 """
 import base64
 import contextlib
@@ -50,6 +50,8 @@ class Capture:
     def __init__(self, recovery):
         self.recovery, self.r, self.root = recovery, recovery.r, recovery.root
         self.total = 0
+        self.requests = 0
+        self.started = time.monotonic()
 
     def require(self):
         self.recovery.require()
@@ -132,6 +134,9 @@ class Capture:
         entries, before, generation = {}, None, None
         for _ in range(MAX_RECORDS // 500 + 1):
             self.require()
+            self.requests+=1
+            if self.requests>256 or time.monotonic()-self.started>180:
+                raise RuntimeError('Return complete source capture request or time bound exceeded')
             body = {'agentId': aid, 'limit': 500}
             if before is not None: body['beforeSeq'] = str(before)
             if generation is not None: body['generation'] = generation
@@ -205,7 +210,6 @@ class FreshReturn(Capture):
 
     def run_routines(self,folder,plan):
         host=self.reviewed_host()
-        self.tail.write(folder/'routine-plan.json',plan,True)
         command=['/exec-daemon/node','--max-old-space-size=768',str(pathlib.Path(__file__).with_name('return-routine-codec.mjs')),
                  '--host',str(host),'--candidate-dir',str(folder),'--plan-file',str(folder/'routine-plan.json')]
         result=subprocess.run(command,capture_output=True,timeout=90)
@@ -232,18 +236,38 @@ class FreshReturn(Capture):
         self.recovery.status('preparing-return' if phase=='preparing' else 'waiting-for-publication' if phase=='waiting-for-publication' else 'review-needed',
                              returnHandoffState=phase, returnPreparedAgents=self.state.get('preparedAgents', 0),
                              returnExpectedAgents=self.state.get('expectedAgents', 0),
-                             returnReason=self.state.get('reason', 'none'))
+                             returnReason=self.state.get('reason','none'),returnSessionScope='known-default-session',
+                             returnAdmissionFenced=False,returnFutureMessagesMerged=False,
+                             returnRetainedSources=self.state.get('retainedSources',0),
+                             returnReconciliation=self.state.get('reconciliation','pending'),
+                             returnSourceCheckedAtMs=self.state.get('reconciliationCheckedAtMs',0))
+
+    def observe(self,identities):
+        identities=sorted(set(identities));counts={};sampled=0
+        for offset in range(0,max(1,len(identities)),32):
+            batch=identities[offset:offset+32];proof=self.activity(batch)
+            if (not isinstance(proof,dict)or proof.get('scope')!='known-default-session'or
+                    proof.get('knownSessionId')!=''or proof.get('observedNotRunning')is not True or
+                    proof.get('admissionFenced')is not False or proof.get('checkedSources')!=len(batch)or
+                    type(proof.get('sampledAtMs'))is not int or not 0<=int(time.time()*1000)-proof['sampledAtMs']<120000 or
+                    not isinstance(proof.get('sessionCounts'),dict)or set(proof['sessionCounts'])!=set(batch)or
+                    any(type(value)is not int or value not in(0,1)for value in proof['sessionCounts'].values())):
+                raise RuntimeError('Return known-session observation proof differs')
+            counts.update(proof['sessionCounts']);sampled=max(sampled,proof['sampledAtMs'])
+        return {'scope':'known-default-session','knownSessionId':'','observedNotRunning':True,
+                'admissionFenced':False,'sampledAtMs':sampled,'checkedSources':len(identities),'sessionCounts':counts}
 
     def local_idle(self, identities):
-        # This is the native manager's live overlay, not the disk SessionStore
-        # defaults and not a claim that the host takes our dispatch flock.
+        # The manager's live overlay samples LOCAL work even when an owned
+        # current identity drifted to Temporal. Separate owner API observations
+        # are mandatory for its known cloud default branch.
         result=self.r.m.gateway('listAgents',{})
-        rows=result if isinstance(result,list) else result.get('agents')
-        if not isinstance(rows,list): raise RuntimeError('Return native running-state schema is unknown')
+        rows=result if isinstance(result,list)else result.get('agents')
+        if not isinstance(rows,list):raise RuntimeError('Return native running-state schema is unknown')
         for aid in identities:
-            found=[row for row in rows if isinstance(row,dict) and row.get('id')==aid]
-            if (len(found)!=1 or found[0].get('harness')!='box' or
-                    found[0].get('isRunning') is not False or found[0].get('isRunningTurn') is not False):
+            found=[row for row in rows if isinstance(row,dict)and row.get('id')==aid]
+            if (len(found)!=1 or found[0].get('harness')not in('box','temporal')or
+                    found[0].get('isRunning')is not False or found[0].get('isRunningTurn')is not False):
                 raise RuntimeError('Return current Local turn is running or its live state is unknown')
 
     def capture(self, journal, entry, folder, members, indexed):
@@ -265,6 +289,8 @@ class FreshReturn(Capture):
             if (row.get('viewerIsOwner') is not True or row.get('legacyAgentId') != aid or
                     str(row.get('id'))!=bindings.get(aid) or row.get('harness') not in ('box','temporal')):
                 raise RuntimeError('Return lineage ownership changed')
+            if row.get('viewerSessionId','')!='':
+                raise RuntimeError('Return source has a known nondefault viewer session')
             profile = json.loads(self.tail.owned(local/'profile.json'))
             if str(profile.get('serverId')) != str(row['id']):
                 raise RuntimeError('Return lineage native/server binding changed')
@@ -277,10 +303,15 @@ class FreshReturn(Capture):
             transcript = self.cloud(aid)
             cloud_path = folder/'cloud'/(aid+'.json'); self.put(cloud_path, encoded(transcript))
             routines = self.r.m.rpc('ListGrokBotAgentAutomations', {'agentId': aid})
+            for wrapper in self.recovery.module.helper('return-routine-authority').cloud_response(routines):
+                record=json.loads(wrapper['recordJson'])
+                if record.get('sessionId','')!='':
+                    raise RuntimeError('Return source routine has a known nondefault session')
             self.put(folder/'routines'/(aid+'.json'), encoded(routines))
             store = folder/'sources'/aid/'store.db'; blobs = folder/'sources'/aid/'conversation-blobs.db'
             with self.tail.db(store, True) as db:
                 metadata = json.loads(bytes.fromhex(db.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()[0]))
+            if metadata.get('agentId')!=aid:raise RuntimeError('Return source SDK owner binding changed')
             slot = metadata.get('latestRootBlobId')
             if not blobs.exists():
                 if slot is not None: raise RuntimeError('Return source SDK graph is missing')
@@ -432,6 +463,8 @@ class FreshReturn(Capture):
                     raise RuntimeError('Return unknown native queue requires review')
 
     def prepare(self, journal, entry, folder, members, indexed, new_id):
+        cloud_sources=sorted(members)
+        before_activity=self.observe(cloud_sources)
         self.local_idle([entry['newId']])
         sources,guards=self.capture(journal,entry,folder,members,indexed)
         self.local_idle([entry['newId']])
@@ -439,12 +472,11 @@ class FreshReturn(Capture):
         merged=self.union(entry,folder,sources,mapping)
         if not merged['records'] and indexed[entry['newId']].get('harness')=='box': return None
         if str(entry['kind']).endswith('ROOM'): raise RuntimeError('Return rooms require a typed membership checkpoint')
-        cloud_sources={aid for aid in merged['deltaSources'] if indexed[aid].get('harness')=='temporal'}
-        if indexed[entry['newId']].get('harness')=='temporal': cloud_sources.add(entry['newId'])
-        self.activity(sorted(cloud_sources))
+        after_activity=self.observe(cloud_sources)
+        self.put(folder/'known-session-observations.json',encoded({'before':before_activity,'after':after_activity}))
         routine_ref,routine_states=self.recovery.module.helper('return-routine-builder').prepare(self,entry,folder,indexed)
         terminal=entry['newId']; selected=entry.get('selectionSourceId',entry['oldId'])
-        self.settled_store(folder/'sources'/terminal/'store.db')
+        for source_id in members:self.settled_store(folder/'sources'/source_id/'store.db')
         current_profile=json.loads(self.tail.owned(folder/'sources'/terminal/'profile.json'))
         official_profile=json.loads(self.tail.owned(folder/'sources'/selected/'profile.json'))
         role=lambda profile:{k:v for k,v in profile.items() if k not in ('id','agentId','legacyAgentId','serverId','harness')}
@@ -509,6 +541,18 @@ class FreshReturn(Capture):
                  **{key:merged[key]for key in ('sources','projections','sourceOrders','orderResolutions')},
                  'sdkProof':self.tail.reference(folder/'sdk-proof.json')}
         self.tail.write(folder/'receipt.json',receipt,True)
+        retained=[]
+        for source in sources:
+            if source['kind']!='platform':continue
+            aid=source['agentId'];local=next(value for value in sources if value['agentId']==aid and value['kind']=='sqlite')
+            retained.append({'agentId':aid,'serverId':str(indexed[aid]['id']),'sessionId':'',
+                             'platform':{key:source[key]for key in('path','sha256')},'generation':source['generation'],
+                             'store':{key:local[key]for key in('path','sha256')},'blobs':local['blobSnapshot'],
+                             'sdkRootSha256':local['sdkRootSha256']})
+        self.tail.write(folder/'retained-sources.json',{'schema':'openbot-retained-return-sources/v1',
+                        'requestId':self.state['requestId'],'destinationId':new_id,'scope':'known-default-session',
+                        'knownSessionId':'','admissionFenced':False,'futureMessagesMerged':False,
+                        'recordedAtMs':int(time.time()*1000),'sources':retained},True)
         states={}
         for path in (folder/'sources'/terminal/'automations').rglob('automation.json'):
             value=json.loads(self.tail.owned(path));relative=str(path.relative_to(folder/'sources'/terminal))
@@ -522,12 +566,13 @@ class FreshReturn(Capture):
                 'historyMergeReceipt':self.tail.reference(folder/'receipt.json'),
                 'returnRoutineAuthority':routine_ref,'activationAutomationStates':routine_states,
                 'returnCurrentCheckpoint':self.tail.reference(folder/'current-checkpoint-plan.json'),
+                'returnRetainedSources':self.tail.reference(folder/'retained-sources.json'),
                 'returnFolder':str(folder),'returnSourceGuards':guards,'returnRoute':route,'returnCloudActivitySources':sorted(cloud_sources),
                 **({'registrationStrategy':entry['registrationStrategy']}if 'registrationStrategy'in entry else {})}
 
     def fresh(self, journal, prepared, indexed, folder):
         self.local_idle([entry['oldId']for entry in prepared])
-        self.activity(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
+        self.observe(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
         if self.r.read()!=journal or {row['agentId']:row for row in self.r.rows()}!=indexed:
             raise RuntimeError('Return authority changed during staging')
         for entry in prepared:
@@ -604,6 +649,7 @@ class FreshReturn(Capture):
 
     def needed(self,entry,members,indexed,folder):
         terminal=entry['newId']
+        if terminal in getattr(self.r,'return_source_changed_ids',set()):return True
         if indexed.get(terminal,{}).get('harness')=='temporal': return True
         mapping={aid:terminal for aid in members}
         path=folder/'preview'/terminal/'store.db'
@@ -637,7 +683,9 @@ class FreshReturn(Capture):
         destinations=old.get('destinations',{})if same else {e['newId']:str(uuid.uuid4())for e in journal['entries']}
         self.state={'schema':SCHEMA,'jobId':job,'requestId':request,'journalSha256':sha(encoded(journal)),
                     'destinations':destinations,'expectedAgents':len(journal['entries']),'preparedAgents':0,
-                    'liveApplied':False,'nativeAppDeliveryVerified':False,'reason':'none'}
+                    'authorityCommitted':False,'nativeAppDeliveryVerified':False,'reason':'none',
+                    'sessionScope':'known-default-session','admissionFenced':False,'futureMessagesMerged':False,
+                    'reconciliation':'pending','retainedSources':0}
         if same and old.get('preparedIntent'):
             try: return self.resume_prepared(journal,old)
             except Exception:
@@ -674,6 +722,8 @@ class FreshReturn(Capture):
                 self.status('preparing',preparedAgents=len(prepared))
             if not prepared: raise RuntimeError('Return request has no supported fresh history delta')
             self.fresh(journal,prepared,indexed,attempt)
+            self.state.update(retainedSources=sum(len(entry['returnSourceGuards'])for entry in prepared),
+                              reconciliation='current',reconciliationCheckedAtMs=int(time.time()*1000))
             if self.r.m.rpc('GetGrokBotUserRuntimeSettings',{})!=settings:
                 raise RuntimeError('Return preferences changed during staging')
             if (self.tail.owned(self.root/'openbot-bot-models.json')if(self.root/'openbot-bot-models.json').exists()else None)!=models:
@@ -698,9 +748,9 @@ class FreshReturn(Capture):
                 self.validator.validate(self.r,next_journal,entry,entry['historyMergeReceipt'])
                 self.recovery.module.helper('return-routine-authority').authority_for(self.r,next_journal,entry,self.validator)
             self.require();self.local_idle([entry['oldId']for entry in prepared])
-            self.activity(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
+            self.observe(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
             if self.r.read()!=journal: raise RuntimeError('Return journal changed before authority commit')
-            self.r.save(next_journal)
+            self.r.save(next_journal);self.state['authorityCommitted']=True
             self.finish_models(next_journal)
             self.status('waiting-for-publication',preparedAgents=len(prepared))
             return next_journal
@@ -723,8 +773,89 @@ class FreshReturn(Capture):
             self.validator.validate(self.r,proposed,entry,entry['historyMergeReceipt'])
             self.recovery.module.helper('return-routine-authority').authority_for(self.r,proposed,entry,self.validator)
         self.require();self.local_idle([entry['oldId']for entry in prepared])
-        self.activity(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
+        self.observe(sorted({aid for entry in prepared for aid in entry.get('returnCloudActivitySources',[])}))
         if self.r.read()!=journal: raise RuntimeError('Return journal changed before resumed commit')
-        self.r.save(proposed);self.finish_models(proposed)
+        self.r.save(proposed);self.state['authorityCommitted']=True;self.finish_models(proposed)
         self.status('waiting-for-publication',preparedAgents=len(prepared))
         return proposed
+
+
+def retained_source_changes(r,journal):
+    """Compare complete captured default branches; retain every original owner.
+
+    This reads originals, never restores old roots into an active destination.
+    A later edit/deletion/checkpoint change is a new reconciliation obligation,
+    not evidence that messages after the previous snapshots were merged.
+    """
+    from types import SimpleNamespace
+    references=[entry for entry in journal['entries']if entry.get('returnRetainedSources')]
+    if not references:return set()
+    # Reuse the same owned immutable evidence policy as canonical receipts.
+    import importlib.util
+    def helper(name):
+        spec=importlib.util.spec_from_file_location('return_monitor_'+name.replace('-','_'),pathlib.Path(__file__).with_name(name+'.py'))
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+    validator=helper('history-merge-receipt');tail=helper('history-tail-repair')
+    capture=Capture(SimpleNamespace(r=r,root=r.m.SD,require=r.require_local_mode))
+    indexed={row['agentId']:row for row in r.rows()};changed=set();retained=set()
+    with tempfile.TemporaryDirectory(prefix='return-source-check-',dir=journal['backup'])as temporary:
+        temporary=pathlib.Path(temporary);temporary.chmod(0o700)
+        for entry in references:
+            validator.validate(r,journal,entry,_check_live=False)
+            effective=json.loads(validator.referenced(journal['backup'],entry['historyMergeReceipt']))
+            effective_sources={(value['agentId'],value['kind']):value for value in effective['sources']}
+            inventory=json.loads(validator.referenced(journal['backup'],entry['returnRetainedSources']))
+            if (inventory.get('schema')!='openbot-retained-return-sources/v1'or inventory.get('destinationId')!=entry['newId']or
+                    inventory.get('scope')!='known-default-session'or inventory.get('knownSessionId')!=''or
+                    inventory.get('admissionFenced')is not False or inventory.get('futureMessagesMerged')is not False or
+                    not isinstance(inventory.get('sources'),list)or not 0<len(inventory['sources'])<=MAX_SOURCES):
+                raise RuntimeError('Retained source scope or inventory proof differs')
+            if {value['agentId']for value in inventory['sources']}!={value['agentId']for value in effective['sources']}:
+                raise RuntimeError('Retained source inventory differs from the effective receipt')
+            seen=set()
+            for source in inventory['sources']:
+                aid=source['agentId'];row=indexed.get(aid)
+                if aid in seen or source.get('sessionId')!='':raise RuntimeError('Retained source session scope differs')
+                seen.add(aid);retained.add(aid)
+                if (row is None or row.get('viewerIsOwner')is not True or row.get('legacyAgentId')!=aid or
+                        str(row.get('id'))!=source['serverId']or row.get('harness')not in('box','temporal')or
+                        row.get('viewerSessionId','')!=''):
+                    raise RuntimeError('Retained source owner or known-session binding changed')
+                # Preserve the original inventory forever, while an accepted
+                # immutable incremental receipt can advance a captured cutoff.
+                validator.referenced(journal['backup'],source['platform'])
+                validator.referenced(journal['backup'],source['store']);validator.referenced(journal['backup'],source['blobs'])
+                platform=effective_sources[(aid,'platform')];native=effective_sources[(aid,'sqlite')]
+                expected_cloud=json.loads(validator.referenced(journal['backup'],{key:platform[key]for key in('path','sha256')}))
+                expected_store={key:native[key]for key in('path','sha256')};validator.referenced(journal['backup'],expected_store)
+                expected_blobs=native['blobSnapshot'];validator.referenced(journal['backup'],expected_blobs)
+                local=r.m.SD/'agents'/aid
+                profile=json.loads(validator.checked(r.m.SD,local/'profile.json'))
+                if str(profile.get('serverId'))!=source['serverId']:
+                    raise RuntimeError('Retained source native owner binding changed')
+                if capture.cloud(aid)!=expected_cloud:changed.add(entry['newId'])
+                live_store=temporary/(aid+'-store.db')
+                if live_store.exists():live_store=temporary/(aid+'-'+uuid.uuid4().hex+'-store.db')
+                capture.database(local/'store.db',live_store)
+                if validator.db_entries(live_store)!=validator.db_entries(expected_store['path']):changed.add(entry['newId'])
+                native_blobs=local/'conversation-blobs.db'
+                actual_graph={}
+                if native_blobs.exists()or native_blobs.is_symlink():
+                    live_blobs=temporary/(aid+'-'+uuid.uuid4().hex+'-blobs.db')
+                    capture.database(native_blobs,live_blobs);actual_graph=tail.graph(live_blobs)
+                if actual_graph!=tail.graph(pathlib.Path(expected_blobs['path'])):changed.add(entry['newId'])
+                with tail.db(live_store,True)as db:
+                    row=db.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()
+                if not row:raise RuntimeError('Retained source SDK metadata is missing')
+                metadata=json.loads(bytes.fromhex(row[0]));slot=metadata.get('latestRootBlobId')
+                if metadata.get('agentId')!=aid:raise RuntimeError('Retained source SDK owner changed')
+                if (actual_graph.get(slot)if slot is not None else None)!=native['sdkRootSha256']:
+                    changed.add(entry['newId'])
+    state_path=r.m.SD/STATE
+    if state_path.exists():
+        raw=tail.owned(state_path);state=json.loads(raw)
+        if state.get('schema')==SCHEMA:
+            state.update(reconciliation='changed'if changed else'current',retainedSources=len(retained),
+                         reconciliationCheckedAtMs=int(time.time()*1000))
+            r.m.atomic_bytes(state_path,r.m.json_bytes(state),expected=raw,pre_commit=r.require_local_mode)
+    return changed

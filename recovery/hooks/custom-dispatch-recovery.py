@@ -243,7 +243,14 @@ def snapshot(root):
             if phase in ('preparing', 'waiting-for-publication', 'review-needed'):
                 progress.update(returnHandoffState=phase, returnPreparedAgents=handoff.get('preparedAgents', 0),
                                 returnExpectedAgents=handoff.get('expectedAgents', 0), returnReason=handoff.get('reason', 'none'))
-                if phase == 'waiting-for-publication' and progress.get('phase') == 'bound-box' and progress['publicationVerified'] and progress['rosterComplete']:
+                if handoff.get('sessionScope')=='known-default-session' and handoff.get('admissionFenced')is False and handoff.get('futureMessagesMerged')is False:
+                    progress.update(returnSessionScope='known-default-session',returnAdmissionFenced=False,
+                                    returnFutureMessagesMerged=False,returnRetainedSources=handoff.get('retainedSources',0),
+                                    returnReconciliation=handoff.get('reconciliation','pending'),
+                                    returnSourceCheckedAtMs=handoff.get('reconciliationCheckedAtMs',0))
+                if handoff.get('reconciliation')=='changed':
+                    progress.update(phase='review-needed',publicationVerified=False,returnHandoffState='review-needed')
+                elif phase == 'waiting-for-publication' and progress.get('phase') == 'bound-box' and progress['publicationVerified'] and progress['rosterComplete']:
                     progress['returnHandoffState'] = 'completed'
                 elif phase in ('preparing', 'review-needed'):
                     progress['publicationVerified'] = False
@@ -482,6 +489,11 @@ class Recovery:
             known_temporal_drift = (bool(expected) and report['counts']['temporal'] > 0 and
                                     report['counts']['missing'] == 0 and report['counts']['invalidBindings'] == 0)
             if known_temporal_drift:
+                # The native routine clock already honors this canonical
+                # owned drift alert. Pin it before staging a replacement.
+                load('server-roster-check').check(self.root,
+                    lambda path,data:self.r.m.atomic_bytes(path,data,pre_commit=self.require),
+                    fetch=lambda:rows,interval_ms=0)
                 self.status('preparing-return')
                 journal = load('official-return-handoff').FreshReturn(self, getattr(self, 'worker_lock_fd', None)).run()
                 fresh_return = True

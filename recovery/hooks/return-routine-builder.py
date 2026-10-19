@@ -12,7 +12,7 @@ def prepare(builder,entry,folder,indexed):
     owner=terminal;selection='current-local'
     # A real preserved Official selection is authority only while its explicit
     # selected source is visible and the terminal Local counterpart is hidden.
-    if indexed[terminal]['harness']=='box' and original.get('hiddenFromSidebar')is False and current.get('hiddenFromSidebar')is True:
+    if indexed[terminal]['harness']in('box','temporal')and original.get('hiddenFromSidebar')is False and current.get('hiddenFromSidebar')is True:
         path=builder.root/'openbot-official-dispatch-state.json'
         proof=json.loads(builder.tail.owned(path))
         if (proof.get('phase')!='stock-roster-selected' or proof.get('mode')!='official' or
@@ -29,7 +29,8 @@ def prepare(builder,entry,folder,indexed):
             raise RuntimeError('Return native routine semantics require review')
         paths[relative]=native;states[relative]=native['enabled']
     raw=json.loads(builder.tail.owned(folder/'routines'/(owner+'.json')))
-    records=consumer.cloud_records(builder,raw.get('automations'))
+    records=consumer.cloud_records(builder,consumer.cloud_response(raw))
+    if owner!=terminal:states={relative:False for relative in paths}
     matched={};materialized=[];proof_ref=None;plan_ref=None;zone_ref=None
     if records:
         settings_raw=builder.tail.owned(builder.root/'settings.json')

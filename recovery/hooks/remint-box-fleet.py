@@ -721,6 +721,10 @@ class Reminter:
                 except RuntimeError as error:
                     if str(error)!='Source history changed after reviewed merge; incremental preservation required before activation':raise
                     raise ReturnHistoryRequired('Reviewed return source advanced; fresh typed generation required') from None
+            changed=helper('official-return-handoff').retained_source_changes(self,journal)
+            if changed:
+                self.return_source_changed_ids=changed
+                raise ReturnHistoryRequired('Retained source history changed; fresh typed generation required')
             if not visible and not preferences_changed and journal.get('preferencesFinalized') is True:
                 return {'state': 'already-selected', 'agentCount': len(mapping)}
             results = self.verify()

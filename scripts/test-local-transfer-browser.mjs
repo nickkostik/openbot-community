@@ -91,6 +91,11 @@ try {
     returnReason: 'unsupported-or-changing-return' };
   await page.reload();
   await card.getByText(/source changed during capture/).waitFor();
+  progress = { ...progress, returnSessionScope: 'known-default-session', returnAdmissionFenced: false,
+    returnFutureMessagesMerged: false, returnRetainedSources: 3, returnReconciliation: 'changed' };
+  await page.reload();
+  await card.getByText(/Default-session snapshots are captured. 3 earlier sources/).waitFor();
+  await card.getByText(/An earlier source changed after its snapshot/).waitFor();
   progress = { ...progress, workerRunning: false, lockHeld: false, enabled: false };
   state.snapshot.alignment.desired = 'official';
   await page.reload();

@@ -82,6 +82,15 @@ try {
   await card.getByText(/4 owner-roster bots are outside this transfer plan/).waitFor();
   assert.match(await card.innerText(), /automatic source appending is unavailable/);
   assert.doesNotMatch(await card.innerText(), /Transfer recorded/);
+  progress = { ...progress, phase: 'preparing-return', returnHandoffState: 'preparing',
+    returnPreparedAgents: 1, returnExpectedAgents: 3, untrackedSourceAgents: 0 };
+  await page.reload();
+  await card.getByText(/Return to Local: preparing · 1 fresh copies prepared from 3 recorded bots/).waitFor();
+  assert.doesNotMatch(await card.innerText(), /Transfer recorded/);
+  progress = { ...progress, phase: 'review-needed', returnHandoffState: 'review-needed',
+    returnReason: 'unsupported-or-changing-return' };
+  await page.reload();
+  await card.getByText(/source changed during capture/).waitFor();
   progress = { ...progress, workerRunning: false, lockHeld: false, enabled: false };
   state.snapshot.alignment.desired = 'official';
   await page.reload();

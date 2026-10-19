@@ -22,6 +22,10 @@ JOURNAL = SD / 'openbot-box-remint.json'
 HERE = pathlib.Path(__file__).resolve().parent
 
 
+class ReturnHistoryRequired(RuntimeError):
+    """Owned selected source history needs a fresh, proven generation."""
+
+
 def helper(name):
     spec = importlib.util.spec_from_file_location(name.replace('-', '_'), HERE / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
@@ -566,6 +570,11 @@ class Reminter:
             for entry in journal['entries']:
                 if entry['phase'] == 'active' or entry['newId'] not in selected:
                     continue
+                if entry.get('returnRoutineAuthority'):
+                    helper('return-routine-authority').validate(self,journal,entry,helper('history-merge-receipt'))
+                    if not entry.get('returnRoutinePauseIntent'):
+                        entry['returnRoutinePauseIntent']=True
+                        self.save(journal)  # Immutable user switch pins precede scheduler pauses.
                 if 'activationAutomationStates' not in entry:
                     current={str(path.relative_to(SD/'agents'/entry['oldId'])):
                              owned_json(path).get('enabled', False)
@@ -696,12 +705,22 @@ class Reminter:
             journal = self.read()
             if not journal['entries'] or any(e['phase'] != 'active' for e in journal['entries']):
                 raise RuntimeError('Every copy must already be active before reselection')
-            mapping = {e['oldId']: e['newId'] for e in journal['entries']}
+            mapping = lineage_mapping(journal, {e['newId'] for e in journal['entries']})
             settings = self.m.rpc('GetGrokBotUserRuntimeSettings', {}).get('settings', {})
-            visible = any(not owned_json(SD/'agents'/e['oldId']/'settings.json').get('hiddenFromSidebar', False)
+            visible = any(not owned_json(SD/'agents'/e.get('selectionSourceId',e['oldId'])/'settings.json').get('hiddenFromSidebar', False)
                           or owned_json(SD/'agents'/e['newId']/'settings.json').get('hiddenFromSidebar', False)
                           for e in journal['entries'])
             preferences_changed = remap_preferences(settings, mapping) != remap_preferences(settings, {}) or settings.get('mainAgentId') in mapping
+            # A late source head can arrive after the last visibility write.
+            # Reviewed return receipts remain monitored even when selection is
+            # already correct; never let a UI fast path hide later source data.
+            validator=helper('history-merge-receipt');freshness_cache={}
+            for recorded in journal['entries']:
+                if not recorded.get('historyMergeReceipt'):continue
+                try:validator.source_freshness(self,journal,recorded,freshness_cache)
+                except RuntimeError as error:
+                    if str(error)!='Source history changed after reviewed merge; incremental preservation required before activation':raise
+                    raise ReturnHistoryRequired('Reviewed return source advanced; fresh typed generation required') from None
             if not visible and not preferences_changed and journal.get('preferencesFinalized') is True:
                 return {'state': 'already-selected', 'agentCount': len(mapping)}
             results = self.verify()
@@ -721,10 +740,10 @@ class Reminter:
             def normalized(value):
                 return json.dumps(self.m.remap_json(value, lineage), sort_keys=True, separators=(',', ':'))
             for entry in journal['entries']:
-                old, new = entry['oldId'], entry['newId']
+                old, new = entry.get('selectionSourceId',entry['oldId']), entry['newId']
                 source = indexed.get(old)
                 if (not source or source.get('viewerIsOwner') is not True or source.get('legacyAgentId') != old
-                        or str(source.get('id')) != entry['sourceServerId']):
+                        or str(source.get('id')) != entry.get('selectionSourceServerId',entry['sourceServerId'])):
                     raise RuntimeError('Source ownership or binding changed before reselection')
                 if source.get('kind') != entry['kind']:
                     raise RuntimeError('Source kind changed before reselection')
@@ -732,7 +751,7 @@ class Reminter:
                     raise RuntimeError('BOX journal binding changed before reselection')
                 source_profile = owned_json(SD/'agents'/old/'profile.json')
                 target_profile = owned_json(SD/'agents'/new/'profile.json')
-                if str(source_profile.get('serverId')) != entry['sourceServerId']:
+                if str(source_profile.get('serverId')) != entry.get('selectionSourceServerId',entry['sourceServerId']):
                     raise RuntimeError('Local source binding changed before reselection')
                 role = lambda p: {k:v for k,v in p.items() if k not in ('serverId','harness')}
                 if normalized(role(source_profile)) != normalized(role(target_profile)):
@@ -741,11 +760,11 @@ class Reminter:
                 source_entries = entries(old) + [json.loads(base64.b64decode(r['body'], validate=True)) for r in cloud]
                 target_entries = {self.transcript_key(value, lineage) for value in entries(new)}
                 if any(self.transcript_key(value, lineage) not in target_entries for value in source_entries):
-                    raise RuntimeError('Source has uncopied history; explicit reconciliation is required')
+                    raise ReturnHistoryRequired('Source has uncopied history; fresh typed generation required')
             # All pairs pass before the first visibility or scheduler mutation.
             for entry in journal['entries']:
                 self.require_local_mode()
-                old, new = entry['oldId'], entry['newId']
+                old, new = entry.get('selectionSourceId',entry['oldId']), entry['newId']
                 self.pause_cloud_routines(old, backup)
                 for path in (SD/'agents'/old/'automations').rglob('automation.json'):
                     raw = self.m.checked_bytes(path); definition = json.loads(raw)
@@ -843,11 +862,21 @@ class Reminter:
         # remain in the comparison so future authored settings fail closed.
         result = {key: value for key, value in record.items() if key not in
                   ('isEnabled', 'createdAt', 'lastRunAt', 'nextRunAt', 'runs', 'filePath')}
-        if isinstance(result.get('trigger'), dict) and result['trigger'].get('type') == 'cron':
-            result['trigger'] = {key: value for key, value in result['trigger'].items() if key != 'firesAt'}
+        def trigger(value):
+            if isinstance(value,list):return [trigger(item)for item in value]
+            if not isinstance(value,dict):return value
+            return {key:trigger(item)for key,item in value.items()
+                    if not(key=='firesAt'and value.get('type')=='cron')}
+        if isinstance(result.get('trigger'),dict):result['trigger']=trigger(result['trigger'])
+        if isinstance(result.get('triggerPresentation'),dict):
+            result['triggerPresentation']={key:trigger(value)if key=='trigger'else value
+                                           for key,value in result['triggerPresentation'].items()}
         return result
 
     def server_routine_states(self, journal, entry, current=False):
+        if entry.get('returnRoutineAuthority'):
+            helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
+            return {}  # New selected-owner authority supersedes retained legacy evidence.
         records = self.server_routine_authority(journal, entry)
         if not records:
             return {}
@@ -904,6 +933,9 @@ class Reminter:
         return states
 
     def pause_server_routine_authority(self, journal, entry):
+        if entry.get('returnRoutineAuthority'):
+            helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
+            return  # Never overwrite immutable selected switches with already-paused legacy flags.
         if 'serverRoutineAuthority' not in entry:
             return
         current = self.server_routine_states(journal, entry, current=True)
@@ -931,8 +963,12 @@ class Reminter:
         server_states = self.server_routine_states(journal, entry, current=True)
         if set(server_states) - set(states):
             raise RuntimeError('Server routine switch authority is incomplete')
+        materialized=helper('return-routine-authority').materialized_paths(self,journal,entry,helper('history-merge-receipt'))
         for relative in set(states) - set(server_states):
-            if owned_json(SD/'agents'/entry['oldId']/relative).get('enabled') is not False:
+            original=SD/'agents'/entry['oldId']/relative
+            if relative in materialized and not original.exists() and not original.is_symlink():
+                continue  # Only native-proven new recipes may lack an old Local file.
+            if owned_json(original).get('enabled') is not False:
                 raise RuntimeError('Retired local routine is still enabled')
         self.pause_server_routine_authority(journal, entry)
         states = self.checked_routine_states(aid, entry.get('activationAutomationStates', states))
@@ -958,6 +994,8 @@ class Reminter:
                 if (len(confirmed)!=1 or confirmed[0].get('isEnabled') is not True or
                         owned_json(SD/'agents'/aid/relative).get('enabled') is not True):
                     raise RuntimeError('Copied routine enable did not persist in the native runner')
+                # Native setters must preserve the proven authored trigger and prompt.
+                helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
                 restored+=1
             progress[relative]=enabled;self.save(journal)
         entry['routinesRestored']=True;self.save(journal)

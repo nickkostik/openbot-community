@@ -127,3 +127,20 @@ test("bounded history preservation has an explicit public phase without private 
   assert.equal(progress.nativeAppDeliveryVerified, false);
   assert.equal(progress.billingVerified, false);
 });
+
+
+test("fresh return progress is bounded public metadata and never inherited completion", () => {
+  const value = publicTransfer({ phase: "bound-box", publicationVerified: true, rosterComplete: true,
+    returnHandoffState: "preparing", returnPreparedAgents: 1, returnExpectedAgents: 3,
+    returnReason: "unsupported-or-changing-return", privateRequestPath: "/private/history", transcript: "private body" });
+  assert.equal(value.phase, "review-needed");
+  assert.equal(value.publicationVerified, false);
+  assert.equal(value.returnPreparedAgents, 1);
+  assert.equal(value.returnExpectedAgents, 3);
+  assert.doesNotMatch(JSON.stringify(value), /private\/history|private body/);
+  assert.equal(publicTransfer({ returnHandoffState: "completed" }).returnHandoffState, "waiting-for-publication");
+  const unknown = publicTransfer({ returnHandoffState: "private cause", returnReason: "private text", returnPreparedAgents: -1 });
+  assert.equal(unknown.returnHandoffState, undefined);
+  assert.equal(unknown.returnReason, undefined);
+  assert.equal(unknown.returnPreparedAgents, undefined);
+});

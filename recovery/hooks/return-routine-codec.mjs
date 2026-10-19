@@ -245,7 +245,11 @@ export function stageReturnRoutines(options, plan) {
     for (let index = 0; index < output.length; index++) {
       const row = output[index], actual = read.find(item => item.id === row.id); check(actual && actual.isEnabled === false,'NATIVE_STORE_PAUSED');
       assert.deepEqual(authoredRoutineSemantic(actual,plan.userTimeZone),authoredRoutineSemantic(records[index],plan.userTimeZone),'Native store authored semantics');
-      assert.deepEqual(actual.runs,row.visible,'Native visible runs'); delete row.visible;
+      assert.deepEqual(actual.runs,row.visible,'Native visible runs');
+      row.nativeVisibleProjection = row.visible;
+      row.nativeVisibleProjectionJson = encode(row.visible);
+      row.nativeVisibleProjectionSha256 = digest(row.nativeVisibleProjectionJson);
+      delete row.visible;
       check(digest(fs.readFileSync(path.join(staged,row.id,'automation.json'))) === row.configSha256 &&
         digest(fs.readFileSync(path.join(staged,row.id,'runs.json'))) === row.runsSha256,'NATIVE_STORE_REWROTE_FILES'); row.nativeStoreVerified = true;
     }

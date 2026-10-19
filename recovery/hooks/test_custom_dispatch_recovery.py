@@ -199,7 +199,7 @@ class DispatchTests(fleet.RemintTests):
         journal = (self.root/'openbot-box-remint.json').read_bytes()
         late = {'id':'official-late-message', 'agentId':fleet.OLD, 'timestampMs':2, 'kind':'message', 'content':'New source history'}
         self.server_transcripts[fleet.OLD] = [{'seq':'1','body':base64.b64encode(json.dumps(late).encode()).decode()}]
-        with self.assertRaisesRegex(RuntimeError, 'uncopied history'): self.recovery().run()
+        with self.assertRaisesRegex(RuntimeError, 'uncopied history'): self.r.reselect_active()
         self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(), journal)
         self.assertFalse(any(name.startswith('Create') or name=='SetGrokBotAgentClientState' for name,_ in self.calls))
         self.assertFalse(json.loads((self.source/'settings.json').read_text())['hiddenFromSidebar'])
@@ -229,7 +229,7 @@ class DispatchTests(fleet.RemintTests):
         self.official_round_trip()
         changed = {'id':'message-1','timestampMs':1,'agentId':fleet.OLD,'content':'Divergent same-ID body'}
         self.server_transcripts[fleet.OLD] = [{'seq':'1','body':base64.b64encode(json.dumps(changed).encode()).decode()}]
-        with self.assertRaisesRegex(RuntimeError,'uncopied history'):self.recovery().run()
+        with self.assertRaisesRegex(RuntimeError,'uncopied history'):self.r.reselect_active()
         self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
 
     def test_quoted_identity_changes_are_not_reselection_coverage(self):
@@ -249,7 +249,7 @@ class DispatchTests(fleet.RemintTests):
         protected = {path:path.read_bytes() for path in (self.root/'openbot-box-remint.json',
                      self.source/'settings.json', peer_settings)}
         with self.assertRaisesRegex(RuntimeError, 'uncopied history'):
-            self.recovery().run()
+            self.r.reselect_active()
         self.assertEqual({path:path.read_bytes() for path in protected}, protected)
         self.assertFalse(any(name=='SetGrokBotAgentClientState' or name.startswith('Create') for name,_ in self.calls))
 

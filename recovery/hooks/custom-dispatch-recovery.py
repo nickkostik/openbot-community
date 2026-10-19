@@ -236,6 +236,22 @@ def snapshot(root):
             progress['lockHeld'] = False
     except BlockingIOError:
         progress['lockHeld'] = True
+    try:
+        handoff = read(root, 'openbot-return-handoff.json')
+        if handoff.get('schema') == 'openbot-official-return-handoff/v1' and handoff.get('jobId') == progress.get('jobId'):
+            phase = handoff.get('phase')
+            if phase in ('preparing', 'waiting-for-publication', 'review-needed'):
+                progress.update(returnHandoffState=phase, returnPreparedAgents=handoff.get('preparedAgents', 0),
+                                returnExpectedAgents=handoff.get('expectedAgents', 0), returnReason=handoff.get('reason', 'none'))
+                if phase == 'waiting-for-publication' and progress.get('phase') == 'bound-box' and progress['publicationVerified'] and progress['rosterComplete']:
+                    progress['returnHandoffState'] = 'completed'
+                elif phase in ('preparing', 'review-needed'):
+                    progress['publicationVerified'] = False
+                    progress['phase'] = 'preparing-return' if phase == 'preparing' and progress['lockHeld'] else 'review-needed'
+    except FileNotFoundError:
+        pass
+    except Exception:
+        progress.update(phase='review-needed', diagnosticCode='preflight-refused')
     progress['workerRunning'] = progress['lockHeld'] and verified_worker(root, progress)
     return progress
 
@@ -422,6 +438,8 @@ class Recovery:
             return result
         self.r.rows = rows
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
+        if journal is not None and journal.get('officialReturnRequestId'):
+            load('official-return-handoff').FreshReturn(self, self.worker_lock_fd).finish_models(journal)
         if journal is not None and not self.check_roster_scope(journal):
             return self.progress
         if journal is None or all(e['phase'] == 'active' for e in journal['entries']):
@@ -429,20 +447,32 @@ class Recovery:
             expected = load('server-roster-check').authority(journal) if journal else {}
             report = load('server-roster-check').compare(expected, rows)
             profiles = self.r.profiles()
-            if expected and report['state'] == 'bound-box':
+            if expected:
                 # Official can reveal the recorded sources while leaving their
                 # real BOX counterparts intact. Do not mint another generation
                 # from those already-paired originals (or require fake labels).
-                paired = {e['oldId'] for e in journal['entries']}
+                paired = set(self.module.identity_mapping(journal)) | set(expected)
                 profiles = {aid:p for aid,p in profiles.items() if aid not in paired}
             sources = self.module.source_candidates(rows, profiles)
             if journal is None and not self.check_roster_scope(None, rows, profiles, [e['oldId'] for e in sources]):
                 return self.progress
             if journal is not None and sources:
                 raise RuntimeError('Current transfer authority requires review; automatic generation replacement is refused')
-            if expected and report['state'] == 'bound-box':
-                self.r.reselect_active()
-            if not sources:
+            fresh_return = False
+            known_temporal_drift = (bool(expected) and report['counts']['temporal'] > 0 and
+                                    report['counts']['missing'] == 0 and report['counts']['invalidBindings'] == 0)
+            if known_temporal_drift:
+                self.status('preparing-return')
+                journal = load('official-return-handoff').FreshReturn(self, getattr(self, 'worker_lock_fd', None)).run()
+                fresh_return = True
+            elif expected and report['state'] == 'bound-box':
+                try:
+                    self.r.reselect_active()
+                except self.module.ReturnHistoryRequired:
+                    self.status('preparing-return')
+                    journal = load('official-return-handoff').FreshReturn(self, getattr(self, 'worker_lock_fd', None)).run()
+                    fresh_return = True
+            if not fresh_return and not sources:
                 if not expected or report['state'] != 'bound-box':
                     raise RuntimeError('No verified active BOX authority; handoff requires recovery')
                 self.r.restore_routines()
@@ -457,8 +487,9 @@ class Recovery:
                     return self.progress
                 self.status('bound-box', agentCount=len(expected), nextCheckAtMs=int(time.time()*1000)+120000)
                 return self.progress
-            self.status('copying', agentCount=len(sources))
-            journal = self.r.initialize()
+            if not fresh_return:
+                self.status('copying', agentCount=len(sources))
+                journal = self.r.initialize()
         self.progress['agentCount'] = len(journal['entries'])
         tail = load('history-tail-repair')
         if tail.pending(journal, self.progress['jobId']):
@@ -488,6 +519,16 @@ class Recovery:
             return self.progress
         if not journal.get('publicationReloadRequestedAtMs'):
             self.status('waiting-for-publication'); self.r.publish()
+            journal = self.r.read()
+        if journal.get('officialReturnRequestId') and any(e['phase'] != 'active' for e in journal['entries']):
+            request = self.r.reload.read(self.root)
+            if not request or request['requestId'] != journal.get('publicationReloadRequestId'):
+                self.r.publish()
+                self.status('waiting-for-publication', nextCheckAtMs=int(time.time()*1000)+60000)
+                return self.progress
+            if request['phase'] != 'acknowledged':
+                self.status('waiting-for-publication', nextCheckAtMs=int(time.time()*1000)+60000)
+                return self.progress
         results = self.r.verify()
         self.r.m.write(self.root / 'openbot-custom-dispatch-verification.json', {'results': results})
         verified = sum(row['status'] == 'verified-box' for row in results)
@@ -521,6 +562,8 @@ class Recovery:
             return self.progress
         self.status('activating', verifiedAgents=verified)
         self.r.activate()
+        if self.r.read().get('officialReturnRequestId'):
+            self.r.reselect_active()
         self.r.restore_routines()
         active = self.r.read()
         expected = load('server-roster-check').authority(active)

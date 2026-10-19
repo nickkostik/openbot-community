@@ -22,7 +22,7 @@ class DiagnosticsTests(unittest.TestCase):
         (self.root / 'openbot-mode').write_text('custom')
         self.plan = {'agents': {'*': {'providerId': 'opencode-2', 'modelId': 'muse'}}, 'catalog': {
             'providers': [{'id': 'opencode-2', 'origin': 'https://opencode.ai/zen/go/v1'}],
-            'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse', 'reasoningLevels': ['default', 'low', 'medium', 'high', 'xhigh'], 'activeReasoning': 'xhigh'}]}}
+            'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse', 'reasoningLevels': ['default', 'low', 'medium', 'high', 'xhigh'], 'activeReasoning': 'xhigh', 'maxOutputTokens': 65536, 'contextTokens': 1048576, 'catalogLimits': {'maxOutputTokens':131072}}]}}
         self.save_plan()
         self.state = {'jobId': '14238183-e7f8-48a2-96ea-994a641cf49b', 'phase': 'review-needed',
             'refusalPhase': 'waiting-for-publication', 'diagnosticCode': 'preflight-refused',
@@ -46,7 +46,8 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_only_allowlisted_facts_leave_and_advice_has_no_execution_authority(self):
         result = m.run(self.root, now=1000)
-        model, job, facts, effort = self.request.call_args.args
+        model, job, facts, effort, budget = self.request.call_args.args
+        self.assertEqual(budget, 4096)
         self.assertEqual(effort, 'low')
         self.assertEqual(json.loads((self.root / 'openbot-plan.json').read_text()), self.plan)
         self.assertEqual(model, 'opencode-2:muse')
@@ -220,7 +221,7 @@ class DiagnosticsTests(unittest.TestCase):
         script = """
 const maps = require(process.argv[1]);
 const converters = require(process.argv[2]);
-const body = {model:'muse-test', messages:[], reasoning_effort:'low', max_tokens:256};
+const body = {model:'muse-test', messages:[], reasoning_effort:'low', max_tokens:4096};
 const parameters = [{id:'effort', value:'xhigh'}];
 maps.applyProviderReasoningControls(body, {modelId:'muse-test', baseUrl:'https://opencode.ai/zen/go/v1', parameters});
 console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParameters:parameters}));
@@ -230,8 +231,62 @@ console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParamete
                                 capture_output=True, text=True, timeout=5)
         value = json.loads(result.stdout)
         self.assertEqual(value['wire']['reasoning'], {'effort':'low'})
-        self.assertEqual(value['wire']['max_output_tokens'], 256)
+        self.assertEqual(value['wire']['max_output_tokens'], 4096)
         self.assertEqual(value['savedParameters'], [{'id':'effort', 'value':'xhigh'}])
+
+    def test_reasoning_budget_is_explicit_supported_and_leaves_selected_settings_intact(self):
+        original = (self.root/'openbot-plan.json').read_bytes()
+        self.assertEqual(m.diagnostic_budget(self.root, 'opencode-2:muse', 'low'), 4096)
+        with self.assertRaisesRegex(m.Refusal, 'unsupported-diagnostic-effort'):
+            m.diagnostic_budget(self.root, 'opencode-2:muse', 'none')
+        self.assertEqual((self.root/'openbot-plan.json').read_bytes(), original)
+        self.plan['catalog']['models'][0]['reasoningLevels'].append('none')
+        self.save_plan()
+        self.assertEqual(m.diagnostic_budget(self.root, 'opencode-2:muse', 'none'), 256)
+        self.plan['catalog']['models'][0]['reasoningLevels'].remove('none')
+        self.save_plan()
+        for key, value in (('maxOutputTokens', 1024), ('contextTokens', 4096), ('maxOutputTokens', None)):
+            model = self.plan['catalog']['models'][0]
+            previous = model[key]
+            model[key] = value
+            self.save_plan()
+            with self.assertRaisesRegex(m.Refusal, 'unsupported-diagnostic-budget'):
+                m.diagnostic_budget(self.root, 'opencode-2:muse', 'low')
+            model[key] = previous
+        self.plan['catalog']['models'][0]['catalogLimits']['maxOutputTokens'] = 1024
+        self.save_plan()
+        with self.assertRaisesRegex(m.Refusal, 'unsupported-diagnostic-budget'):
+            m.diagnostic_budget(self.root, 'opencode-2:muse', 'low')
+
+    def test_budget_upgrade_is_a_new_fingerprint_but_retains_prior_receipts_and_backoff(self):
+        import hashlib
+        job, facts = m.snapshot(self.state)
+        old = hashlib.sha256(json.dumps([job, 'opencode-2:muse', 'low', facts], sort_keys=True).encode()).hexdigest()
+        m.write(self.root, {'jobId':job, 'fingerprint':old, 'seenFingerprints':[old],
+                           'status':'failed', 'reason':'advice-truncated', 'nextAttemptAtMs':1000+m.BACKOFF_MS})
+        m.run(self.root, now=1000)
+        self.request.assert_not_called()
+        result = m.run(self.root, now=1000+m.BACKOFF_MS)
+        self.assertEqual(result['status'], 'available')
+        self.assertEqual(self.request.call_args.args[4], 4096)
+        saved = json.loads((self.root/m.NAME).read_text())
+        self.assertEqual(saved['outputTokenBudget'], 4096)
+        self.assertEqual(saved['budgetPolicy'], m.BUDGET_POLICY)
+        expected = hashlib.sha256(json.dumps([job, 'opencode-2:muse', 'low', {'version':m.BUDGET_POLICY,'outputTokens':4096}, facts], sort_keys=True).encode()).hexdigest()
+        self.assertEqual(saved['fingerprint'], expected)
+        self.assertIn(old, saved['seenFingerprints'])
+        self.assertEqual(len(saved['seenFingerprints']), 2)
+        m.run(self.root, now=1000+2*m.BACKOFF_MS)
+        self.assertEqual(self.request.call_count, 1)
+
+    def test_larger_reasoning_budget_still_refuses_truncation_and_tool_requests(self):
+        response = self.response('{"')
+        response['usage'] = {'completion_tokens':4096, 'completion_tokens_details':{'reasoning_tokens':4094}}
+        with self.assertRaisesRegex(m.Refusal, 'advice-truncated'):
+            m.classify(response, 4096)
+        response = self.response('{"adviceCode":"history-review"}', tool_calls=[{'id':'call'}])
+        with self.assertRaisesRegex(m.Refusal, 'invalid-advice'):
+            m.classify(response, 4096)
 
     def test_lowest_declared_diagnostic_effort_never_rewrites_selected_xhigh(self):
         original = (self.root/'openbot-plan.json').read_bytes()
@@ -369,7 +424,7 @@ class HopRequestTests(unittest.TestCase):
         response.read1.side_effect = chunks
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection) as factory:
             try:
-                result = m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {'phase': 'waiting-for-publication'}, 'low')
+                result = m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {'phase': 'waiting-for-publication'}, 'low', 4096)
             finally:
                 connection.close.assert_called_once()
                 factory.assert_called_once_with('127.0.0.1', 9280, timeout=m.TIMEOUT)
@@ -380,7 +435,7 @@ class HopRequestTests(unittest.TestCase):
         args = connection.request.call_args.args
         self.assertEqual(args[:2], ('POST', '/v1/chat/completions'))
         body = json.loads(args[2])
-        self.assertEqual(body['max_tokens'], 256)
+        self.assertEqual(body['max_tokens'], 4096)
         self.assertEqual(body['reasoning_effort'], 'low')
         self.assertTrue(body['openbot_internal_model'])
         self.assertTrue(body['openbot_internal_auxiliary'])
@@ -403,7 +458,7 @@ class HopRequestTests(unittest.TestCase):
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection), \
              mock.patch.object(m.time, 'monotonic', side_effect=[0, 1, 2, m.TIMEOUT + 1]):
             with self.assertRaisesRegex(m.Refusal, 'timeout'):
-                m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {}, 'low')
+                m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {}, 'low', 4096)
         connection.close.assert_called_once()
 
 

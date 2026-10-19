@@ -182,6 +182,7 @@ class Reminter:
     def __init__(self):
         self.m = helper('migrate-local-bots')
         self.publisher = helper('publish-local-fleet')
+        self.reload = helper('publication-reload')
         self.merger = helper('fleet-state-merge')
 
     def transcript_key(self, value, mapping):
@@ -443,11 +444,13 @@ class Reminter:
                 profile,count=self.local_identity(entry)
                 sid=self.publisher.require_box_row(rows.get(entry['newId']),entry['newId'])
                 if profile.get('serverId')!=sid:raise RuntimeError('BOX binding changed before publication')
-            recovery=SD/'computer-recovery-state.json';raw=self.m.checked_bytes(recovery)
-            state=owned_json(recovery)
-            self.m.atomic_bytes(recovery,self.m.json_bytes({**state,'pendingHostReload':True}),expected=raw)
-            journal['publicationReloadRequestedAtMs']=int(time.time()*1000);self.save(journal)
+            request = self.reload.request(SD, self.reload.HOST, lambda: self.reload.host_pids(self.reload.HOST))
+            # The durable marker must exist before the journal acknowledges it.
+            journal['publicationReloadRequestedAtMs'] = request['requestedAtMs']
+            journal['publicationReloadRequestId'] = request['requestId']
+            self.save(journal)
             return {'registeredCopies':len(eligible),'supervisedReloadRequested':True,
+                    'publicationReloadRequestId':request['requestId'],
                     'publicationVerified':False,'nativeAppDeliveryVerified':False}
 
     def verify(self, aid=None):

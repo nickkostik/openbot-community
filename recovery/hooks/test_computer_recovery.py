@@ -6,6 +6,8 @@ import json
 import hashlib
 import gzip
 import pathlib
+import os
+import time
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -346,6 +348,39 @@ class ComputerRecoveryTests(unittest.TestCase):
             with mock.patch.object(m,'SD',sd),mock.patch.object(m,'HOST',host),mock.patch.object(m,'ensure_named_tunnel',return_value={'state':'running'}),mock.patch.object(m,'ensure_backup_permissions',return_value={'state':'mocked'}),mock.patch.object(m,'repair_bundle',return_value=True),mock.patch.object(m,'host_pids',return_value=[123]),mock.patch.object(m,'gateway_status',return_value={'isBusy':True}),mock.patch.object(m.os,'kill') as kill:
                 state=m.tick();self.assertTrue(state['pendingHostReload']);kill.assert_not_called()
             self.assertTrue(json.loads((sd/'computer-recovery-state.json').read_text())['pendingHostReload'])
+
+    def test_publication_request_arriving_after_telemetry_read_is_consumed_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            sd = pathlib.Path(root)
+            (sd / 'openbot-local-only.enable').touch()
+            (sd / 'openbot-mode').write_text('custom')
+            host = sd / 'host.cjs'; host.write_text('CURRENT NATIVE')
+            os.utime(host, (time.time() - 10, time.time() - 10))
+            (sd / 'agents').mkdir()
+            (sd / 'computer-recovery-state.json').write_text('{"pendingHostReload":false}')
+            spec = importlib.util.spec_from_file_location('reload_fixture', HERE / 'publication-reload.py')
+            reload = importlib.util.module_from_spec(spec); spec.loader.exec_module(reload)
+            requests = []
+            def concurrent_publish():
+                # tick() already captured pendingHostReload=false. This durable
+                # request must survive the stale telemetry write at its end.
+                if not requests:
+                    requests.append(reload.request(sd, host, lambda: [os.getpid()]))
+                return {'state': 'running'}
+            with mock.patch.object(m, 'SD', sd), mock.patch.object(m, 'HOST', host), \
+                    mock.patch.object(m, 'ensure_named_tunnel', side_effect=concurrent_publish), \
+                    mock.patch.object(m, 'ensure_backup_permissions', return_value={'state': 'mocked'}), \
+                    mock.patch.object(m, 'repair_bundle', return_value=False), \
+                    mock.patch.object(m, 'host_pids', return_value=[os.getpid()]), \
+                    mock.patch.object(m, 'gateway_status', return_value={'isBusy': False}), \
+                    mock.patch.object(m.os, 'kill') as kill:
+                state = m.tick()
+                self.assertEqual(state['publicationReload']['phase'], 'signal-issued')
+                self.assertFalse(state['pendingHostReload'])
+                state = m.tick()
+                self.assertEqual(state['publicationReload']['phase'], 'waiting-native-replacement')
+                kill.assert_called_once_with(os.getpid(), m.signal.SIGTERM)
+                self.assertEqual(reload.read(sd)['requestId'], requests[0]['requestId'])
 
     def test_browser_route_failure_does_not_block_host_recovery(self):
         with tempfile.TemporaryDirectory() as root:

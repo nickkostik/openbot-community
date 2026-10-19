@@ -615,6 +615,13 @@ def ensure_custom_dispatch():
     return module.maybe_start(SD)
 
 
+def publication_reload():
+    spec = importlib.util.spec_from_file_location('publication_reload', HERE / 'publication-reload.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.consume(SD, HOST, host_pids, gateway_status)
+
+
 def tick():
     mode = (SD / 'openbot-mode').read_text().strip() if (SD / 'openbot-mode').exists() else ''
     if not (SD / 'openbot-local-only.enable').exists() or mode not in ('custom', 'official'):
@@ -715,12 +722,16 @@ def tick():
         state['customDispatch'] = ensure_custom_dispatch()
     except Exception as error:
         state['customDispatch'] = {'phase': 'failed', 'errorType': type(error).__name__, 'nativeAppDeliveryVerified': False}
-    if state.get('pendingHostReload'):
+    state['publicationReload'] = publication_reload()
+    if state['publicationReload']['phase'] == 'signal-issued':
+        state['pendingHostReload'] = False
+        state['lastReloadedPid'] = state['publicationReload']['pid']
+    if state.get('pendingHostReload') and state['publicationReload']['phase'] in ('absent', 'acknowledged'):
         pids = host_pids()
         if len(pids) == 1 and gateway_status().get('isBusy') is False:
             # Prove ownership again immediately before signalling a recycled PID.
-            if host_pids() != pids:
-                raise RuntimeError('Native process changed before reload')
+            if host_pids() != pids or (SD / 'openbot-mode').read_text().strip() != 'custom':
+                raise RuntimeError('Native owner or mode changed before Custom reload')
             os.kill(pids[0], signal.SIGTERM)
             state['pendingHostReload'] = False
             state['lastReloadedPid'] = pids[0]

@@ -3,6 +3,8 @@
 Local profile reads are intentionally forced to BOX for execution. They cannot
 classify the server's old Temporal archives for the sequential bulk publisher.
 """
+import pathlib
+
 MARK = 'openbot-local-publication: authoritative-roster'
 ANCHOR = 'var transcriptPublishExtension = defineHostExtension({'
 STOCK = 'isTemporalAgent: (agentId) => readSandProfileHarness(getSandProfilePath((0, import_node_path172.join)(agentsRootDir, agentId))) === "temporal",'
@@ -25,13 +27,55 @@ HELPER = '''function openbotSkipTranscriptPublication(agentId, agentsRootDir) {
 '''
 
 
+OBSERVER_MARK = 'openbot-transcript-publication-observer-v1'
+OBSERVER_EXPORT = 'module.exports = { openbotCreateTranscriptPublicationObserver };'
+OBSERVER = pathlib.Path(__file__).with_name('transcript-publication-observer.cjs').read_text().replace(OBSERVER_EXPORT, '')
+PUBLISHER = '    const publisher = new TranscriptEntryPublisher({'
+REPORT = '      report: (level, metadata) => context2.deps.telemetry.logs.reportTranscriptPublish(level, metadata)'
+DRAIN = '  async drainAgent(agentId) {\n    const state = this.dirty.get(agentId);'
+OBSERVED_DRAIN = '  async drainAgent(agentId) {\n    if (this.openbotPublicationObserver?.retryBlocked(agentId)) return;\n    const state = this.dirty.get(agentId);'
+FAILURE = '      this.redirtyUnlessClearSuperseded(agentId, state);\n      this.report('
+OBSERVED_FAILURE = '      this.redirtyUnlessClearSuperseded(agentId, state);\n      this.openbotPublicationObserver?.captureFailure(agentId, error42);\n      this.report('
+COMMIT = '      commit: async (commit2) => {\n        const response = await client.commitGrokBotTranscriptEntries({'
+OBSERVED_COMMIT = '      commit: async (commit2) => {\n        openbotPublicationObserver.commitAttempt(commit2);\n        const response = await client.commitGrokBotTranscriptEntries({'
+READY = '    const createPublishSoon = (name17, delayMs, scope) =>'
+OBSERVED_READY = '    publisher.openbotPublicationObserver = openbotPublicationObserver;\n' + READY
+STOP = '    context2.onStop(() => {\n      unsubscribe?.();'
+SETUP = '''    const openbotPublicationObserver = openbotCreateTranscriptPublicationObserver({
+      getPublisher: () => publisher,
+      enabled: () => openbotLocalFleetEnabled(),
+      isAllowed: (agentId) => !openbotSkipTranscriptPublication(agentId, agentsRootDir),
+      statePath: require("node:path").join(getSandRootDir(), "openbot-transcript-publication-status.json"),
+      onStatusWriteError: () => context2.host.log("OpenBot publication observer could not persist private metadata", "warn")
+    });
+''' + PUBLISHER
+OBSERVED_REPORT = '''      report: (level, metadata) => {
+        try { context2.deps.telemetry.logs.reportTranscriptPublish(level, metadata); }
+        finally { openbotPublicationObserver.observe(level, metadata); }
+      }'''
+OBSERVED_STOP = '    context2.onStop(() => {\n      openbotPublicationObserver.dispose();\n      unsubscribe?.();'
+
+
 def patch(source):
-    if MARK in source:
+    if MARK not in source:
+        if source.count(ANCHOR) != 1 or source.count(STOCK) != 1:
+            raise RuntimeError('Expected one native transcript publisher policy')
+        if 'function openbotLocalFleetEnabled()' not in source:
+            raise RuntimeError('Local publication requires the explicit mode policy')
+        source = source.replace(ANCHOR, HELPER + '\n' + ANCHOR, 1)
+        source = source.replace(STOCK, STOCK.replace('readSandProfileHarness',
+            'openbotSkipTranscriptPublication(agentId, agentsRootDir) || readSandProfileHarness'), 1)
+    if source.count(MARK) != 1 or HELPER not in source:
+        raise RuntimeError('Incomplete native publication ownership policy')
+    if OBSERVER_MARK in source:
+        if (source.count(OBSERVER_MARK) != 1 or OBSERVER not in source or
+                any(anchor not in source for anchor in (SETUP, OBSERVED_REPORT, OBSERVED_STOP, OBSERVED_FAILURE, OBSERVED_COMMIT, OBSERVED_READY, OBSERVED_DRAIN))):
+            raise RuntimeError('Incomplete native publication retry observer')
         return source
-    if source.count(ANCHOR) != 1 or source.count(STOCK) != 1:
-        raise RuntimeError('Expected one native transcript publisher policy')
-    if 'function openbotLocalFleetEnabled()' not in source:
-        raise RuntimeError('Local publication requires the explicit mode policy')
-    source = source.replace(ANCHOR, HELPER + '\n' + ANCHOR, 1)
-    return source.replace(STOCK, STOCK.replace('readSandProfileHarness',
-        'openbotSkipTranscriptPublication(agentId, agentsRootDir) || readSandProfileHarness'), 1)
+    if any(source.count(anchor) != 1 for anchor in (ANCHOR, PUBLISHER, REPORT, STOP, FAILURE, COMMIT, READY, DRAIN)):
+        raise RuntimeError('Expected one native publisher retry contract')
+    source = source.replace(ANCHOR, OBSERVER + '\n' + ANCHOR, 1)
+    return (source.replace(PUBLISHER, SETUP, 1).replace(REPORT, OBSERVED_REPORT, 1)
+            .replace(STOP, OBSERVED_STOP, 1).replace(FAILURE, OBSERVED_FAILURE, 1)
+            .replace(COMMIT, OBSERVED_COMMIT, 1).replace(READY, OBSERVED_READY, 1)
+            .replace(DRAIN, OBSERVED_DRAIN, 1))

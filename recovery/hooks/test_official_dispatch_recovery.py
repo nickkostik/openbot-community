@@ -231,3 +231,25 @@ class OfficialTests(fleet.RemintTests):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class TerminalStockSelectionTests(unittest.TestCase):
+    setUp=OfficialTests.setUp
+    selected_official=OfficialTests.selected_official
+    write=OfficialTests.write
+    rpc=OfficialTests.rpc
+    gateway=OfficialTests.gateway
+    def test_explicit_original_stock_identity_survives_terminal_remint(self):
+        recovery=self.selected_official();journal=self.r.read()
+        original='00000000-0000-4000-8000-000000000004'
+        original_row=fleet.row(original,'temporal','789');self.roster.append(original_row)
+        self.write(self.root/'agents'/original/'profile.json',{'serverId':'789','harness':'temporal'})
+        journal['previousGenerations']=[{'entries':[{'oldId':original,'newId':fleet.OLD}]}]
+        journal['entries'][0].update(selectionSourceId=original,selectionSourceServerId='789')
+        self.r.save(journal)
+        mapping,selected=recovery.targets(journal,self.roster)
+        self.assertEqual(selected[0][1],original)
+        self.assertEqual(mapping,{fleet.OLD:original,fleet.NEW:original,original:original})
+        self.roster[-1]['id']='wrong'
+        with self.assertRaisesRegex(RuntimeError,'binding changed'):
+            recovery.targets(journal,self.roster)

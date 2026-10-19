@@ -287,6 +287,21 @@ console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParamete
         self.assertEqual(result['reason'], 'state-changed')
         self.assertNotIn('advice', result)
 
+    def test_known_late_history_refusal_can_request_review_but_unknown_phase_cannot(self):
+        self.state['refusalPhase'] = 'preserving-late-history'
+        self.state['diagnosticCode'] = 'history-conflict'
+        self.save_state()
+        result = m.run(self.root, now=1000)
+        self.assertEqual(result['status'], 'available')
+        self.assertEqual(self.request.call_args.args[2]['phase'], 'preserving-late-history')
+        self.assertEqual(self.request.call_count, 1)
+        self.state['refusalPhase'] = 'preserving-unknown-private-history'
+        self.save_state()
+        result = m.run(self.root, now=1000+m.BACKOFF_MS)
+        self.assertEqual(result['reason'], 'no-refusal')
+        self.assertEqual(self.request.call_count, 1)
+        self.assertEqual(len(json.loads((self.root/m.NAME).read_text())['seenFingerprints']), 1)
+
     def test_untrusted_state_and_invalid_enums_never_call(self):
         for field, value in (('refusalPhase', 'user@example.test'), ('diagnosticCode', 'execute-secret'), ('jobId', 'secret-key')):
             original = self.state[field]

@@ -497,6 +497,90 @@ class RoutineAuthorityTests(unittest.TestCase):
         self.assertEqual(self.calls, calls)
         self.assertEqual(self.gateway_calls, [])
 
+    def empty_selected_authority(self, local_enabled=False):
+        self.wrappers = []; self.write_cloud()
+        for root in (self.target, self.folder / 'sources' / fleet.NEW):
+            path = root / 'automations/routine/automation.json'
+            value = json.loads(path.read_bytes()); value['enabled'] = local_enabled; self.write(path, value)
+        journal, entry, authority = self.prepare()
+        authority.update(nativeProof=None, nativePlan=None, materialized=[], matched={})
+        captured = self.folder / 'routines' / (fleet.OLD + '.json')
+        captured.write_bytes(b'{}'); authority['capturedCloud'] = self.tail.reference(captured)
+        target = self.root / 'agents' / THIRD / 'automations/routine/automation.json'
+        value = json.loads(target.read_bytes()); value['enabled'] = False; self.write(target, value)
+        documents = self.evidence(journal, entry, authority, local_pair=local_enabled)
+        documents['capture']['cloudRaw'] = {}; self.repin_evidence(authority, 'capture', documents['capture'])
+        documents['pausedReadback']['cloud'] = {}; self.repin_evidence(authority, 'pausedReadback', documents['pausedReadback'])
+        if local_enabled:
+            source = self.target / 'automations/routine/automation.json'
+            value = json.loads(source.read_bytes()); value['enabled'] = False; self.write(source, value)
+        self.pin_authority(journal, entry, authority)
+        original_rpc = self.r.m.rpc
+        def rpc(method, body):
+            response = original_rpc(method, body)
+            return {} if method == 'ListGrokBotAgentAutomations' else response
+        self.r.m.rpc = rpc
+        return journal, entry, authority
+
+    def test_omitted_empty_arrays_survive_exact_capture_pause_validate_and_restore(self):
+        journal, entry, authority = self.empty_selected_authority()
+        capture_ref = authority['capturedCloud']; captured_bytes = pathlib.Path(capture_ref['path']).read_bytes()
+        paused_ref = authority['quiescenceEvidence']['pausedReadback']
+        self.assertEqual(captured_bytes, b'{}')
+        self.assertEqual(json.loads(pathlib.Path(paused_ref['path']).read_bytes())['cloud'], {})
+        self.assertTrue(R.validate_prequiesced(self.r, journal, entry, authority, self.validator))
+        self.assertEqual(R.authority_for(self.r, journal, entry, self.validator), authority)
+        R.validate(self.r, journal, entry, self.validator)
+        entry['phase'] = 'active'; self.r.save(journal)
+        result = self.r.restore_entry_routines(journal, entry)
+        self.assertEqual(result['enabled'], 0); self.assertEqual(result['preservedDisabled'], 1)
+        self.assertEqual(pathlib.Path(capture_ref['path']).read_bytes(), captured_bytes)
+        self.assertEqual(self.tail.reference(pathlib.Path(capture_ref['path'])), capture_ref)
+        self.assertFalse(any(name == 'setAgentAutomationEnabled' for name, _ in self.gateway_calls))
+
+    def test_zero_selected_official_recipes_keep_stale_local_true_paused(self):
+        journal, entry, authority = self.empty_selected_authority(local_enabled=True)
+        relative = 'automations/routine/automation.json'
+        self.assertIs(authority['localDefinitions'][relative]['enabled'], True)
+        self.assertIs(authority['states'][relative], False)
+        R.validate(self.r, journal, entry, self.validator)
+        authority['states'][relative] = True; entry['activationAutomationStates'][relative] = True
+        self.pin_authority(journal, entry, authority)
+        with self.assertRaisesRegex(RuntimeError, 'switches differ from captured authority'):
+            R.authority_for(self.r, journal, entry, self.validator)
+
+    def test_empty_local_owned_authority_keeps_its_original_switch_authority(self):
+        journal, entry, authority = self.empty_selected_authority(local_enabled=True)
+        authority['ownerId'] = authority['sourceId']; authority['states']['automations/routine/automation.json'] = True
+        entry['activationAutomationStates'] = copy.deepcopy(authority['states'])
+        self.pin_authority(journal, entry, authority)
+        self.assertEqual(R.authority_for(self.r, journal, entry, self.validator), authority)
+
+    def test_error_unknown_or_nonobject_routine_responses_never_default_to_empty(self):
+        invalid = (None, [], 'not-an-object', {'http': 500}, {'error': 'failed'}, {'code': 'unavailable'},
+                   {'message': 'unexpected'}, {'unknown': True}, {'automations': None}, {'automations': {}},
+                   {'automations': [], 'error': None})
+        for response in invalid:
+            with self.subTest(response=response), self.assertRaises(RuntimeError):
+                R.cloud_response(response)
+        self.assertEqual(R.cloud_response({}), [])
+        self.assertEqual(R.cloud_response({'automations': []}), [])
+
+    def test_invalid_paused_or_fresh_empty_response_is_not_accepted_as_quiescence(self):
+        journal, entry, authority = self.empty_selected_authority()
+        original_paused = json.loads(pathlib.Path(authority['quiescenceEvidence']['pausedReadback']['path']).read_bytes())
+        for response in (None, [], {'error': 'failed'}, {'unexpected': True}):
+            paused = {**original_paused, 'cloud': response}
+            self.repin_evidence(authority, 'pausedReadback', paused)
+            with self.subTest(paused=response), self.assertRaises(RuntimeError):
+                R.validate_prequiesced(self.r, journal, entry, authority, self.validator)
+        self.repin_evidence(authority, 'pausedReadback', original_paused); self.pin_authority(journal, entry, authority)
+        rpc = self.r.m.rpc
+        for response in (None, [], {'http': 503}, {'message': 'unknown'}):
+            self.r.m.rpc = lambda method, body, response=response: response if method == 'ListGrokBotAgentAutomations' else rpc(method, body)
+            with self.subTest(fresh=response), self.assertRaises(RuntimeError):
+                R.validate(self.r, journal, entry, self.validator)
+
     def test_codec_helper_and_output_hashes_are_bound_to_the_captured_plan(self):
         original = self.materializer
         def wrong(folder, plan):

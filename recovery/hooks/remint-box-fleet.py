@@ -566,6 +566,11 @@ class Reminter:
             for entry in journal['entries']:
                 if entry['phase'] == 'active' or entry['newId'] not in selected:
                     continue
+                if entry.get('returnRoutineAuthority'):
+                    helper('return-routine-authority').validate(self,journal,entry,helper('history-merge-receipt'))
+                    if not entry.get('returnRoutinePauseIntent'):
+                        entry['returnRoutinePauseIntent']=True
+                        self.save(journal)  # Immutable user switch pins precede scheduler pauses.
                 if 'activationAutomationStates' not in entry:
                     current={str(path.relative_to(SD/'agents'/entry['oldId'])):
                              owned_json(path).get('enabled', False)
@@ -843,11 +848,21 @@ class Reminter:
         # remain in the comparison so future authored settings fail closed.
         result = {key: value for key, value in record.items() if key not in
                   ('isEnabled', 'createdAt', 'lastRunAt', 'nextRunAt', 'runs', 'filePath')}
-        if isinstance(result.get('trigger'), dict) and result['trigger'].get('type') == 'cron':
-            result['trigger'] = {key: value for key, value in result['trigger'].items() if key != 'firesAt'}
+        def trigger(value):
+            if isinstance(value,list):return [trigger(item)for item in value]
+            if not isinstance(value,dict):return value
+            return {key:trigger(item)for key,item in value.items()
+                    if not(key=='firesAt'and value.get('type')=='cron')}
+        if isinstance(result.get('trigger'),dict):result['trigger']=trigger(result['trigger'])
+        if isinstance(result.get('triggerPresentation'),dict):
+            result['triggerPresentation']={key:trigger(value)if key=='trigger'else value
+                                           for key,value in result['triggerPresentation'].items()}
         return result
 
     def server_routine_states(self, journal, entry, current=False):
+        if entry.get('returnRoutineAuthority'):
+            helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
+            return {}  # New selected-owner authority supersedes retained legacy evidence.
         records = self.server_routine_authority(journal, entry)
         if not records:
             return {}
@@ -904,6 +919,9 @@ class Reminter:
         return states
 
     def pause_server_routine_authority(self, journal, entry):
+        if entry.get('returnRoutineAuthority'):
+            helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
+            return  # Never overwrite immutable selected switches with already-paused legacy flags.
         if 'serverRoutineAuthority' not in entry:
             return
         current = self.server_routine_states(journal, entry, current=True)
@@ -931,8 +949,12 @@ class Reminter:
         server_states = self.server_routine_states(journal, entry, current=True)
         if set(server_states) - set(states):
             raise RuntimeError('Server routine switch authority is incomplete')
+        materialized=helper('return-routine-authority').materialized_paths(self,journal,entry,helper('history-merge-receipt'))
         for relative in set(states) - set(server_states):
-            if owned_json(SD/'agents'/entry['oldId']/relative).get('enabled') is not False:
+            original=SD/'agents'/entry['oldId']/relative
+            if relative in materialized and not original.exists() and not original.is_symlink():
+                continue  # Only native-proven new recipes may lack an old Local file.
+            if owned_json(original).get('enabled') is not False:
                 raise RuntimeError('Retired local routine is still enabled')
         self.pause_server_routine_authority(journal, entry)
         states = self.checked_routine_states(aid, entry.get('activationAutomationStates', states))
@@ -958,6 +980,8 @@ class Reminter:
                 if (len(confirmed)!=1 or confirmed[0].get('isEnabled') is not True or
                         owned_json(SD/'agents'/aid/relative).get('enabled') is not True):
                     raise RuntimeError('Copied routine enable did not persist in the native runner')
+                # Native setters must preserve the proven authored trigger and prompt.
+                helper('return-routine-authority').authority_for(self,journal,entry,helper('history-merge-receipt'))
                 restored+=1
             progress[relative]=enabled;self.save(journal)
         entry['routinesRestored']=True;self.save(journal)

@@ -256,6 +256,26 @@ def snapshot(root):
     return progress
 
 
+def requested_job(root, progress, requested):
+    """Only a new explicit request may retry failed, never-applied preparation."""
+    current = progress.get('jobId')
+    if not current or not requested or progress.get('phase') != 'review-needed':
+        return current or str(uuid.uuid4())
+    try:
+        uuid.UUID(current)
+        journal, _ = journal_progress(root)
+        backup = pathlib.Path(journal['backup'])
+        # Reuse the canonical bounded-evidence path reader; never follow links.
+        reader = load('history-tail-repair')
+        marker = backup / ('bounded-tail-job-' + current + '.json')
+        state = json.loads(reader.module('history-merge-receipt').checked(backup, marker, 4096))
+    except FileNotFoundError:
+        return current
+    if state == {'phase': 'review-needed', 'jobId': current}:
+        return str(uuid.uuid4())
+    return current
+
+
 def maybe_start(root, now=None, requested=False):
     """Keep network/copy work outside the fifteen-second recovery tick."""
     if not allowed(root):
@@ -273,7 +293,7 @@ def maybe_start(root, now=None, requested=False):
                 return progress
             if not allowed(root):
                 return {'phase': 'disabled', 'nativeAppDeliveryVerified': False}
-            claimed = {**progress, 'jobId': progress.get('jobId') or str(uuid.uuid4()),
+            claimed = {**progress, 'jobId': requested_job(root, progress, requested),
                        'phase': 'starting', 'nextCheckAtMs': now + 60000}
             write(root, claimed)
             fd = os.open(root / 'openbot-custom-dispatch.log',

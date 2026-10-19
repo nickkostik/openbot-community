@@ -348,6 +348,21 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(recovery.progress['jobId'], state['jobId'])
         self.assertEqual(recovery.run()['counts'], {'planned':0, 'copied':0, 'registered-box':0, 'active':1})
 
+    def test_explicit_retry_changes_only_failed_preparation_job_and_preserves_marker(self):
+        state={'jobId':'00000000-0000-4000-8000-000000000001','phase':'review-needed'}
+        journal=self.r.read();marker=pathlib.Path(journal['backup'])/('bounded-tail-job-'+state['jobId']+'.json')
+        self.write(marker,{'phase':'review-needed','jobId':state['jobId']});before=marker.read_bytes()
+        self.assertEqual(M.requested_job(self.root,state,False),state['jobId'])
+        self.assertNotEqual(M.requested_job(self.root,state,True),state['jobId'])
+        self.assertEqual(marker.read_bytes(),before)
+        for phase in('preparing','prepared','completed','accepted','waiting-for-publication'):
+            self.write(marker,{'phase':phase,'jobId':state['jobId']})
+            self.assertEqual(M.requested_job(self.root,state,True),state['jobId'])
+        self.write(marker,{'phase':'review-needed','jobId':state['jobId'],'intents':[]})
+        self.assertEqual(M.requested_job(self.root,state,True),state['jobId'])
+        self.write(marker,{'phase':'review-needed','jobId':'other'})
+        self.assertEqual(M.requested_job(self.root,state,True),state['jobId'])
+
     def test_status_reports_real_lock_and_diagnostic_dependency(self):
         self.assertFalse(M.snapshot(self.root)['workerRunning'])
         with M.lock(self.root):

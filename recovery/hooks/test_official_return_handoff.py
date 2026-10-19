@@ -371,6 +371,8 @@ class FreshReturnTests(unittest.TestCase):
             'oldId': fleet.NEW, 'newId': terminal, 'sourceServerId': '456', 'serverId': '789',
             'selectionSourceId': fleet.OLD, 'selectionSourceServerId': '123', 'phase': 'active'}]}
         self.r.save(journal)
+        self.write(self.root / 'openbot-official-dispatch-state.json', {
+            'phase': 'stock-roster-selected', 'mode': 'official', 'identityMapping': {terminal: fleet.OLD}})
         models_path = self.root / 'openbot-bot-models.json'; models = json.loads(models_path.read_bytes())
         models['reasoning'][terminal] = 'max'; self.write(models_path, models)
         before = self.protected(); third_before = {p: p.read_bytes() for p in third.rglob('*') if p.is_file()}

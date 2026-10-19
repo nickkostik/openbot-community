@@ -106,20 +106,23 @@ def roster_scope(rows, profiles, covered):
         if not isinstance(aid, str) or str(uuid.UUID(aid)) != aid or aid in seen:
             raise RuntimeError('Ambiguous owner roster identity')
         seen.add(aid)
-        if row.get('harness') != 'temporal' or aid in covered or row.get('viewerIsOwner') is False:
+        if aid in covered or row.get('viewerIsOwner') is False:
             continue
+        sid = row.get('id')
+        bound = (row.get('legacyAgentId') == aid and isinstance(sid, str) and
+                 sid.isascii() and sid.isdigit() and int(sid) > 0)
+        if row.get('harness') == 'box' and row.get('viewerIsOwner') is True and bound:
+            continue  # Actual owned BOX sources are never reminted.
         local = profiles.get(aid, {})
         profile, settings = local.get('profile', {}), local.get('settings', {})
-        sid = row.get('id')
-        matching = (row.get('legacyAgentId') == aid and isinstance(sid, str) and sid.isascii() and
-                    sid.isdigit() and int(sid) > 0 and str(profile.get('serverId')) == sid and
+        matching = (bound and str(profile.get('serverId')) == sid and
                     profile.get('harness') in ('box', 'temporal'))
         hidden = settings.get('hiddenFromSidebar') if matching else None
-        if row.get('viewerIsOwner') is True and hidden is True:
+        if row.get('harness') == 'temporal' and row.get('viewerIsOwner') is True and hidden is True:
             counts['hiddenArchiveAgents'] += 1
             continue
         counts['untrackedSourceAgents'] += 1
-        if row.get('viewerIsOwner') is True and hidden is False:
+        if row.get('harness') == 'temporal' and row.get('viewerIsOwner') is True and hidden is False:
             counts['untrackedVisibleAgents'] += 1
         else:
             counts['unknownSourceAgents'] += 1

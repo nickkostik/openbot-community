@@ -467,6 +467,19 @@ class DispatchTests(fleet.RemintTests):
         self.assertTrue(recovery.check_roster_scope(self.r.read()))
         self.assertEqual(recovery.progress['untrackedSourceAgents'], 0)
 
+    def test_owned_box_is_not_reminted_but_unknown_routing_or_owner_is_reviewed(self):
+        self.roster.append(fleet.row(fleet.OTHER, 'box', '789'))
+        recovery = self.recovery()
+        self.assertTrue(recovery.check_roster_scope(self.r.read()))
+        self.write(self.root/'agents'/fleet.OTHER/'profile.json', {'harness':'box', 'serverId':'789'})
+        self.write(self.root/'agents'/fleet.OTHER/'settings.json', {'hiddenFromSidebar':True})
+        self.roster[-1]['harness'] = 'unknown-routing'
+        self.assertFalse(recovery.check_roster_scope(self.r.read()))
+        self.assertEqual(recovery.progress['unknownSourceAgents'], 1)
+        self.roster[-1].update(harness='box', viewerIsOwner=None)
+        self.assertFalse(recovery.check_roster_scope(self.r.read()))
+        self.assertEqual(recovery.progress['unknownSourceAgents'], 1)
+
     def test_known_historical_aliases_remain_covered_without_a_new_generation(self):
         journal = self.r.read()
         terminal = '00000000-0000-4000-8000-000000000004'

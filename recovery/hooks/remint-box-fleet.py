@@ -861,6 +861,8 @@ class Reminter:
             if live is None or self.routine_semantics(live) != self.routine_semantics(captured):
                 raise RuntimeError('Server routine payload changed after capture')
             relative = wrapper['nativePath']
+            if relative in entry.get('copyProof', {}).get('automationStates', {}):
+                raise RuntimeError('Server-only routine collides with a copied local routine')
             self.checked_routine_states(entry['newId'], {relative: False})
             native = owned_json(SD/'agents'/entry['newId']/relative)
             if not entry.get('serverRoutinePauseIntent') and native['enabled'] is not False:

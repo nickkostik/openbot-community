@@ -217,6 +217,18 @@ class RemintTests(unittest.TestCase):
         self.r.m.rpc=rpc;self.r.activate(OLD)
         self.assertTrue(json.loads((self.root/'agents'/NEW/relative).read_text())['enabled'])
 
+    def test_server_authority_cannot_overwrite_local_routine_switch_authority(self):
+        _,path=self.stage_server_routine(with_local=True)
+        journal=self.r.read();entry=journal['entries'][0]
+        data=json.loads(path.read_bytes());wrapper=data['automations'][0]
+        record=json.loads(wrapper['recordJson']);record['id']='routine'
+        wrapper['recordJson']=json.dumps(record);wrapper['nativePath']='automations/routine/automation.json'
+        self.write(path,data);entry['serverRoutineAuthority']['sha256']=M.hashlib.sha256(path.read_bytes()).hexdigest()
+        self.cloud_routines[OLD][0]['recordJson']=wrapper['recordJson']
+        self.r.save(journal)
+        with self.assertRaisesRegex(RuntimeError,'collides'):self.r.activate(OLD)
+        self.assertFalse(any(name=='SetGrokBotAgentAutomationEnabled' for name,_ in self.calls))
+
     def test_non_cron_authored_fire_time_is_not_ignored(self):
         before={'trigger':{'type':'once','firesAt':'original'}}
         after={'trigger':{'type':'once','firesAt':'changed'}}

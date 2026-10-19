@@ -405,6 +405,127 @@ class DispatchTests(fleet.RemintTests):
                 M.main()
             refresh.assert_called_once_with()
 
+    def add_untracked_source(self, local=True, hidden=False, owner=True):
+        self.roster.append({**fleet.row(fleet.OTHER, 'temporal', '789'), 'viewerIsOwner':owner})
+        if local:
+            self.write(self.root/'agents'/fleet.OTHER/'profile.json', {'harness':'box', 'serverId':'789', 'name':'Additional source'})
+            self.write(self.root/'agents'/fleet.OTHER/'settings.json', {'hiddenFromSidebar':hidden})
+
+    def test_visible_source_outside_plan_refuses_before_copy_without_changing_authority(self):
+        self.add_untracked_source()
+        recovery = self.recovery()
+        protected = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with mock.patch.object(self.r, 'stage', side_effect=AssertionError('Must not copy an incomplete source scope')):
+            result = recovery.run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['untrackedSourceAgents'], 1)
+        self.assertEqual(result['untrackedVisibleAgents'], 1)
+        self.assertEqual(result['unknownSourceAgents'], 0)
+        self.assertFalse(result['rosterComplete'])
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+        self.assertFalse(any(method.startswith('Create') or method=='SetGrokBotAgentClientState' for method,_ in self.calls))
+
+    def test_cloud_only_source_is_counted_and_initial_plan_is_not_created_blindly(self):
+        self.add_untracked_source(local=False)
+        (self.root/'openbot-box-remint.json').unlink()
+        with mock.patch.object(self.r, 'initialize', side_effect=AssertionError('Cloud-only source requires a complete importer')):
+            result = self.recovery().run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['untrackedSourceAgents'], 1)
+        self.assertEqual(result['unknownSourceAgents'], 1)
+        self.assertFalse((self.root/'openbot-box-remint.json').exists())
+        self.assertFalse(any(method.startswith('Create') for method,_ in self.calls))
+
+    def test_known_owned_hidden_archives_do_not_block_or_get_resurrected(self):
+        for i in range(200):
+            aid = '00000000-0000-4000-8000-' + str(i + 1000).zfill(12)
+            sid = str(i + 1000)
+            self.roster.append(fleet.row(aid, 'temporal', sid))
+            self.write(self.root/'agents'/aid/'profile.json', {'harness':'temporal', 'serverId':sid})
+            self.write(self.root/'agents'/aid/'settings.json', {'hiddenFromSidebar':True})
+        recovery = self.recovery(); before = (self.root/'openbot-box-remint.json').read_bytes()
+        self.assertTrue(recovery.check_roster_scope(self.r.read()))
+        self.assertEqual(recovery.progress['hiddenArchiveAgents'], 200)
+        self.assertEqual(recovery.progress['untrackedSourceAgents'], 0)
+        self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(), before)
+        self.assertEqual(self.calls, [('ListGrokBotAgents', {})])
+
+    def test_hidden_setting_without_matching_binding_and_unknown_owner_need_review(self):
+        self.add_untracked_source(hidden=True)
+        self.write(self.root/'agents'/fleet.OTHER/'profile.json', {'harness':'box', 'serverId':'different'})
+        result = self.recovery().run()
+        self.assertEqual(result['unknownSourceAgents'], 1)
+        self.assertEqual(result['hiddenArchiveAgents'], 0)
+        self.roster[-1]['viewerIsOwner'] = None
+        result = self.recovery().run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['unknownSourceAgents'], 1)
+
+    def test_explicit_nonowned_temporal_source_does_not_join_owner_transfer(self):
+        self.add_untracked_source(local=False, owner=False)
+        recovery = self.recovery()
+        self.assertTrue(recovery.check_roster_scope(self.r.read()))
+        self.assertEqual(recovery.progress['untrackedSourceAgents'], 0)
+
+    def test_known_historical_aliases_remain_covered_without_a_new_generation(self):
+        journal = self.r.read()
+        terminal = '00000000-0000-4000-8000-000000000004'
+        journal['previousGenerations'] = [{'entries':[{'oldId':fleet.OTHER, 'newId':terminal,
+            'sourceServerId':'789', 'serverId':'790', 'phase':'active'}]}]
+        self.write(self.root/'openbot-box-remint.json', journal)
+        self.add_untracked_source(local=False)
+        recovery = self.recovery(); before = (self.root/'openbot-box-remint.json').read_bytes()
+        self.assertTrue(recovery.check_roster_scope(self.r.read()))
+        self.assertEqual(recovery.progress['untrackedSourceAgents'], 0)
+        self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(), before)
+
+    def test_completed_cohort_does_not_replace_current_authority_for_new_sources(self):
+        self.recovery().run(); self.add_untracked_source()
+        before = (self.root/'openbot-box-remint.json').read_bytes()
+        protected = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file() and p.name in ('store.db','profile.json','settings.json','automation.json')}
+        with mock.patch.object(self.r, 'initialize', side_effect=AssertionError('Must retain the current BOX cohort')):
+            result = self.recovery().run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['counts']['active'], 1)
+        self.assertEqual(result['untrackedVisibleAgents'], 1)
+        self.assertEqual((self.root/'openbot-box-remint.json').read_bytes(), before)
+        self.assertEqual({p:p.read_bytes() for p in protected}, protected)
+
+    def test_source_appearing_mid_copy_is_detected_before_activation(self):
+        stage = self.r.stage
+        def with_new_source(aid):
+            result = stage(aid); self.add_untracked_source(); return result
+        with mock.patch.object(self.r, 'stage', side_effect=with_new_source), mock.patch.object(self.r, 'activate', side_effect=AssertionError('Incomplete fleet must not activate')):
+            result = self.recovery().run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['counts']['registered-box'], 1)
+        self.assertEqual(result['untrackedSourceAgents'], 1)
+        self.assertEqual([(e['oldId'],e['newId']) for e in self.r.read()['entries']], [(fleet.OLD,fleet.NEW)])
+        self.assertFalse(json.loads((self.source/'settings.json').read_text())['hiddenFromSidebar'])
+
+    def test_source_appearing_after_activation_prevents_global_completion(self):
+        restore = self.r.restore_routines
+        def with_new_source():
+            result = restore(); self.add_untracked_source(); return result
+        with mock.patch.object(self.r, 'restore_routines', side_effect=with_new_source):
+            result = self.recovery().run()
+        self.assertEqual(result['phase'], 'review-needed')
+        self.assertEqual(result['counts']['active'], 1)
+        self.assertEqual(result['untrackedSourceAgents'], 1)
+        self.assertEqual(len(self.r.read()['entries']), 1)
+        self.assertFalse(M.snapshot(self.root)['rosterComplete'])
+
+    def test_publication_proof_does_not_replace_a_fresh_whole_roster_check(self):
+        self.recovery().run()
+        state = M.snapshot(self.root)
+        self.assertTrue(state['rosterComplete'])
+        with mock.patch.object(M.time, 'time', return_value=(state['rosterCheckedAtMs']+M.ROSTER_SCOPE_TTL_MS)/1000):
+            expired = M.snapshot(self.root)
+        self.assertTrue(expired['publicationVerified'])
+        self.assertFalse(expired['rosterComplete'])
+        self.assertEqual(expired['phase'], 'checking-bindings')
+        self.assertFalse(expired['nativeAppDeliveryVerified'])
+
     def test_opt_in_cannot_be_a_symlink(self):
         flag=self.root/'openbot-local-only.enable';flag.unlink();flag.symlink_to(self.root/'openbot-mode')
         self.assertFalse(M.allowed(self.root))

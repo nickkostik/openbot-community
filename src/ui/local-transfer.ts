@@ -5,7 +5,7 @@ import type { SupervisorDeps } from "../supervisor/observe.ts";
 import { joinAbs, parseAbsPath } from "../supervisor/paths.ts";
 
 const execute = promisify(execFile);
-const PHASES = new Set(["idle", "disabled", "starting", "checking-bindings", "copying", "registering", "waiting-for-publication", "waiting-for-rate-limit", "waiting-for-control-plane", "activating", "bound-box", "review-needed", "failed", "cancelled-mode-change"]);
+const PHASES = new Set(["idle", "disabled", "starting", "checking-bindings", "copying", "registering", "preserving-late-history", "waiting-for-publication", "waiting-for-rate-limit", "waiting-for-control-plane", "activating", "bound-box", "review-needed", "failed", "cancelled-mode-change"]);
 export type LocalTransfer = {
   enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean; rosterComplete: boolean;
   untrackedSourceAgents?: number; untrackedVisibleAgents?: number; unknownSourceAgents?: number; hiddenArchiveAgents?: number; rosterCheckedAtMs?: number;

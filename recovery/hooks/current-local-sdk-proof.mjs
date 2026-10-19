@@ -90,7 +90,7 @@ export function reviewedSources(hostRaw, workerRaw, allocatorRaw) {
     'ALLOCATOR_BOUNDARY');
   const mint = allocator.slice(a, b); check(digest(mint) === ALLOCATOR_SHA, 'UNREVIEWED_ALLOCATOR');
   return { host: original.slice(0, start) + exports + original.slice(end),
-    worker: worker.replace(main, '\nmodule.exports={walk:collectReachableBlobHexIds};\n'), allocator: mint };
+    worker: worker.replace(main, '\nmodule.exports={walk:collectReachableBlobHexIds,Step:ConversationStep};\n'), allocator: mint };
 }
 
 function denySideEffects() {
@@ -132,6 +132,29 @@ export function ownerReferences(value, ownerIds) {
   return scanned.literalReferences;
 }
 
+/** A completed shell step records where that PAST command ran. Its namespace
+ * must remain unchanged; it is not the next turn's owner binding. This narrow
+ * exception requires a native successful result, completed timestamps, exact
+ * binary roundtrip (checked by caller), and complete raw occurrence coverage. */
+export function completedShellOwnerProvenance(step, raw, ownerIds) {
+  const call = step.message?.value, shell = call?.tool?.value, args = shell?.args;
+  check(step.message?.case === 'toolCall' && call?.tool?.case === 'shellToolCall' &&
+    typeof call.startedAtMs === 'bigint' && typeof call.completedAtMs === 'bigint' &&
+    call.startedAtMs >= 0n && call.completedAtMs > 0n && call.completedAtMs >= call.startedAtMs &&
+    shell?.result?.result?.case === 'success' && object(shell.result.result.value) &&
+    object(args) && ownerIds.includes(args.conversationId), 'UNREVIEWED_STEP_OWNER_REFERENCE');
+  const sanitized = { ...step, message: { ...step.message, value: { ...call,
+    tool: { ...call.tool, value: { ...shell, args: { ...args, conversationId: undefined } } } } } };
+  ownerReferences(sanitized, ownerIds);
+  const data = Buffer.from(raw);
+  for (const id of ownerIds) {
+    const needle = Buffer.from(id); let count = 0, offset = 0;
+    while ((offset = data.indexOf(needle, offset)) >= 0) { count++; offset += needle.length; }
+    check(count === (args.conversationId === id ? 1 : 0), 'UNKNOWN_STEP_OWNER_REFERENCE');
+  }
+  return { path: 'message.value.tool.value.args.conversationId', completed: true, result: 'success', bytesUnchanged: true };
+}
+
 function canonical(value) {
   if (value instanceof Uint8Array) return { bytes: value.length, sha256: digest(value) };
   if (Array.isArray(value)) return value.map(canonical);
@@ -163,7 +186,7 @@ export function proveCurrentSdk(options, plan) {
     const worker = new Module(options.worker); worker.filename = options.worker;
     worker.paths = Module._nodeModulePaths(path.dirname(options.worker)); worker._compile(sources.worker, options.worker);
     const sandbox = {}; vm.createContext(sandbox); vm.runInContext(sources.allocator + '\nthis.mint=__openbot_box_nextEntryId;', sandbox, { timeout: 1000 });
-    const sdk = { ...mod.exports, walk: worker.exports.walk, nextId: sandbox.mint };
+    const sdk = { ...mod.exports, walk: worker.exports.walk, Step: worker.exports.Step, nextId: sandbox.mint };
     const { DatabaseSync } = require('node:sqlite');
     function open(filename) { const db = new DatabaseSync(filename, { readOnly: true }); opened.push(db);
       assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok'); return db; }
@@ -199,19 +222,26 @@ export function proveCurrentSdk(options, plan) {
     const closure = sdk.walk({ rootBytes, getBlobByHexId: get, onBlobReference: id => check(get(id), 'MISSING_CURRENT_REFERENCE') });
     check(closure.unresolvedProtoRefs === 0, 'UNRESOLVED_CURRENT_GRAPH');
     const activeIds = new Set([ROOT_SLOT, ...closure.blobTypeByHexId.keys()]), literalBlobs = new Set(), archivedHits = new Set();
+    const completedToolProvenance = [];
     forEachSqliteRow(blobs, 'SELECT id,data FROM blobs ORDER BY id', row => {
+      if (closure.blobTypeByHexId.get(row.id) === 'agent.v1.ConversationStep' &&
+        ownerIds.some(id => Buffer.from(row.data).includes(Buffer.from(id)))) {
+        const step = sdk.Step.fromBinary(row.data); assert.ok(Buffer.from(step.toBinary()).equals(Buffer.from(row.data)));
+        completedToolProvenance.push({ blobSha256: digest(row.data), ...completedShellOwnerProvenance(step, row.data, ownerIds) });
+        return;
+      }
       const hit = classifyRawBlob({ id: row.id, data: row.data, activeIds, coreJsonIds: coreIds, ids: ownerIds });
       if (hit) (hit.active ? literalBlobs : archivedHits).add(hit.sha256);
     });
     const context = sdk.context(), store = { getBlob: async (_context, id) => get(hex(id)) };
     return verifyHandle({ sdk, sql, blobs, store, root, rootBytes, messages, context, beforeGraph, sdkUserIds,
-      plan, options, planFileSha256: digest(planBytes), directory, beforeFiles, opened, guard, literal, literalBlobs, archivedHits, archiveReports, closure });
+      plan, options, planFileSha256: digest(planBytes), directory, beforeFiles, opened, guard, literal, literalBlobs, archivedHits, completedToolProvenance, archiveReports, closure });
   } catch (error) { for (const db of opened.reverse()) { try { db.close(); } catch {} } guard.restore(); throw error; }
 }
 
 async function verifyHandle(state) {
   const { sdk, sql, blobs, store, root, rootBytes, messages, context, beforeGraph, sdkUserIds,
-    plan, options, planFileSha256, directory, beforeFiles, opened, guard, literal, literalBlobs, archivedHits, archiveReports, closure } = state;
+    plan, options, planFileSha256, directory, beforeFiles, opened, guard, literal, literalBlobs, archivedHits, completedToolProvenance, archiveReports, closure } = state;
   try {
     const derived = await sdk.derive(context, root, store); assert.equal(derived.turns.length, root.turns.length);
     const builder = { messages: [], clearMessages() { this.messages = []; }, appendMessages(rows) { this.messages.push(...rows); }, getState() { return this.messages; } };
@@ -263,6 +293,7 @@ async function verifyHandle(state) {
       nativeReachableRefs: closure.blobTypeByHexId.size, unresolvedProtoRefs: 0, sourceArchives: archiveReports,
       structuralOwnerReferences: [], quotedHistoryUnchanged: true, literalOwnerReferences: literal.length,
       literalBlobHashes: [...literalBlobs].sort(), archivedOwnerReferenceBlobHashes: [...archivedHits].sort(),
+      completedHistoricalToolProvenance: completedToolProvenance,
       graphUnchanged: true, allSourcesByteUnchanged: true, metadataOwnerVerified: true,
       capacity: { estimated: true, usedTokens, contextTokens: plan.selectedRoute.contextTokens, maxOutputTokens: plan.selectedRoute.maxOutputTokens, fits: true },
       ui: { records: rows.length, readable: accepted.length, paging }, nextIds, afterUserNextIds,

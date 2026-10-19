@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { validatePlan, reviewedSources, verifyArchiveGraph, ownerReferences, ROOT_SLOT, CODEC_SHA } from './current-local-sdk-proof.mjs';
+import { validatePlan, reviewedSources, verifyArchiveGraph, ownerReferences, completedShellOwnerProvenance, ROOT_SLOT, CODEC_SHA } from './current-local-sdk-proof.mjs';
 import { classifyRawBlob } from './history-identifier-sdk-check.mjs';
 
 const require = createRequire(import.meta.url), { DatabaseSync } = require('node:sqlite');
@@ -61,6 +61,22 @@ test('unknown active binary UUID references cannot be treated as harmless quoted
     coreJsonIds: new Set(), ids: [SOURCE] };
   assert.throws(() => classifyRawBlob(input), /ACTIVE_UNKNOWN_ALIAS_REFERENCE/);
   assert.equal(classifyRawBlob({ ...input, activeIds: new Set() }).active, false);
+});
+
+test('completed successful shell execution namespaces remain immutable historical provenance', () => {
+  const step = { message: { case: 'toolCall', value: { startedAtMs: 100n, completedAtMs: 200n,
+    tool: { case: 'shellToolCall', value: { args: { conversationId: SOURCE, command: 'historical command' },
+      result: { result: { case: 'success', value: { exitCode: 0 } } } } } } } };
+  const before = structuredClone(step);
+  const result = completedShellOwnerProvenance(step, Buffer.from('protobuf-prefix-' + SOURCE), [SOURCE]);
+  assert.equal(result.completed, true); assert.equal(result.bytesUnchanged, true); assert.deepEqual(step, before);
+  for (const mutate of [s => s.message.value.completedAtMs = 0n, s => s.message.value.completedAtMs = 50n,
+    s => s.message.value.tool.value.result.result.case = 'pending', s => s.message.value.tool.value.args.owner = SOURCE,
+    s => s.message.value.tool.case = 'unknownToolCall']) {
+    const changed = structuredClone(step); mutate(changed);
+    assert.throws(() => completedShellOwnerProvenance(changed, Buffer.from(SOURCE), [SOURCE]));
+  }
+  assert.throws(() => completedShellOwnerProvenance(step, Buffer.from(SOURCE + SOURCE), [SOURCE]), /UNKNOWN_STEP_OWNER_REFERENCE/);
 });
 
 test('source graphs require every unchanged non-slot blob and exact root archive', () => {

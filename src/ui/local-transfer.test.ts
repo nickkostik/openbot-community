@@ -117,3 +117,13 @@ test("completion needs whole-roster proof and untracked counts remain public met
   assert.equal(status.rosterComplete, false);
   assert.equal(JSON.stringify(status).includes("private"), false);
 });
+
+test("bounded history preservation has an explicit public phase without private tail payloads", () => {
+  const progress = publicTransfer({ phase: "preserving-late-history", enabled: true,
+    lateHistoryRepair: { sourceText: "private chat", receiptPath: "/private/artifact" },
+    nativeAppDeliveryVerified: true, billingVerified: true });
+  assert.equal(progress.phase, "preserving-late-history");
+  assert.equal("lateHistoryRepair" in progress, false);
+  assert.equal(progress.nativeAppDeliveryVerified, false);
+  assert.equal(progress.billingVerified, false);
+});

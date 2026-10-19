@@ -278,8 +278,9 @@ def maybe_start(root, now=None, requested=False):
 
 
 class Recovery:
-    def __init__(self, root, reminter=None, sleep=time.sleep, clock=time.monotonic):
+    def __init__(self, root, reminter=None, sleep=time.sleep, clock=time.monotonic, worker_lock_fd=None):
         self.root = root
+        self.worker_lock_fd = worker_lock_fd
         self.module = load('remint-box-fleet')
         self.module.SD = root
         self.module.JOURNAL = root / 'openbot-box-remint.json'
@@ -459,6 +460,16 @@ class Recovery:
             self.status('copying', agentCount=len(sources))
             journal = self.r.initialize()
         self.progress['agentCount'] = len(journal['entries'])
+        tail = load('history-tail-repair')
+        if tail.pending(journal, self.progress['jobId']):
+            # A crash can happen after UI commit and before SDK/receipt pin.
+            # Resume that exact durable plan before publication/verification.
+            self.status('preserving-late-history')
+            repaired = tail.TailRepair(self, self.worker_lock_fd).run()
+            self.require(); self.r.publish()
+            self.status('waiting-for-publication', lateHistoryRepair=repaired,
+                        nextCheckAtMs=int(time.time()*1000)+60000)
+            return self.progress
         for entry in journal['entries']:
             self.require()
             if entry['phase'] == 'planned':
@@ -482,6 +493,24 @@ class Recovery:
             return self.progress
         self.require()
         if not self.check_roster_scope(self.r.read()):
+            return self.progress
+        # Check all known source heads before any source is hidden. A bounded
+        # literal cloud append can be preserved on hidden registered copies;
+        # unsupported or active-copy changes still require explicit review.
+        tail = load('history-tail-repair')
+        try:
+            cache = {}
+            for entry in self.r.read()['entries']:
+                load('history-merge-receipt').source_freshness(self.r, self.r.read(), entry, cache)
+        except RuntimeError as error:
+            if str(error) != tail.FRESHNESS_ERROR:
+                raise
+            self.status('preserving-late-history', verifiedAgents=verified)
+            repaired = tail.TailRepair(self, self.worker_lock_fd).run()
+            self.require()
+            self.r.publish()
+            self.status('waiting-for-publication', lateHistoryRepair=repaired,
+                        nextCheckAtMs=int(time.time()*1000)+60000)
             return self.progress
         self.status('activating', verifiedAgents=verified)
         self.r.activate()
@@ -522,8 +551,8 @@ def main():
             raise RuntimeError('Invalid inherited transfer lock')
         fcntl.flock(args.worker_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     held = contextlib.nullcontext() if args.worker_lock_fd is not None else lock(args.root)
-    with held:
-        recovery = Recovery(args.root)
+    with held as acquired_fd:
+        recovery = Recovery(args.root, worker_lock_fd=args.worker_lock_fd if args.worker_lock_fd is not None else acquired_fd)
         try:
             if args.refresh_publication_bindings:
                 print(json.dumps(recovery.refresh_publication_bindings()))

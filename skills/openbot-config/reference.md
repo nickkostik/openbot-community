@@ -356,7 +356,7 @@ The API publishes a bounded whitelist, excluding agent IDs, paths, credentials, 
 | `agentCount`, `verifiedAgents`, `updatedAtMs` | Optional nonnegative progress counts/update time. `verifiedAgents` is zero unless the current exact completion proof matches; not native-client delivery evidence. |
 | `publicationVerified` | True only when all current entries are active, saved `publicationProof` matches the exact canonical journal SHA256 and verification-artifact SHA256, and verification results match every current source/destination pair with `verified-box` statuses. No private identifiers or artifact contents are exposed. |
 | `refusalPhase`, `diagnosticCode` | Optional bounded phase plus safe category: `history-conflict`, `identity-conflict` or `preflight-refused`. Preserve evidence and inspect privately rather than exposing raw errors. |
-| `diagnosticAssistant`, `diagnosticReason` | `unavailable` and a fixed availability explanation; no assistant execution is implied. |
+| `diagnosticAssistant`, `diagnosticReason`, `diagnosticAdviceCode` | Adapter receipt status `running`, `available`, `failed` or `disabled`; `unavailable` only when no adapter is installed. Reason is product-owned fixed text. Optional advice code is allowlisted and shown only for available advice; no returned prose/execution authority is exposed. |
 | `nativeAppDeliveryVerified`, `billingVerified` | Always false in this public transfer status. |
 
 The service selects its reviewed source helper or installed `openbot-hooks/custom-dispatch-recovery.py`; callers cannot supply an executable. The helper also provides the following commands from the authenticated Computer:
@@ -377,7 +377,7 @@ The private `openbot-custom-dispatch-state.json` tracks job progress; `openbot-b
 
 Transient control-plane failures can retain bounded retry/backoff. Nontransient failures enter `review-needed`, stopping automatic supervisor retries. Explicit resume requests another attempt under all current guards; it does not resolve conflicts, accept a history-merge receipt, override copying rules or alter the retained source evidence. If mode/Local authority is withdrawn, the workflow stops; a start/resume button is not permission to restore that authority silently. Complete separately authorized reconciliation when required, then resume the same job.
 
-The public tree has no safely callable bounded ACP/local Codex/OpenCode diagnostic adapter. Report `diagnosticAssistant: "unavailable"` honestly; do not fabricate agent work, execute arbitrary commands or launch unbounded inference/spend as a substitute. A transferred/registered/active roster or `bound-box` is not a native send/tool-return/delivered-reply, billing, live SDK/context merge or prune-safety proof. Keep originals, private backups, routines and session branches under their existing contracts and verify requested native-client outcomes independently.
+When the optional tool-free adapter is installed, the coordinator may request its bounded diagnostic for a persisted review-needed refusal. `diagnosticAssistant` then follows the actual private receipt: `running`, `available`, `failed` or `disabled`. Only a missing adapter reports `unavailable`; disabled/unsupported routes and failed requests must not be presented as a completed review. Available advice is a product-owned static string selected by an allowlisted `diagnosticAdviceCode`, never model-returned prose or an executable command. See [the advisor contract](#optional-tool-free-transfer-advisor) for privacy, selected-route checks, persisted call limits and opt-out. Do not fabricate agent work or launch unbounded inference/spend. A transferred/registered/active roster or `bound-box` is not a native send/tool-return/delivered-reply, billing, live SDK/context merge or prune-safety proof. Keep originals, private backups, routines and session branches under their existing contracts and verify requested native-client outcomes independently.
 
 ## Reuse existing BOX counterparts in Custom
 
@@ -539,6 +539,29 @@ Original assistant reasoning stays separate `reasoning_content`, including tool-
 Retention is 1–365 days; capture 1024–1048576 bytes; records 1–10000. Prefer PUT `/api/logs/settings` for pruning and Official tap reconcile; GET settings/logs/by-ID and POST `/api/logs/clear` are separate controls. Body logging requires authorized private handling. Never print credentials, full transcripts or summary sidecars.
 
 Hop and custom-host records share request identity for correlation, but harness observation is not a second provider request. Usage uses actual provider/model and reported input/output/cache fields; cached metadata and UI health are not billing/quota/phone proof. Read-only roster diagnostics/profile repairs do not establish native identity admission or delivery.
+
+### Optional tool-free transfer advisor
+
+The panel's deterministic Local-transfer coordinator remains the only transfer writer. When it persists a review-needed refusal, it may start the separate optional [transfer-diagnostics.py](../../recovery/hooks/transfer-diagnostics.py) advisor. This is a bounded inference classification, not a tool-enabled repair agent. It cannot mint/register/activate bots, reconcile histories or SDK roots, edit sections/routines/settings, reload a host, execute returned commands, select another route or declare verification complete. The transfer continues or waits according to its own existing guards regardless of advisor availability.
+
+Private files under the selected data root are `openbot-transfer-diagnostic.json` and its separate `openbot-transfer-diagnostic.lock`. The advisor reads the bounded owned `openbot-custom-dispatch-state.json`; it writes only its own atomic diagnostic receipt under its exclusive lock. Never edit the coordinator's phase, journal, receipt or holds to make the advisor run. These files are installation state and stay outside public source/backups intended for other users.
+
+```bash
+# Status only; no inference request:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json
+# Explicit bounded diagnostic invocation, also used by the coordinator:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json --run
+```
+
+Only strict allowlisted phases/refusal codes, bounded aggregate counts and boolean merge/publication observations form the model's diagnostic facts. No bot names/IDs, histories, instructions, summaries, sessions, credentials, raw errors, arbitrary strings or tool arguments leave through this diagnostic. Its opaque local job-scoped request identity is not a bot/conversation identity. Returned prose is never displayed or executed: accept only the exact JSON advice-code schema and render product-owned static allowlisted text. Tool/function calls, malformed/oversized answers and unrecognized codes fail instead of supplying an action.
+
+The selected global model must have one unambiguous saved route on an approved direct origin: OpenCode Go `https://opencode.ai/zen/go/v1`, OpenAI API `https://api.openai.com/v1`, or NVIDIA `https://integrate.api.nvidia.com/v1`. Other origins, including unsupported OAuth/backend origins, report unavailable; neither a provider family label nor a same-slug route authorizes substitution. The helper verifies the owned loopback hop process/listener and calls that existing hop, which retains provider credential/protocol handling. It does not read provider secrets, contact a provider directly, pool accounts, add a provider or fall back. Custom and current route/state authority are rechecked around the request; changes discard the result.
+
+Before network work, persist the fingerprint of the local job, selected route and sanitized refusal facts. At most one billable diagnostic is attempted per unchanged fingerprint, including after timeout or process restart; a changed fingerprint is additionally subject to the persisted 15-minute backoff. Do not delete the receipt/lock or change a job to bypass this protection. Network work has a 12-second deadline, bounded response size and a 15-second parent subprocess limit. Create `openbot-transfer-diagnostics.disable` in the data root to opt out; it disables future calls without changing transfer authority or saved routing.
+
+The panel must distinguish unavailable/disabled, failed, pending/running and available advice honestly. Missing advice is not successful diagnosis; a static suggestion is not a proven cause. `nativeAppDeliveryVerified` remains false. Neither advice, an inference HTTP 200 nor a completed transfer worker proves ordered full publication, loaded context, actual Grok client acceptance/tool return/delivered reply, billing or prune safety. Those remain separate deterministic checks and live tests.
 
 ### Routing diagnostic egress
 

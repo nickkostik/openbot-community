@@ -312,7 +312,7 @@ class DispatchTests(fleet.RemintTests):
             result = M.snapshot(self.root)
             self.assertTrue(result['lockHeld'])
             self.assertFalse(result['workerRunning'])
-            self.assertEqual(result['diagnosticAssistant'], 'unavailable')
+            self.assertEqual(result['diagnosticAssistant'], 'disabled')
         (self.root/'openbot-mode').write_text('official')
         self.assertFalse(M.snapshot(self.root)['enabled'])
         with mock.patch.object(M.subprocess, 'Popen', side_effect=AssertionError('Official cannot spawn')):
@@ -408,6 +408,47 @@ class DispatchTests(fleet.RemintTests):
     def test_opt_in_cannot_be_a_symlink(self):
         flag=self.root/'openbot-local-only.enable';flag.unlink();flag.symlink_to(self.root/'openbot-mode')
         self.assertFalse(M.allowed(self.root))
+
+    def test_refusal_persists_before_starting_optional_advisor(self):
+        recovery = self.recovery()
+        recovery.progress['jobId'] = '00000000-0000-4000-8000-000000000001'
+        def started(root):
+            saved = json.loads((root/M.STATE).read_text())
+            self.assertEqual(saved['phase'], 'review-needed')
+            self.assertEqual(saved['diagnosticCode'], 'history-conflict')
+            return True
+        with mock.patch.object(M, 'Recovery', return_value=recovery), \
+             mock.patch.object(recovery, 'run', side_effect=RuntimeError('sdk graph conflict private-data')), \
+             mock.patch.object(M, 'start_diagnostic', side_effect=started) as advisor, \
+             mock.patch('sys.argv', ['recovery', '--root', str(self.root)]):
+            with self.assertRaises(SystemExit) as exit:
+                M.main()
+        self.assertEqual(exit.exception.code, 1)
+        advisor.assert_called_once_with(self.root)
+        self.assertEqual((self.root/'openbot-mode').read_text().strip(), 'custom')
+
+    def test_advisor_process_is_bounded_tool_free_and_failure_never_mutates_transfer(self):
+        self.write(self.root/M.STATE, {'jobId':'00000000-0000-4000-8000-000000000001',
+            'phase':'review-needed','refusalPhase':'copying','diagnosticCode':'history-conflict','counts':{}})
+        self.write(self.root/'openbot-plan.json', {'agents':{'*':{'providerId':'opencode','modelId':'muse'}},
+            'catalog':{'providers':[{'id':'opencode','origin':'https://opencode.ai/zen/go/v1'}],
+                       'models':[{'id':'opencode:muse','providerId':'opencode','slug':'muse'}]}})
+        before = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with mock.patch.object(M.subprocess, 'Popen') as spawn:
+            self.assertTrue(M.start_diagnostic(self.root))
+            argv = spawn.call_args.args[0]
+            self.assertEqual(argv[:5], ['/usr/bin/timeout', '--signal=TERM', '15s', '/usr/bin/python3', str(M.HERE/'transfer-diagnostics.py')])
+            self.assertEqual(argv[5:], ['--state', str(self.root/M.STATE), '--run'])
+            self.assertTrue(spawn.call_args.kwargs['close_fds'])
+            self.assertNotIn('pass_fds', spawn.call_args.kwargs)
+            self.assertEqual(spawn.call_args.kwargs['stdout'], M.subprocess.DEVNULL)
+        with mock.patch.object(M.subprocess, 'Popen', side_effect=OSError('private-error')):
+            self.assertFalse(M.start_diagnostic(self.root))
+        self.assertEqual({p:p.read_bytes() for p in before}, before)
+        (self.root/'openbot-mode').write_text('official')
+        with mock.patch.object(M.subprocess, 'Popen') as spawn:
+            self.assertFalse(M.start_diagnostic(self.root))
+            spawn.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

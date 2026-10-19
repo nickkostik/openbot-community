@@ -51,7 +51,16 @@ try {
   await card.getByText(/Review required during copying/).waitFor();
   assert.match(await card.innerText(), /1 of 3 active/);
   assert.match(await card.innerText(), /Automatic AI review is unavailable/);
+  progress = { ...progress, diagnosticAssistant: 'running' };
   await page.reload();
+  await card.getByText('AI diagnostic review is running.', { exact: true }).waitFor();
+  progress = { ...progress, diagnosticAssistant: 'available', diagnosticAdviceCode: 'history-review',
+    diagnosticReason: '<script>secret-raw-model-output</script>' };
+  await page.reload();
+  await card.getByText('AI diagnostic review completed.', { exact: true }).waitFor();
+  await card.getByText(/Compare immutable history receipts/).waitFor();
+  assert.doesNotMatch(await card.innerText(), /secret-raw-model-output/);
+  assert.match(await card.innerText(), /cannot change modes, run tools/);
   await page.getByRole('button', { name: 'Resume Local transfer' }).click();
   assert.deepEqual(actions, [{ action: 'start' }, { action: 'resume' }]);
   assert.match(await card.innerText(), new RegExp(jobId));

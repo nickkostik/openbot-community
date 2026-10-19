@@ -506,6 +506,23 @@ class RuntimeHistoryTests(unittest.TestCase):
         actual[0]['startedAt'] = 1001
         self.assertFalse(R.runtime_history(actual, self.baseline, self.projection))
 
+    def test_trusted_native_legacy_variants_survive_exact_window_and_one_new_observation(self):
+        projection = [native_run('same-historical-id', 1000),
+                      {**native_run('same-historical-id', 999), 'detail': 'second retained record variant'}]
+        projection.extend(native_run('negative-history-' + str(index), -index) for index in range(1, 19))
+        # These are trusted native parser outputs, not new observations to
+        # admit under the strict current run grammar.
+        projection[0]['finishedAt'] = None
+        projection[2]['finishedAt'] = None
+        baseline = copy.deepcopy(projection)
+        self.assertEqual(len(projection), 20)
+        self.assertTrue(R.runtime_history(copy.deepcopy(projection), baseline, projection))
+        actual = [native_run('strict-new-observation', 1001), *copy.deepcopy(projection[:19])]
+        self.assertEqual(len(actual), 20)
+        self.assertTrue(R.runtime_history(actual, baseline, projection))
+        self.assertFalse(R.runtime_history([projection[0], *projection[2:]], baseline, projection))
+        self.assertFalse(R.runtime_history(actual[:-1], baseline, projection))
+
     def test_changed_history_cannot_infer_a_missing_native_projection(self):
         actual = [native_run('new-native-run', 1001), *self.projection[:19]]
         self.assertFalse(R.runtime_history(actual, self.baseline, None))

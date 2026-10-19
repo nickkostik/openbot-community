@@ -84,6 +84,25 @@ def remap_transcript_jsonl(text, mapping):
     return ''.join(result)
 
 
+
+MAX_ENTRY_ID_BYTES=128
+
+
+def compact_branch_identifier(legacy,occupied):
+    """Keep a full deterministic digest inside the native 128-byte bound."""
+    for counter in range(100000):
+        seed=legacy if counter==0 else legacy+'\0'+str(counter)
+        candidate='openbot-branch-'+digest(seed.encode('utf8'))
+        if candidate not in occupied:return candidate
+    raise RuntimeError('Cannot allocate an unambiguous bounded history identity')
+
+
+def branch_identifier(original,payload_sha,occupied):
+    legacy=original+'~openbot-branch-'+payload_sha
+    if len(legacy.encode('utf8'))<=MAX_ENTRY_ID_BYTES and legacy not in occupied:return legacy
+    return compact_branch_identifier(legacy,occupied)
+
+
 def merge_entries(sources, mapping=None):
     """Retain differing same-ID payloads; deduplicate exact normalized records.
 
@@ -112,10 +131,9 @@ discarded; every original body is also retained in its branch snapshot.
         for index, (sha, record) in enumerate(sorted(variants.items())):
             aid = original
             if index:
-                # Full digest avoids truncation collisions. Reserve original IDs.
-                aid = original + '~openbot-branch-' + sha
-                while aid in occupied:
-                    aid += '~'
+                # Reserve original IDs and keep the complete collision digest
+                # within the platform's native entry-identifier bound.
+                aid = branch_identifier(original,sha,occupied)
                 occupied.add(aid)
                 conflicts += 1
             output.append({'entry': {**record['entry'], 'id': aid},

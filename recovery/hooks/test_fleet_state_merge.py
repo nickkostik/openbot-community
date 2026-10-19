@@ -32,6 +32,25 @@ class MergeTests(unittest.TestCase):
         self.assertEqual((rows, conflicts), M.merge_entries({B: [second], A: [first]}))
         self.assertEqual(first['id'], 't1u')
 
+    def test_long_variant_identifiers_fit_native_bound_without_losing_source(self):
+        original='agent-outbound:'+('a'*64)
+        a={'id':original,'kind':'message','role':'assistant','content':'first','timestampMs':1}
+        b={**a,'content':'second'}
+        rows,conflicts=M.merge_entries({A:[a],B:[b]})
+        self.assertEqual(conflicts,1)
+        self.assertTrue(all(len(r['entry']['id'].encode())<=128 for r in rows))
+        self.assertEqual({r['originalEntryId']for r in rows},{original})
+        self.assertEqual({r['entry']['content']for r in rows},{'first','second'})
+        self.assertEqual((rows,conflicts),M.merge_entries({B:[b],A:[a]}))
+
+    def test_compact_variant_identifiers_reserve_user_ids_and_handle_utf8(self):
+        legacy=('é'*60)+'~openbot-branch-'+('a'*64)
+        first=M.compact_branch_identifier(legacy,set())
+        second=M.compact_branch_identifier(legacy,{first})
+        self.assertNotEqual(first,second)
+        self.assertLessEqual(len(second.encode()),128)
+        self.assertEqual(second,M.compact_branch_identifier(legacy,{first}))
+
     def test_identical_payloads_coalesce_only_after_identity_mapping(self):
         first = {'id': 't1u', 'timestampMs': 1, 'agentId': A, 'text': 'keep tool output'}
         rows, conflicts = M.merge_entries({A: [first], C: [{**first, 'agentId': C}]}, {A: C})

@@ -345,7 +345,7 @@ class Reminter:
                 directory=self.m.SD/'agents'/entry['newId']
                 settings=self.m.read(directory/'settings.json',{})
                 profile=self.m.read(directory/'profile.json',{})
-                if (candidate.get('schema')!=validator.DELTA_SCHEMA or
+                if (candidate.get('schema')not in(validator.DELTA_SCHEMA,validator.IDENTIFIER_SCHEMA)or
                         settings.get('hiddenFromSidebar') is not True or
                         profile.get('harness')!='box' or
                         any(self.m.read(path,{}).get('enabled') is not False

@@ -59,9 +59,12 @@ try {
   await page.reload();
   await page.getByRole('button', { name: 'Resume Local transfer' }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Resume Local transfer' }).isDisabled(), true);
-  progress = { ...progress, workerRunning: false, lockHeld: true };
+  progress = { ...progress, workerRunning: false, lockHeld: true, phase: 'waiting-for-publication',
+    agentCount: 34, counts: { planned: 0, copied: 0, 'registered-box': 34, active: 0 } };
   await page.reload();
   await card.getByText('Transfer locked', { exact: true }).waitFor();
+  assert.match(await card.innerText(), /waiting for publication · 0 of 34 active/);
+  assert.doesNotMatch(await card.innerText(), /Transfer recorded/);
   await card.getByText(/A running transfer worker has not been confirmed/).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Resume Local transfer' }).isDisabled(), true);
   progress = { ...progress, workerRunning: false, lockHeld: false, enabled: false };

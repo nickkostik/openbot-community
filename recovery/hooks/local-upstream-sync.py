@@ -758,11 +758,12 @@ def assessment_key(original_policy, upstream_sha):
     digest = hashlib.sha256(original_policy + upstream_sha.encode())
     paths = [HERE / name for name in ('local-upstream-sync.py', 'upstream-instructions.mjs',
                                      'computer-recovery.py', 'native-routine-trigger-preservation.py',
+                                     'roster-read-concurrency-inject.py',
                                      'local-engine.py', 'latest-local-engine.mjs',
                                      'latest-box-ports.cjs', 'latest-box-compatibility.json',
                                      'verify-latest-local-engine.cjs')]
     paths += [HERE / name for name in load('computer-recovery').PATCHES]
-    for path in paths:
+    for path in dict.fromkeys(paths):
         digest.update(path.name.encode()); digest.update(path.read_bytes())
     return digest.hexdigest()
 

@@ -202,6 +202,12 @@ class ApplyTests(ReceiptTests):
         with self.assertRaisesRegex(RuntimeError,'advanced again'):repair.apply(self.r.read(),intent)
         self.assertEqual(T.rows(target/'store.db'),before)
 
+    def test_unaffected_active_cohort_is_not_a_tail_prepare_candidate(self):
+        repair,intent,target,_=self.setup_apply();journal=self.r.read();journal['entries'][0]['phase']='active';self.r.save(journal)
+        with mock.patch.object(repair,'prepare') as prepare, self.assertRaisesRegex(RuntimeError,'No bounded'):
+            repair.run()
+        prepare.assert_not_called();self.assertEqual(len(T.rows(target/'store.db')),1)
+
     def test_completed_job_cannot_start_a_second_automatic_attempt(self):
         repair,intent,target,_=self.setup_apply();value=json.loads(T.owned(intent['path']));value.update(addedMessages=1,textBytes=5);T.write(pathlib.Path(intent['path']),value);intent=T.reference(pathlib.Path(intent['path']))
         repair.prepare=lambda *args:intent
@@ -228,6 +234,21 @@ class ApplyTests(ReceiptTests):
         with mock.patch.object(T.subprocess,'run') as run, self.assertRaisesRegex(RuntimeError,'unreviewed codec'):
             repair.run_codec(self.backup,{'engineSha256':'f'*64})
         run.assert_not_called()
+
+    def test_tail_job_requires_exact_process_reload_ack_after_receipt_pin(self):
+        repair,intent,target,_=self.setup_apply();path=self.backup/('bounded-tail-job-'+repair.recovery.progress['jobId']+'.json')
+        T.write(path,{'phase':'completed','jobId':repair.recovery.progress['jobId'],'reports':[]},True)
+        request_id=str(uuid.uuid4())
+        with mock.patch.object(self.r,'publish',return_value={'publicationReloadRequestId':request_id}) as publish, mock.patch.object(self.r.reload,'read',return_value=None):
+            self.assertTrue(T.waiting_for_reload(repair.recovery));publish.assert_called_once()
+        self.assertEqual(json.loads(path.read_text())['reloadRequestId'],request_id)
+        with mock.patch.object(self.r.reload,'read',return_value={'requestId':request_id,'phase':'pending'}), mock.patch.object(self.r,'publish') as publish:
+            self.assertTrue(T.waiting_for_reload(repair.recovery));publish.assert_not_called()
+        with mock.patch.object(self.r.reload,'read',return_value={'requestId':request_id,'phase':'acknowledged'}):
+            self.assertFalse(T.waiting_for_reload(repair.recovery))
+        displaced=str(uuid.uuid4())
+        with mock.patch.object(self.r.reload,'read',return_value={'requestId':displaced,'phase':'acknowledged'}), mock.patch.object(self.r,'publish',return_value={'publicationReloadRequestId':displaced}) as publish:
+            self.assertTrue(T.waiting_for_reload(repair.recovery));publish.assert_called_once()
 
     def test_symlinked_evidence_is_not_read(self):
         repair,intent,target,_=self.setup_apply();p=pathlib.Path(intent['path']);link=p.with_name('link.json');link.symlink_to(p)

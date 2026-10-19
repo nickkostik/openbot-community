@@ -194,6 +194,32 @@ def append_rows(r, mapping, store, additions):
     return projections, records
 
 
+def publication_state(recovery):
+    journal = recovery.r.read(); job = recovery.progress['jobId']; uuid.UUID(job)
+    path = pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job + '.json')
+    return path, json.loads(owned(path)) if path.exists() else None
+
+
+def record_publication(recovery, request):
+    recovery.require(); path, state = publication_state(recovery)
+    if not state or state.get('phase') != 'completed': raise RuntimeError('Tail repair publication has no completed intent')
+    request_id = request['publicationReloadRequestId']; uuid.UUID(request_id)
+    write(path, {**state, 'reloadRequestId': request_id})
+
+
+def waiting_for_reload(recovery):
+    """UI publication cannot prove a process discarded its cached SDK root."""
+    recovery.require(); _, state = publication_state(recovery)
+    if not state or state.get('phase') != 'completed': return False
+    request = recovery.r.reload.read(recovery.root)
+    if request and request['requestId'] == state.get('reloadRequestId'):
+        return request['phase'] != 'acknowledged'
+    # Recover a crash after receipt pin but before requesting/recording reload.
+    # A displaced global request also needs a fresh request bound to this job.
+    record_publication(recovery, recovery.r.publish())
+    return True
+
+
 def pending(journal, job_id):
     uuid.UUID(job_id)
     path = pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job_id + '.json')
@@ -438,7 +464,7 @@ class TailRepair:
             try:
                 for entry in journal['entries']:
                     self.require()
-                    if not entry.get('historyMergeReceipt'): continue
+                    if entry['phase'] == 'active' or not entry.get('historyMergeReceipt'): continue
                     result = self.prepare(journal, entry, entry['historyMergeReceipt'])
                     if result:
                         intents.append(result)

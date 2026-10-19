@@ -466,7 +466,8 @@ class Recovery:
             # Resume that exact durable plan before publication/verification.
             self.status('preserving-late-history')
             repaired = tail.TailRepair(self, self.worker_lock_fd).run()
-            self.require(); self.r.publish()
+            self.require(); request = self.r.publish()
+            tail.record_publication(self, request)
             self.status('waiting-for-publication', lateHistoryRepair=repaired,
                         nextCheckAtMs=int(time.time()*1000)+60000)
             return self.progress
@@ -482,6 +483,9 @@ class Recovery:
             if entry['phase'] == 'copied':
                 self.status('registering'); self.r.register(entry['oldId'])
         journal = self.r.read()
+        if tail.waiting_for_reload(self):
+            self.status('waiting-for-publication', nextCheckAtMs=int(time.time()*1000)+60000)
+            return self.progress
         if not journal.get('publicationReloadRequestedAtMs'):
             self.status('waiting-for-publication'); self.r.publish()
         results = self.r.verify()
@@ -500,15 +504,18 @@ class Recovery:
         tail = load('history-tail-repair')
         try:
             cache = {}
-            for entry in self.r.read()['entries']:
-                load('history-merge-receipt').source_freshness(self.r, self.r.read(), entry, cache)
+            fresh_journal = self.r.read()
+            for entry in fresh_journal['entries']:
+                if entry['phase'] != 'active':
+                    load('history-merge-receipt').source_freshness(self.r, fresh_journal, entry, cache)
         except RuntimeError as error:
             if str(error) != tail.FRESHNESS_ERROR:
                 raise
             self.status('preserving-late-history', verifiedAgents=verified)
             repaired = tail.TailRepair(self, self.worker_lock_fd).run()
             self.require()
-            self.r.publish()
+            request = self.r.publish()
+            tail.record_publication(self, request)
             self.status('waiting-for-publication', lateHistoryRepair=repaired,
                         nextCheckAtMs=int(time.time()*1000)+60000)
             return self.progress

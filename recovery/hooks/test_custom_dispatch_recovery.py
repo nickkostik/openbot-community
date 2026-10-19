@@ -22,7 +22,7 @@ class DispatchTests(fleet.RemintTests):
         recovery = self.recovery(); original = M.load
         checker = mock.Mock(); checker.source_freshness.side_effect = RuntimeError(
             'Source history changed after reviewed merge; incremental preservation required before activation')
-        tail = mock.Mock(); tail.pending.return_value=False; tail.FRESHNESS_ERROR = str(checker.source_freshness.side_effect)
+        tail = mock.Mock(); tail.pending.return_value=False;tail.waiting_for_reload.return_value=False; tail.FRESHNESS_ERROR = str(checker.source_freshness.side_effect)
         tail.TailRepair.return_value.run.return_value = {'phase':'waiting-for-publication','importedMessages':1}
         def loader(name):
             return checker if name == 'history-merge-receipt' else tail if name == 'history-tail-repair' else original(name)
@@ -43,10 +43,17 @@ class DispatchTests(fleet.RemintTests):
         self.assertEqual(result['phase'],'waiting-for-publication');verify.assert_not_called();activate.assert_not_called()
         tail.TailRepair.return_value.run.assert_called_once()
 
+    def test_published_ui_cannot_activate_before_tail_sdk_reload_ack(self):
+        recovery=self.recovery();self.r.stage(fleet.OLD);self.r.register(fleet.OLD)
+        original=M.load;tail=mock.Mock();tail.pending.return_value=False;tail.waiting_for_reload.return_value=True
+        with mock.patch.object(M,'load',side_effect=lambda name:tail if name=='history-tail-repair' else original(name)), mock.patch.object(self.r,'verify') as verify, mock.patch.object(self.r,'activate') as activate:
+            result=recovery.run()
+        self.assertEqual(result['phase'],'waiting-for-publication');verify.assert_not_called();activate.assert_not_called()
+
     def test_other_history_failure_never_invokes_automatic_tail_writer(self):
         recovery = self.recovery(); original = M.load
         checker = mock.Mock(); checker.source_freshness.side_effect = RuntimeError('Immutable merge evidence changed')
-        tail = mock.Mock();tail.pending.return_value=False;tail.FRESHNESS_ERROR = 'a different exact known error'
+        tail = mock.Mock();tail.pending.return_value=False;tail.waiting_for_reload.return_value=False;tail.FRESHNESS_ERROR = 'a different exact known error'
         def loader(name):
             return checker if name=='history-merge-receipt' else tail if name=='history-tail-repair' else original(name)
         with mock.patch.object(M,'load',side_effect=loader), mock.patch.object(self.r,'activate') as activate, self.assertRaisesRegex(RuntimeError,'Immutable'):

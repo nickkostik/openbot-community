@@ -90,7 +90,7 @@ test("saved completion without current proof is pending and a maintenance hold i
   assert.equal(status.lockHeld, true);
   assert.equal(status.workerRunning, false);
   assert.equal(status.publicationVerified, false);
-  assert.equal(publicTransfer({ phase: "bound-box", publicationVerified: true }).phase, "bound-box");
+  assert.equal(publicTransfer({ phase: "bound-box", publicationVerified: true, rosterComplete: true }).phase, "bound-box");
 });
 
 
@@ -103,4 +103,17 @@ test("advisor status accepts fixed enums and codes but never model output or del
   assert.equal(publicTransfer({ diagnosticAssistant: "failed", diagnosticAdviceCode: "history-review" }).diagnosticAdviceCode, undefined);
   assert.equal(publicTransfer({ diagnosticAssistant: "available", diagnosticAdviceCode: "run-shell" }).diagnosticAdviceCode, undefined);
   assert.equal(publicTransfer({ diagnosticAssistant: "execute" }).diagnosticAssistant, "unavailable");
+});
+
+
+test("completion needs whole-roster proof and untracked counts remain public metadata only", () => {
+  const status = publicTransfer({ phase: "bound-box", publicationVerified: true, rosterComplete: false,
+    untrackedSourceAgents: 4, untrackedVisibleAgents: 3, unknownSourceAgents: 1,
+    hiddenArchiveAgents: 200, rosterCheckedAtMs: 1234, sourceIds: ["private-id"], sourceNames: ["private-name"] });
+  assert.equal(status.phase, "checking-bindings");
+  assert.equal(status.untrackedSourceAgents, 4);
+  assert.equal(status.unknownSourceAgents, 1);
+  assert.equal(status.hiddenArchiveAgents, 200);
+  assert.equal(status.rosterComplete, false);
+  assert.equal(JSON.stringify(status).includes("private"), false);
 });

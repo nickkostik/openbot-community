@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -572,6 +573,10 @@ class Reminter:
                     copied=entry.get('copyProof',{}).get('automationStates')
                     if not isinstance(copied,dict) or set(current) != set(copied):
                         raise RuntimeError('Source routine list changed after copying; cutover refused')
+                    server_states = self.server_routine_states(journal, entry, current=True)
+                    if set(current) & set(server_states):
+                        raise RuntimeError('Server-only routine collides with a copied local routine')
+                    current.update(server_states)
                     self.checked_routine_states(entry['newId'],current)
                     entry['activationAutomationStates']=current
                     self.save(journal)
@@ -581,6 +586,9 @@ class Reminter:
             # before exposing the replacement or changing the user's positions.
             retired = set(mapping)
             for old in sorted(retired):
+                for entry in journal['entries']:
+                    if entry['oldId'] == old and entry['newId'] in selected:
+                        self.pause_server_routine_authority(journal, entry)
                 self.pause_cloud_routines(old, pathlib.Path(journal['backup']))
                 for path in (SD/'agents'/old/'automations').rglob('automation.json'):
                     raw=self.m.checked_bytes(path);definition=json.loads(raw)
@@ -778,6 +786,136 @@ class Reminter:
                 raise RuntimeError('Copied routine switch is not a boolean')
         return states
 
+    def server_routine_authority(self, journal, entry):
+        """Read immutable, explicitly reviewed server-only routine evidence."""
+        reference = entry.get('serverRoutineAuthority')
+        if reference is None:
+            return []
+        if not isinstance(reference, dict) or set(reference) != {'path', 'sha256'}:
+            raise RuntimeError('Invalid server routine authority reference')
+        backup = pathlib.Path(journal['backup'])
+        path = pathlib.Path(reference['path'])
+        try:
+            relative = path.relative_to(backup)
+        except ValueError:
+            raise RuntimeError('Server routine authority must be inside the journal backup') from None
+        if not relative.parts or any(part in ('.', '..') for part in relative.parts):
+            raise RuntimeError('Invalid server routine authority path')
+        for directory in [backup, *[backup.joinpath(*relative.parts[:n]) for n in range(1, len(relative.parts))]]:
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise RuntimeError('Server routine authority directory is foreign or symlinked')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 16 * 1024 * 1024:
+                raise RuntimeError('Expected an owned regular server routine authority file')
+            raw = stream.read(16 * 1024 * 1024 + 1)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise RuntimeError('Expected a server routine authority object')
+        if (not isinstance(reference['sha256'], str) or len(reference['sha256']) != 64 or
+                hashlib.sha256(raw).hexdigest() != reference['sha256']):
+            raise RuntimeError('Server routine authority digest changed')
+        if (value.get('schema') != 'openbot-server-routine-authority/v1' or
+                value.get('oldId') != entry['oldId'] or value.get('newId') != entry['newId'] or
+                not isinstance(value.get('automations'), list) or not value['automations']):
+            raise RuntimeError('Server routine authority belongs to another transfer')
+        records = value['automations']
+        ids, paths = set(), set()
+        for wrapper in records:
+            if not isinstance(wrapper, dict) or set(wrapper) != {'automationId', 'recordJson', 'nativePath'}:
+                raise RuntimeError('Invalid server routine authority record')
+            rid = canonical(wrapper['automationId'])
+            relative = wrapper['nativePath']
+            if not isinstance(relative, str) or rid in ids or relative in paths:
+                raise RuntimeError('Server routine authority has invalid or duplicate paths')
+            ids.add(rid); paths.add(relative)
+            record = json.loads(wrapper['recordJson'])
+            if (not isinstance(record, dict) or type(record.get('isEnabled')) is not bool or
+                    relative != 'automations/' + str(record.get('id')) + '/automation.json'):
+                raise RuntimeError('Invalid captured server routine payload or native identifier')
+        return records
+
+    @staticmethod
+    def routine_semantics(record):
+        # Only server bookkeeping and the switch are mutable. Unknown fields
+        # remain in the comparison so future authored settings fail closed.
+        result = {key: value for key, value in record.items() if key not in
+                  ('isEnabled', 'createdAt', 'lastRunAt', 'nextRunAt', 'runs', 'filePath')}
+        if isinstance(result.get('trigger'), dict) and result['trigger'].get('type') == 'cron':
+            result['trigger'] = {key: value for key, value in result['trigger'].items() if key != 'firesAt'}
+        return result
+
+    def server_routine_states(self, journal, entry, current=False):
+        records = self.server_routine_authority(journal, entry)
+        if not records:
+            return {}
+        rows = self.rows()
+        by_id = {row['agentId']: row for row in rows}
+        if len(rows) != len(by_id):
+            raise RuntimeError('Server routine source roster is ambiguous')
+        owner = by_id.get(entry['oldId'], {})
+        if (owner.get('viewerIsOwner') is not True or owner.get('legacyAgentId') != entry['oldId'] or
+                str(owner.get('id')) != str(entry['sourceServerId'])):
+            raise RuntimeError('Server routine source ownership or binding changed')
+        fresh = self.m.rpc('ListGrokBotAgentAutomations', {'agentId': entry['oldId']}).get('automations')
+        if not isinstance(fresh, list):
+            raise RuntimeError('Unknown current server routine schema')
+        indexed = {}
+        for wrapper in fresh:
+            rid = canonical(wrapper['automationId'])
+            if rid in indexed:
+                raise RuntimeError('Current server routine identifiers are ambiguous')
+            record = json.loads(wrapper['recordJson'])
+            if not isinstance(record, dict) or type(record.get('isEnabled')) is not bool:
+                raise RuntimeError('Invalid current server routine payload')
+            indexed[rid] = record
+        captured_ids = {row['automationId'] for row in records}
+        local_names = {pathlib.PurePosixPath(path).parts[1]
+                       for path in entry.get('copyProof', {}).get('automationStates', {})}
+        if (not captured_ids.issubset(indexed) or
+                any(record.get('id') not in local_names for rid, record in indexed.items() if rid not in captured_ids)):
+            raise RuntimeError('Server routine list changed after capture')
+        mapping = identity_mapping(journal)
+        states = {}
+        fields = ('name', 'prompt', 'schedule', 'trigger', 'triggerPresentation', 'provenance', 'sessionId')
+        for wrapper in records:
+            captured = json.loads(wrapper['recordJson'])
+            live = indexed.get(wrapper['automationId'])
+            if live is None or self.routine_semantics(live) != self.routine_semantics(captured):
+                raise RuntimeError('Server routine payload changed after capture')
+            relative = wrapper['nativePath']
+            if relative in entry.get('copyProof', {}).get('automationStates', {}):
+                raise RuntimeError('Server-only routine collides with a copied local routine')
+            self.checked_routine_states(entry['newId'], {relative: False})
+            native = owned_json(SD/'agents'/entry['newId']/relative)
+            if not entry.get('serverRoutinePauseIntent') and native['enabled'] is not False:
+                raise RuntimeError('Unactivated server routine must remain paused')
+            expected = self.m.remap_json(self.routine_semantics(captured), mapping)
+            if set(native) - set(fields) - {'enabled', 'createdAt', 'lastRunAt'}:
+                raise RuntimeError('Destination server routine has unreviewed fields')
+            authored = {key: value for key, value in native.items() if key in fields}
+            if isinstance(authored.get('trigger'), dict) and authored['trigger'].get('type') == 'cron':
+                authored['trigger'] = {key: value for key, value in authored['trigger'].items() if key != 'firesAt'}
+            if authored != {key: value for key, value in expected.items() if key in fields}:
+                raise RuntimeError('Destination server routine configuration changed')
+            states[relative] = live['isEnabled'] if current else captured['isEnabled']
+        return states
+
+    def pause_server_routine_authority(self, journal, entry):
+        if 'serverRoutineAuthority' not in entry:
+            return
+        current = self.server_routine_states(journal, entry, current=True)
+        if not entry.get('serverRoutinePauseIntent'):
+            entry.setdefault('activationAutomationStates', {}).update(current)
+            entry['serverRoutinePauseIntent'] = True
+            self.save(journal)  # Durable switch capture precedes the cloud pause.
+        self.require_local_mode()
+        self.pause_cloud_routines(entry['oldId'], pathlib.Path(journal['backup']))
+        entry['serverRoutinesPaused'] = True
+        self.save(journal)
+
     def restore_entry_routines(self, journal, entry):
         if entry['phase']!='active':
             raise RuntimeError('Unactivated copies must remain paused')
@@ -790,9 +928,14 @@ class Reminter:
             raise RuntimeError('BOX binding changed before restoring routines')
         states=self.checked_routine_states(aid,entry.get('activationAutomationStates',
                                                       entry.get('copyProof',{}).get('automationStates')))
-        for relative in states:
+        server_states = self.server_routine_states(journal, entry, current=True)
+        if set(server_states) - set(states):
+            raise RuntimeError('Server routine switch authority is incomplete')
+        for relative in set(states) - set(server_states):
             if owned_json(SD/'agents'/entry['oldId']/relative).get('enabled') is not False:
                 raise RuntimeError('Retired local routine is still enabled')
+        self.pause_server_routine_authority(journal, entry)
+        states = self.checked_routine_states(aid, entry.get('activationAutomationStates', states))
         self.pause_cloud_routines(entry['oldId'],pathlib.Path(journal['backup']))
         native=self.m.gateway('getAgentAutomations',{'id':aid})
         if not isinstance(native,list):
@@ -808,6 +951,7 @@ class Reminter:
             if rid not in indexed or type(indexed[rid].get('isEnabled')) is not bool:
                 raise RuntimeError('Native runner did not load the copied routine')
             if enabled:
+                self.require_local_mode()
                 after=self.m.gateway('setAgentAutomationEnabled',
                     {'id':aid,'automationId':rid,'isEnabled':True})
                 confirmed=[r for r in after if r.get('id')==rid] if isinstance(after,list) else []

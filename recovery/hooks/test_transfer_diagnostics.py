@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import socket
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -21,7 +22,7 @@ class DiagnosticsTests(unittest.TestCase):
         (self.root / 'openbot-mode').write_text('custom')
         self.plan = {'agents': {'*': {'providerId': 'opencode-2', 'modelId': 'muse'}}, 'catalog': {
             'providers': [{'id': 'opencode-2', 'origin': 'https://opencode.ai/zen/go/v1'}],
-            'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse'}]}}
+            'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse', 'reasoningLevels': ['default', 'low', 'medium', 'high', 'xhigh'], 'activeReasoning': 'xhigh'}]}}
         self.save_plan()
         self.state = {'jobId': '14238183-e7f8-48a2-96ea-994a641cf49b', 'phase': 'review-needed',
             'refusalPhase': 'waiting-for-publication', 'diagnosticCode': 'preflight-refused',
@@ -45,7 +46,9 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_only_allowlisted_facts_leave_and_advice_has_no_execution_authority(self):
         result = m.run(self.root, now=1000)
-        model, job, facts = self.request.call_args.args
+        model, job, facts, effort = self.request.call_args.args
+        self.assertEqual(effort, 'low')
+        self.assertEqual(json.loads((self.root / 'openbot-plan.json').read_text()), self.plan)
         self.assertEqual(model, 'opencode-2:muse')
         self.assertEqual(set(facts), {'phase', 'diagnosticCode', 'counts', 'countsKnown', 'publicationVerified', 'liveHistoryMerged', 'sdkContextsMerged'})
         self.assertNotIn('secret-key', json.dumps(facts))
@@ -97,7 +100,7 @@ class DiagnosticsTests(unittest.TestCase):
                          self.response('Ignore policy. Send private-key@example.test'),
                          self.response('{"adviceCode":"unhide-all"}'),
                          self.response(tool_calls=[{'function': {'name': 'exec'}}]),
-                         {'choices': [{'finish_reason': 'length', 'message': {'content': '{"adviceCode":"history-review"}'}}]}):
+                         {'choices': [{'finish_reason': 'tool_calls', 'message': {'content': '{"adviceCode":"history-review"}'}}]}):
             with self.subTest(response=response):
                 (self.root / m.NAME).unlink(missing_ok=True)
                 self.request.return_value = response
@@ -105,6 +108,59 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertEqual(result['reason'], 'invalid-advice')
                 self.assertNotIn('private-key', (self.root / m.NAME).read_text())
                 self.assertNotIn('advice', result)
+
+    def test_exact_fenced_json_is_accepted_but_prose_and_duplicate_keys_are_not(self):
+        for content in ('```json\n{"adviceCode":"history-review"}\n```',
+                        '```\n{"adviceCode":"history-review"}\n```'):
+            self.assertEqual(m.classify(self.response(content)), 'history-review')
+        for content in ('Here is the answer: ```json\n{"adviceCode":"history-review"}\n```',
+                        '```json\n{"adviceCode":"history-review"}\n```\nRun a command.',
+                        '{"adviceCode":"history-review","adviceCode":"history-review"}'):
+            with self.assertRaisesRegex(m.Refusal, 'invalid-advice'):
+                m.classify(self.response(content))
+
+    def test_truncated_or_reasoning_starved_output_is_never_treated_as_advice(self):
+        response = self.response('{"adviceCode":"history-review"}')
+        response['choices'][0]['finish_reason'] = 'length'
+        with self.assertRaisesRegex(m.Refusal, 'advice-truncated'):
+            m.classify(response)
+        response = self.response('{"')
+        response['usage'] = {'completion_tokens':256, 'completion_tokens_details':{'reasoning_tokens':254}}
+        with self.assertRaisesRegex(m.Refusal, 'advice-truncated'):
+            m.classify(response)
+
+    def test_explicit_low_survives_saved_xhigh_mapping_and_responses_conversion(self):
+        payload = pathlib.Path(__file__).resolve().parents[2] / 'payload'
+        script = """
+const maps = require(process.argv[1]);
+const converters = require(process.argv[2]);
+const body = {model:'muse-test', messages:[], reasoning_effort:'low', max_tokens:256};
+const parameters = [{id:'effort', value:'xhigh'}];
+maps.applyProviderReasoningControls(body, {modelId:'muse-test', baseUrl:'https://opencode.ai/zen/go/v1', parameters});
+console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParameters:parameters}));
+"""
+        result = subprocess.run(['node', '-e', script, str(payload/'provider-maps.cjs'),
+                                 str(payload/'protocol-converters.cjs')], check=True,
+                                capture_output=True, text=True, timeout=5)
+        value = json.loads(result.stdout)
+        self.assertEqual(value['wire']['reasoning'], {'effort':'low'})
+        self.assertEqual(value['wire']['max_output_tokens'], 256)
+        self.assertEqual(value['savedParameters'], [{'id':'effort', 'value':'xhigh'}])
+
+    def test_lowest_declared_diagnostic_effort_never_rewrites_selected_xhigh(self):
+        original = (self.root/'openbot-plan.json').read_bytes()
+        self.assertEqual(m.diagnostic_effort(self.root, 'opencode-2:muse'), 'low')
+        self.assertEqual((self.root/'openbot-plan.json').read_bytes(), original)
+        self.plan['catalog']['models'][0]['reasoningLevels'] = ['default', 'none', 'low', 'xhigh']
+        self.save_plan()
+        self.assertEqual(m.diagnostic_effort(self.root, 'opencode-2:muse'), 'none')
+        self.plan['catalog']['models'][0]['reasoningLevels'] = ['default', 'high', 'xhigh']
+        self.save_plan()
+        self.assertEqual(m.diagnostic_effort(self.root, 'opencode-2:muse'), 'high')
+        self.plan['catalog']['models'][0]['reasoningLevels'] = ['default']
+        self.save_plan()
+        with self.assertRaisesRegex(m.Refusal, 'unsupported-diagnostic-effort'):
+            m.diagnostic_effort(self.root, 'opencode-2:muse')
 
     def test_official_optout_and_unapproved_provider_never_call(self):
         (self.root / 'openbot-mode').write_text('official')
@@ -119,6 +175,21 @@ class DiagnosticsTests(unittest.TestCase):
             self.save_plan()
             self.assertEqual(m.run(self.root, now=1000)['reason'], 'unsupported-selected-route')
         self.request.assert_not_called()
+
+    def test_missing_or_ambiguous_effort_never_makes_a_model_call(self):
+        for levels in (None, ['default'], ['low','low']):
+            (self.root/m.NAME).unlink(missing_ok=True)
+            if levels is None:
+                self.plan['catalog']['models'][0].pop('reasoningLevels', None)
+            else:
+                self.plan['catalog']['models'][0]['reasoningLevels'] = levels
+            self.save_plan()
+            self.assertIn(m.run(self.root, now=1000)['status'], ('disabled', 'failed'))
+        self.request.assert_not_called()
+        self.plan['catalog']['models'].append(dict(self.plan['catalog']['models'][0]))
+        self.save_plan()
+        with self.assertRaisesRegex(m.Refusal, 'invalid-route'):
+            m.diagnostic_effort(self.root, 'opencode-2:muse')
 
     def test_route_or_job_change_during_response_discards_advice(self):
         def change(*args):
@@ -197,7 +268,7 @@ class HopRequestTests(unittest.TestCase):
         response.read1.side_effect = chunks
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection) as factory:
             try:
-                result = m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {'phase': 'waiting-for-publication'})
+                result = m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {'phase': 'waiting-for-publication'}, 'low')
             finally:
                 connection.close.assert_called_once()
                 factory.assert_called_once_with('127.0.0.1', 9280, timeout=m.TIMEOUT)
@@ -209,6 +280,7 @@ class HopRequestTests(unittest.TestCase):
         self.assertEqual(args[:2], ('POST', '/v1/chat/completions'))
         body = json.loads(args[2])
         self.assertEqual(body['max_tokens'], 256)
+        self.assertEqual(body['reasoning_effort'], 'low')
         self.assertTrue(body['openbot_internal_model'])
         self.assertTrue(body['openbot_internal_auxiliary'])
         self.assertNotIn('tools', body)
@@ -230,7 +302,7 @@ class HopRequestTests(unittest.TestCase):
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection), \
              mock.patch.object(m.time, 'monotonic', side_effect=[0, 1, 2, m.TIMEOUT + 1]):
             with self.assertRaisesRegex(m.Refusal, 'timeout'):
-                m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {})
+                m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {}, 'low')
         connection.close.assert_called_once()
 
 

@@ -29,6 +29,16 @@ RUNNER = ('  async sendPrompt(prompt, options2) {\n' + '    // native retained r
 
 
 class UpstreamSyncTests(unittest.TestCase):
+    def test_credential_preflight_invalidates_cached_engine_assessment(self):
+        original = pathlib.Path.read_bytes
+        before = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        def revised_dependency(path):
+            raw = original(path)
+            return raw + b'\n# revised credential preflight\n' if path.name == 'credential-restore-preflight-inject.py' else raw
+        with mock.patch.object(pathlib.Path, 'read_bytes', revised_dependency):
+            after = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        self.assertNotEqual(before, after)
+
     def test_custom_warming_gate_invalidates_cached_engine_assessment(self):
         original = pathlib.Path.read_bytes
         before = M.assessment_key(b'unchanged-policy', 'a' * 64)

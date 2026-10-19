@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import sqlite3
@@ -137,15 +138,36 @@ def cloud_tail(rpc, source, capture):
 
 
 def literal(event):
-    forbidden = {'toolCalls','tool_calls','toolCall','toolResults','tool_results','attachment','attachments','pendingToolCalls','execute','command'}
-    if not isinstance(event,dict) or forbidden.intersection(event):
-        raise RuntimeError('Tail executable or nontext envelope requires explicit review')
-    if isinstance(event.get('message'),dict) and forbidden.intersection(event['message']):
-        raise RuntimeError('Tail executable or nontext envelope requires explicit review')
-    if event.get('kind') == 'message' and event.get('role') in ('user', 'assistant') and isinstance(event.get('content'), str):
-        return event['role'], event['content']
-    if event.get('kind') == 'send-message' and event.get('message', {}).get('type') == 'text' and isinstance(event['message'].get('content'), str):
-        return 'assistant', event['message']['content']
+    # This is deliberately narrower than the full native transcript schema.
+    # Unknown fields may carry tools, recipients, attachments or failure state;
+    # retaining their raw UI payload alone would not preserve their SDK meaning.
+    common = {'id','kind','timestampMs'}
+    def timestamp(value):
+        return type(value) in (int,float) and 0 <= value <= 9007199254740991 and math.isfinite(value)
+    def correlation(value):
+        return isinstance(value,str) and 0 < len(value) <= 1024 and not any(ord(c)<32 for c in value)
+    if (not isinstance(event,dict) or not isinstance(event.get('id'),str) or not event['id'] or
+            not timestamp(event.get('timestampMs'))):
+        raise RuntimeError('Tail requires a completed literal native text event')
+    if event.get('kind') == 'message':
+        metadata = {'requestId','clientNonce','batchId','sentWhileOfflineAtMs'}
+        if set(event) - (common | {'role','content','isStreaming'} | metadata):
+            raise RuntimeError('Unknown message semantics require explicit preservation review')
+        if (event.get('isStreaming') is not False or any(not correlation(event[key]) for key in
+                ('requestId','clientNonce','batchId') if key in event) or
+                ('sentWhileOfflineAtMs' in event and not timestamp(event['sentWhileOfflineAtMs']))):
+            raise RuntimeError('Incomplete or unknown native message metadata requires review')
+        if event.get('role') in ('user','assistant') and isinstance(event.get('content'),str):
+            return event['role'],event['content']
+    elif event.get('kind') == 'send-message':
+        if set(event) - (common | {'message','requestId'}):
+            raise RuntimeError('Send destination or unknown semantics require explicit review')
+        if 'requestId' in event and not correlation(event['requestId']):
+            raise RuntimeError('Unknown native send correlation requires review')
+        message = event.get('message')
+        if (isinstance(message,dict) and set(message)=={'type','content'} and
+                message.get('type')=='text' and isinstance(message.get('content'),str)):
+            return 'assistant',message['content']
     raise RuntimeError('Tail format needs explicit preservation review')
 
 
@@ -297,7 +319,7 @@ class TailRepair:
                 native.get('engineSha256') != sdk['engineSha256'] or native.get('oldRootSha256') != sdk['rootSha256'] or
                 native.get('workerSHA') != self.validator.IDENTIFIER_WORKER_SHA or native.get('rootSlot') != sdk['rootSlot'] or
                 native.get('blobs') != actual_graph or native.get('rootSha256') != actual_graph.get(sdk['rootSlot']) or
-                native.get('bridgeSha256') != sha(owned(HERE / 'history-tail-codec.mjs')) or native.get('sourcePlanSHA') != sha(encoded(plan)) or
+                native.get('bridgeSha256') != sha(owned(HERE / 'history-tail-codec.mjs')) or native.get('sourcePlanFileSHA') != sha(owned(folder / 'plan.json')) or
                 native.get('capacity', {}).get('fits') is not True or
                 any(native.get('files', {}).get(name, {}).get('sha256') != sha(owned(folder / name)) for name in ('store.db','conversation-blobs.db')) or
                 any(context.get(key) is not True for key in ('roundtrip','literalEquality','originalPrefixPreserved','otherRootFieldsPreserved'))):

@@ -45,7 +45,8 @@ export function validatePlan(plan) {
     check((row.role === 'user' || row.role === 'assistant') && typeof row.text === 'string' &&
       row.literalText === true && (row.kind === undefined || row.kind === 'message' || row.kind === 'send-message') &&
       (row.kind !== 'send-message' || row.role === 'assistant'), 'PLAN_LITERAL_ONLY');
-    check(Number.isSafeInteger(row.timestampMs) && row.timestampMs >= 0 && SHA.test(row.sourcePayloadSha256),
+    check(Number.isFinite(row.timestampMs) && row.timestampMs >= 0 && row.timestampMs <= Number.MAX_SAFE_INTEGER &&
+      SHA.test(row.sourcePayloadSha256),
       'PLAN_RECORD_PROVENANCE');
     // No imported tool, attachment, widget or executable request envelope is accepted.
     for (const key of ['toolCalls', 'tool_calls', 'attachment', 'attachments', 'pendingToolCalls', 'execute', 'command']) {
@@ -204,6 +205,16 @@ function canonical(value) {
 // matching the reviewed native roundtrip, while retaining every defined field.
 export const nativeContextJson = messages => JSON.stringify(canonical(messages));
 
+/** Pin exact plan bytes separately from their parsed JSON representation.
+ * Native fractional timestamps can serialize differently in Python and JS. */
+export function planFileEvidence(filename, plan) {
+  if (filename === undefined || filename === '-') return { path: undefined, sha256: null };
+  regularPath(filename, { limit: LIMITS.plan, privateFile: true });
+  const raw = fs.readFileSync(filename);
+  check(nativeContextJson(JSON.parse(raw.toString('utf8'))) === nativeContextJson(plan), 'PLAN_FILE_MISMATCH');
+  return { path: filename, sha256: digest(raw) };
+}
+
 /** Native unread parsing accepts finite numbers without coercion. Keep its
  * existing activity frontier monotonic, with invalid or negative inputs at 0. */
 export function activityFrontier(prior, eligible) {
@@ -213,6 +224,7 @@ export function activityFrontier(prior, eligible) {
 
 export async function repairCandidate(options, plan) {
   const bounds = validatePlan(plan), directory = detachedDirectory(options.candidateDir);
+  const sourcePlanFile = planFileEvidence(options.plan, plan);
   const storePath = path.join(directory, 'store.db'), blobsPath = path.join(directory, 'conversation-blobs.db');
   check(digest(fs.readFileSync(storePath)) === plan.expectedStoreSHA, 'STORE_GENERATION_CHANGED');
   const native = loadNative(options.host, options.worker, options.allocatorHost);
@@ -341,6 +353,7 @@ export async function repairCandidate(options, plan) {
     const parsedAfter = sdk.unread(JSON.stringify(updatedUnread));
     for (const key of Object.keys(priorUnread).filter(key => key !== 'lastActivityAt')) assert.deepEqual(parsedAfter[key], priorUnread[key]);
     check(guard.counts.networkAttempts === 0 && guard.counts.toolAttempts === 0, 'DETACHED_SIDE_EFFECT');
+    check(!sourcePlanFile.path || digest(fs.readFileSync(sourcePlanFile.path)) === sourcePlanFile.sha256, 'PLAN_FILE_CHANGED');
     blobs.exec('BEGIN IMMEDIATE');
     const put = blobs.prepare('INSERT INTO blobs(id,data)VALUES(?,?) ON CONFLICT(id)DO UPDATE SET data=excluded.data');
     check(!get(digest(rawRoot)) || Buffer.from(get(digest(rawRoot))).equals(Buffer.from(rawRoot)), 'BLOB_COLLISION');
@@ -364,7 +377,8 @@ export async function repairCandidate(options, plan) {
     const proof = { schema: 'openbot-history-tail-codec/v1', liveApplied: false,
       bridgeSha256: digest(fs.readFileSync(fileURLToPath(import.meta.url))), nativeEngineSHA: native.nativeEngineSHA,
       workerSHA: native.workerSHA, allocatorSHA: native.allocatorSHA, allocatorHostSHA: native.allocatorHostSHA,
-      sourcePlanSHA: digest(JSON.stringify(plan)), oldRootSHA: digest(rawRoot), rootSHA: digest(outRoot),
+      sourcePlanSHA: digest(JSON.stringify(plan)), sourcePlanFileSHA: sourcePlanFile.sha256,
+      oldRootSHA: digest(rawRoot), rootSHA: digest(outRoot),
       engineSha256: native.nativeEngineSHA, workerSha256: native.workerSHA, rootSlot: SLOT,
       oldRootSha256: digest(rawRoot), rootSha256: digest(outRoot), blobs: completeGraph,
       graph, context: { oldMessages: oldMessages.length, importedMessages: imported.length, messages: plain.length,

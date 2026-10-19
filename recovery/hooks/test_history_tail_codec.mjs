@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validatePlan, regularPath, detachedDirectory, reviewedSource, allocatorSlice,
-  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier } from './history-tail-codec.mjs';
+  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier, planFileEvidence } from './history-tail-codec.mjs';
 
 const require = createRequire(import.meta.url);
 const source = fileURLToPath(new URL('./history-tail-codec.mjs', import.meta.url));
@@ -181,4 +181,28 @@ test('activity frontier never moves backward or coerces invalid native state', (
     assert.equal(activityFrontier(2000, invalid), 2000);
     assert.equal(activityFrontier(invalid, invalid), 0);
   }
+});
+
+test('native finite fractional timestamps remain exact and non-numeric timestamps refuse', () => {
+  for (const value of [0, 1.25, 1792440417263.125, Number.MAX_SAFE_INTEGER]) {
+    const input = plan(); input.records[0].timestampMs = value;
+    assert.equal(validatePlan(input).records, 1); assert.equal(input.records[0].timestampMs, value);
+  }
+  for (const value of [NaN, Infinity, -Infinity, -1, true, false, null, '1000.5', Number.MAX_SAFE_INTEGER + 1]) {
+    const input = plan(); input.records[0].timestampMs = value;
+    assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
+  }
+});
+
+test('plan-file proof binds exact Python JSON bytes rather than normalized JS numbers', t => {
+  const { write } = fixture(t), input = plan();
+  const raw = JSON.stringify(input).replace('"timestampMs":1000', '"timestampMs":1000.0');
+  const file = write('plan.json', raw), parsed = JSON.parse(raw);
+  const evidence = planFileEvidence(file, parsed);
+  assert.equal(evidence.sha256, digest(Buffer.from(raw)));
+  assert.notEqual(evidence.sha256, digest(JSON.stringify(parsed)));
+  assert.equal(evidence.path, file);
+  const mismatched = structuredClone(parsed); mismatched.records[0].text = 'Different';
+  assert.throws(() => planFileEvidence(file, mismatched), /PLAN_FILE_MISMATCH/);
+  assert.equal(planFileEvidence('-', parsed).sha256, null);
 });

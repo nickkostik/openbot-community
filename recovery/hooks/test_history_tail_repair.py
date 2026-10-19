@@ -19,7 +19,7 @@ T = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(T)
 
 
 def item(sequence, text='literal text', identifier=None):
-    event = {'id': identifier or 'event-' + str(sequence), 'kind': 'message', 'role': 'user', 'content': text, 'timestampMs': sequence}
+    event = {'id': identifier or 'event-' + str(sequence), 'kind': 'message', 'role': 'user', 'content': text, 'timestampMs': sequence, 'isStreaming':False}
     return {'seq': str(sequence), 'entryId': event['id'], 'body': base64.b64encode(T.encoded(event)).decode()}
 
 
@@ -62,7 +62,30 @@ class BoundedCloudTests(unittest.TestCase):
                       {'kind':'message','role':'assistant','content':'text','attachments':[]},
                       {'kind':'send-message','message':{'type':'text','content':'text','execute':True}}):
             with self.subTest(event=event), self.assertRaises(RuntimeError): T.literal(event)
-        self.assertEqual(T.literal({'kind': 'send-message', 'message': {'type': 'text', 'content': 'unchanged'}}), ('assistant', 'unchanged'))
+        self.assertEqual(T.literal({'id':'done','kind': 'send-message','timestampMs':1, 'message': {'type': 'text', 'content': 'unchanged'}}), ('assistant', 'unchanged'))
+
+
+class CompletedEnvelopeTests(unittest.TestCase):
+    def test_only_completed_known_native_text_fields_are_supported(self):
+        event=json.loads(base64.b64decode(item(1)['body']))
+        self.assertEqual(T.literal(event),('user','literal text'))
+        self.assertEqual(T.literal({**event,'isStreaming':False,'timestampMs':1.25,'requestId':'request','clientNonce':'nonce','batchId':'batch','sentWhileOfflineAtMs':0.5}),('user','literal text'))
+        incomplete={k:v for k,v in event.items()if k!='isStreaming'}
+        with self.assertRaises(RuntimeError):T.literal(incomplete)
+        for extra in ({'isStreaming':True},{'isStreaming':None},{'status':'failed'},{'cancelled':True},
+                      {'parts':[{'type':'image','url':'private'}]}, {'tool_calls':[]}, {'attachments':[]},
+                      {'richText':{}},{'replyTo':'other'}, {'sentWhileOfflineAtMs':float('inf')},{'batchId':{}},
+                      {'timestampMs':float('nan')},{'timestampMs':True},{'requestId':'line\nbreak'}, {'inlineImage':{'data':'private'}},
+                      {'toolEnvelope':{'name':'send_message'}}, {'senderAgentId':OLD},
+                      {'contentMeta':{'recipientAgentId':OLD}}, {'deliveryStatus':'cancelled'}):
+            with self.subTest(extra=extra),self.assertRaises(RuntimeError):T.literal({**event,**extra})
+
+    def test_cross_bot_destination_and_unknown_nested_send_fields_require_review(self):
+        event={'id':'sent','kind':'send-message','timestampMs':1,'message':{'type':'text','content':'unchanged'}}
+        self.assertEqual(T.literal(event),('assistant','unchanged'))
+        for extra in ({'destination':{'type':'agent','agentId':OLD}}, {'recipientAgentId':OLD}, {'deliveryResult':{'status':'failed'}}):
+            with self.subTest(extra=extra),self.assertRaises(RuntimeError):T.literal({**event,**extra})
+            with self.subTest(nested=extra),self.assertRaises(RuntimeError):T.literal({**event,'message':{**event['message'],**extra}})
 
 
 class ApplyTests(ReceiptTests):

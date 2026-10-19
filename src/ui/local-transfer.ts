@@ -5,11 +5,14 @@ import type { SupervisorDeps } from "../supervisor/observe.ts";
 import { joinAbs, parseAbsPath } from "../supervisor/paths.ts";
 
 const execute = promisify(execFile);
-const PHASES = new Set(["idle", "disabled", "starting", "checking-bindings", "copying", "registering", "preserving-late-history", "waiting-for-publication", "waiting-for-rate-limit", "waiting-for-control-plane", "activating", "bound-box", "review-needed", "failed", "cancelled-mode-change"]);
+const PHASES = new Set(["idle", "disabled", "starting", "checking-bindings", "copying", "registering", "preserving-late-history", "preparing-return", "waiting-for-publication", "waiting-for-rate-limit", "waiting-for-control-plane", "activating", "bound-box", "review-needed", "failed", "cancelled-mode-change"]);
 export type LocalTransfer = {
   enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean; rosterComplete: boolean;
   untrackedSourceAgents?: number; untrackedVisibleAgents?: number; unknownSourceAgents?: number; hiddenArchiveAgents?: number; rosterCheckedAtMs?: number;
   jobId?: string; agentCount?: number; verifiedAgents?: number; updatedAtMs?: number;
+  returnHandoffState?: "preparing" | "waiting-for-publication" | "review-needed" | "completed"; returnPreparedAgents?: number; returnExpectedAgents?: number; returnReason?: string;
+  returnSessionScope?: "known-default-session"; returnAdmissionFenced?: false; returnFutureMessagesMerged?: false;
+  returnRetainedSources?: number; returnReconciliation?: "pending" | "current" | "changed"; returnSourceCheckedAtMs?: number;
   counts?: Record<string, number>; refusalPhase?: string; diagnosticCode?: string;
   diagnosticAssistant: "unavailable" | "running" | "available" | "failed" | "disabled"; diagnosticReason: string; diagnosticAdviceCode?: string;
   nativeAppDeliveryVerified: false; billingVerified: false;
@@ -34,8 +37,20 @@ export function publicTransfer(raw: Record<string, unknown>, available = true): 
     value.diagnosticAdviceCode = String(raw.diagnosticAdviceCode);
   }
   if (typeof raw.jobId === "string" && /^[0-9a-f-]{36}$/.test(raw.jobId)) value.jobId = raw.jobId;
-  for (const key of ["agentCount", "verifiedAgents", "updatedAtMs", "untrackedSourceAgents", "untrackedVisibleAgents", "unknownSourceAgents", "hiddenArchiveAgents", "rosterCheckedAtMs"] as const) {
+  for (const key of ["agentCount", "verifiedAgents", "returnPreparedAgents", "returnExpectedAgents", "returnRetainedSources", "returnSourceCheckedAtMs", "updatedAtMs", "untrackedSourceAgents", "untrackedVisibleAgents", "unknownSourceAgents", "hiddenArchiveAgents", "rosterCheckedAtMs"] as const) {
     if (Number.isSafeInteger(raw[key]) && Number(raw[key]) >= 0) value[key] = Number(raw[key]);
+  }
+  if (["preparing", "waiting-for-publication", "review-needed", "completed"].includes(String(raw.returnHandoffState))) value.returnHandoffState = raw.returnHandoffState as NonNullable<LocalTransfer["returnHandoffState"]>;
+  if (["none", "unsupported-or-changing-return"].includes(String(raw.returnReason))) value.returnReason = String(raw.returnReason);
+  if (raw.returnSessionScope === "known-default-session" && raw.returnAdmissionFenced === false && raw.returnFutureMessagesMerged === false) {
+    value.returnSessionScope = "known-default-session"; value.returnAdmissionFenced = false; value.returnFutureMessagesMerged = false;
+    if (["pending", "current", "changed"].includes(String(raw.returnReconciliation))) value.returnReconciliation = raw.returnReconciliation as NonNullable<LocalTransfer["returnReconciliation"]>;
+  }
+  if (value.returnReconciliation === "changed") { value.publicationVerified = false; value.returnHandoffState = "review-needed"; value.phase = "review-needed"; }
+  if (value.returnHandoffState === "completed" && (value.phase !== "bound-box" || !value.publicationVerified || !value.rosterComplete)) value.returnHandoffState = "waiting-for-publication";
+  if (value.returnHandoffState === "preparing" || value.returnHandoffState === "review-needed") {
+    value.publicationVerified = false;
+    if (value.phase === "bound-box") value.phase = "review-needed";
   }
   if (typeof raw.refusalPhase === "string" && PHASES.has(raw.refusalPhase)) value.refusalPhase = raw.refusalPhase;
   if (["history-conflict", "identity-conflict", "preflight-refused"].includes(String(raw.diagnosticCode))) value.diagnosticCode = String(raw.diagnosticCode);

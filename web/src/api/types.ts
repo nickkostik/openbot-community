@@ -533,6 +533,9 @@ export type LocalTransfer = {
   enabled: boolean; available: boolean; phase: string; workerRunning: boolean; lockHeld: boolean; publicationVerified: boolean; rosterComplete: boolean;
   untrackedSourceAgents?: number; untrackedVisibleAgents?: number; unknownSourceAgents?: number; hiddenArchiveAgents?: number; rosterCheckedAtMs?: number;
   jobId?: string; agentCount?: number; verifiedAgents?: number; updatedAtMs?: number;
+  returnHandoffState?: "preparing" | "waiting-for-publication" | "review-needed" | "completed"; returnPreparedAgents?: number; returnExpectedAgents?: number; returnReason?: string;
+  returnSessionScope?: "known-default-session"; returnAdmissionFenced?: false; returnFutureMessagesMerged?: false;
+  returnRetainedSources?: number; returnReconciliation?: "pending" | "current" | "changed"; returnSourceCheckedAtMs?: number;
   counts?: Record<string, number>; refusalPhase?: string; diagnosticCode?: string;
   diagnosticAssistant: "unavailable" | "running" | "available" | "failed" | "disabled"; diagnosticReason: string; diagnosticAdviceCode?: string;
   nativeAppDeliveryVerified: false; billingVerified: false;

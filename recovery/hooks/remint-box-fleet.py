@@ -22,6 +22,10 @@ JOURNAL = SD / 'openbot-box-remint.json'
 HERE = pathlib.Path(__file__).resolve().parent
 
 
+class ReturnHistoryRequired(RuntimeError):
+    """Owned selected source history needs a fresh, proven generation."""
+
+
 def helper(name):
     spec = importlib.util.spec_from_file_location(name.replace('-', '_'), HERE / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
@@ -701,16 +705,30 @@ class Reminter:
             journal = self.read()
             if not journal['entries'] or any(e['phase'] != 'active' for e in journal['entries']):
                 raise RuntimeError('Every copy must already be active before reselection')
-            mapping = {e['oldId']: e['newId'] for e in journal['entries']}
+            mapping = lineage_mapping(journal, {e['newId'] for e in journal['entries']})
             settings = self.m.rpc('GetGrokBotUserRuntimeSettings', {}).get('settings', {})
-            visible = any(not owned_json(SD/'agents'/e['oldId']/'settings.json').get('hiddenFromSidebar', False)
+            visible = any(not owned_json(SD/'agents'/e.get('selectionSourceId',e['oldId'])/'settings.json').get('hiddenFromSidebar', False)
                           or owned_json(SD/'agents'/e['newId']/'settings.json').get('hiddenFromSidebar', False)
                           for e in journal['entries'])
             preferences_changed = remap_preferences(settings, mapping) != remap_preferences(settings, {}) or settings.get('mainAgentId') in mapping
+            # A late source head can arrive after the last visibility write.
+            # Reviewed return receipts remain monitored even when selection is
+            # already correct; never let a UI fast path hide later source data.
+            validator=helper('history-merge-receipt');freshness_cache={}
+            for recorded in journal['entries']:
+                if not recorded.get('returnRetainedSources'):continue
+                try:validator.source_freshness(self,journal,recorded,freshness_cache)
+                except RuntimeError as error:
+                    if str(error)!='Source history changed after reviewed merge; incremental preservation required before activation':raise
+                    raise ReturnHistoryRequired('Reviewed return source advanced; fresh typed generation required') from None
+            changed=helper('official-return-handoff').retained_source_changes(self,journal)
+            if changed:
+                self.return_source_changed_ids=changed
+                raise ReturnHistoryRequired('Retained source history changed; fresh typed generation required')
             if not visible and not preferences_changed and journal.get('preferencesFinalized') is True:
-                return {'state': 'already-selected', 'agentCount': len(mapping)}
+                return {'state': 'already-selected', 'agentCount': len(journal['entries'])}
             results = self.verify()
-            if len(results) != len(mapping) or any(r['status'] != 'verified-box' for r in results):
+            if len(results) != len(journal['entries']) or any(r['status'] != 'verified-box' for r in results):
                 raise RuntimeError('Every existing BOX copy must be verified before reselection')
             rows = self.rows()
             indexed = {row['agentId']: row for row in rows}
@@ -726,10 +744,10 @@ class Reminter:
             def normalized(value):
                 return json.dumps(self.m.remap_json(value, lineage), sort_keys=True, separators=(',', ':'))
             for entry in journal['entries']:
-                old, new = entry['oldId'], entry['newId']
+                old, new = entry.get('selectionSourceId',entry['oldId']), entry['newId']
                 source = indexed.get(old)
                 if (not source or source.get('viewerIsOwner') is not True or source.get('legacyAgentId') != old
-                        or str(source.get('id')) != entry['sourceServerId']):
+                        or str(source.get('id')) != entry.get('selectionSourceServerId',entry['sourceServerId'])):
                     raise RuntimeError('Source ownership or binding changed before reselection')
                 if source.get('kind') != entry['kind']:
                     raise RuntimeError('Source kind changed before reselection')
@@ -737,7 +755,7 @@ class Reminter:
                     raise RuntimeError('BOX journal binding changed before reselection')
                 source_profile = owned_json(SD/'agents'/old/'profile.json')
                 target_profile = owned_json(SD/'agents'/new/'profile.json')
-                if str(source_profile.get('serverId')) != entry['sourceServerId']:
+                if str(source_profile.get('serverId')) != entry.get('selectionSourceServerId',entry['sourceServerId']):
                     raise RuntimeError('Local source binding changed before reselection')
                 role = lambda p: {k:v for k,v in p.items() if k not in ('serverId','harness')}
                 if normalized(role(source_profile)) != normalized(role(target_profile)):
@@ -746,11 +764,11 @@ class Reminter:
                 source_entries = entries(old) + [json.loads(base64.b64decode(r['body'], validate=True)) for r in cloud]
                 target_entries = {self.transcript_key(value, lineage) for value in entries(new)}
                 if any(self.transcript_key(value, lineage) not in target_entries for value in source_entries):
-                    raise RuntimeError('Source has uncopied history; explicit reconciliation is required')
+                    raise ReturnHistoryRequired('Source has uncopied history; fresh typed generation required')
             # All pairs pass before the first visibility or scheduler mutation.
             for entry in journal['entries']:
                 self.require_local_mode()
-                old, new = entry['oldId'], entry['newId']
+                old, new = entry.get('selectionSourceId',entry['oldId']), entry['newId']
                 self.pause_cloud_routines(old, backup)
                 for path in (SD/'agents'/old/'automations').rglob('automation.json'):
                     raw = self.m.checked_bytes(path); definition = json.loads(raw)
@@ -768,7 +786,7 @@ class Reminter:
                 self.m.gateway('setAgentHiddenFromSidebar', {'id':old, 'isHidden':True})
             self.require_local_mode()
             self._finalize_preferences(journal, mapping)
-            return {'state':'reselected', 'agentCount':len(mapping), 'backup':str(backup),
+            return {'state':'reselected', 'agentCount':len(journal['entries']), 'backup':str(backup),
                     'liveHistoryMerged':False, 'sdkContextsMerged':False, 'pruneAllowed':False}
 
     def checked_routine_states(self, aid, states):

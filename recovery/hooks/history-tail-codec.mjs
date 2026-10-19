@@ -204,6 +204,13 @@ function canonical(value) {
 // matching the reviewed native roundtrip, while retaining every defined field.
 export const nativeContextJson = messages => JSON.stringify(canonical(messages));
 
+/** Native unread parsing accepts finite numbers without coercion. Keep its
+ * existing activity frontier monotonic, with invalid or negative inputs at 0. */
+export function activityFrontier(prior, eligible) {
+  const valid = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+  return Math.max(valid(prior), valid(eligible));
+}
+
 export async function repairCandidate(options, plan) {
   const bounds = validatePlan(plan), directory = detachedDirectory(options.candidateDir);
   const storePath = path.join(directory, 'store.db'), blobsPath = path.join(directory, 'conversation-blobs.db');
@@ -330,7 +337,7 @@ export async function repairCandidate(options, plan) {
     check(typeof unreadRaw === 'string', 'UNREAD_STATE_REQUIRED');
     const unread = JSON.parse(unreadRaw); check(object(unread), 'UNREAD_STATE_REQUIRED');
     const priorUnread = sdk.unread(unreadRaw), previewSHA = digest(JSON.stringify(canonical(sdk.lastMessage(accepted) ?? null)));
-    const updatedUnread = { ...unread, lastActivityAt: maxActivityAt };
+    const updatedUnread = { ...unread, lastActivityAt: activityFrontier(priorUnread.lastActivityAt, maxActivityAt) };
     const parsedAfter = sdk.unread(JSON.stringify(updatedUnread));
     for (const key of Object.keys(priorUnread).filter(key => key !== 'lastActivityAt')) assert.deepEqual(parsedAfter[key], priorUnread[key]);
     check(guard.counts.networkAttempts === 0 && guard.counts.toolAttempts === 0, 'DETACHED_SIDE_EFFECT');
@@ -367,7 +374,8 @@ export async function repairCandidate(options, plan) {
       capacity: { estimated: true, usedTokens, contextTokens: plan.selectedRoute.contextTokens,
         maxOutputTokens: plan.selectedRoute.maxOutputTokens, fits: true, billedCountersChanged: false },
       ui: { records: rows.length, readable: accepted.length, paging, previewSHA, previewPreservedByBridge: true,
-        priorLastActivityAt: priorUnread.lastActivityAt, lastActivityAt: maxActivityAt,
+        priorLastActivityAt: priorUnread.lastActivityAt, maxMergedActivityAt: maxActivityAt,
+        lastActivityAt: updatedUnread.lastActivityAt,
         otherUnreadFieldsPreserved: true, otherKVPreserved: true }, nextIDs, afterUserNextIDs,
       bounds, providerCalls: 0, historicalActionsReplayed: false, ...guard.counts,
       files: Object.fromEntries([storePath, blobsPath].map(file => [path.basename(file),

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validatePlan, regularPath, detachedDirectory, reviewedSource, allocatorSlice,
-  installDenials, digest, LIMITS, REVIEWED, nativeContextJson } from './history-tail-codec.mjs';
+  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier } from './history-tail-codec.mjs';
 
 const require = createRequire(import.meta.url);
 const source = fileURLToPath(new URL('./history-tail-codec.mjs', import.meta.url));
@@ -168,5 +168,17 @@ test('native optional undefined properties normalize without losing defined cont
   for (const changed of [[{ ...decoded[0], content: 'Changed text' }],
     [{ ...decoded[0], providerOptions: null }], [{ ...decoded[0], extra: { image: new Uint8Array([1, 2, 4]) } }]]) {
     assert.notEqual(nativeContextJson(original), nativeContextJson(changed));
+  }
+});
+
+test('activity frontier never moves backward or coerces invalid native state', () => {
+  assert.equal(activityFrontier(3000, 2000), 3000);
+  assert.equal(activityFrontier(2000, 3000), 3000);
+  assert.equal(activityFrontier(3000, 3000), 3000);
+  assert.equal(activityFrontier(3.5, 2.5), 3.5);
+  for (const invalid of [undefined, null, '9000', true, NaN, Infinity, -Infinity, -1]) {
+    assert.equal(activityFrontier(invalid, 2000), 2000);
+    assert.equal(activityFrontier(2000, invalid), 2000);
+    assert.equal(activityFrontier(invalid, invalid), 0);
   }
 });

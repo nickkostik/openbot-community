@@ -132,6 +132,13 @@ class DiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(m.Refusal, 'invalid-advice'):
             m.classify(response)
 
+    def test_malformed_usage_cannot_escape_invalid_advice_refusal(self):
+        for usage in ([], None, 'invalid', 123, False):
+            response = self.response('not-json')
+            response['usage'] = usage
+            with self.subTest(usage=usage), self.assertRaisesRegex(m.Refusal, 'invalid-advice'):
+                m.classify(response)
+
     def test_explicit_low_survives_saved_xhigh_mapping_and_responses_conversion(self):
         payload = pathlib.Path(__file__).resolve().parents[2] / 'payload'
         script = """

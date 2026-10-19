@@ -281,7 +281,7 @@ def classify(response):
         # when the provider omits its finish reason. No response text is stored.
         usage = response.get('usage', {}) if isinstance(response, dict) else {}
         details = usage.get('completion_tokens_details', {}) if isinstance(usage, dict) else {}
-        if (isinstance(details, dict) and type(usage.get('completion_tokens')) is int
+        if (isinstance(usage, dict) and isinstance(details, dict) and type(usage.get('completion_tokens')) is int
                 and type(details.get('reasoning_tokens')) is int
                 and usage['completion_tokens'] == 256 and 240 <= details['reasoning_tokens'] <= 256):
             raise Refusal('advice-truncated') from None

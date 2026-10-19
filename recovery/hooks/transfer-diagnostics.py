@@ -232,7 +232,15 @@ def status(root):
     try:
         value = read_json(root / NAME, 4096)
     except FileNotFoundError:
-        return {'status': 'available', 'nativeAppDeliveryVerified': False}
+        return {'status': 'disabled', 'reason': 'not-requested', 'nativeAppDeliveryVerified': False}
+    # A reply belongs to one persisted job only; never show it on a new job.
+    try:
+        current_job, _ = snapshot(read_json(root / STATE, 65536))
+        if value.get('jobId') is not None and value.get('jobId') != current_job:
+            return {'status': 'disabled', 'reason': 'not-requested', 'nativeAppDeliveryVerified': False}
+    except (OSError, ValueError, Refusal):
+        if value.get('status') in ('available', 'running'):
+            return {'status': 'disabled', 'reason': 'not-requested', 'nativeAppDeliveryVerified': False}
     # This file is never a proof or a source of free-form UI content.
     result = {'status': value.get('status') if value.get('status') in ('running', 'available', 'failed', 'disabled') else 'failed',
               'nativeAppDeliveryVerified': False}
@@ -243,7 +251,7 @@ def status(root):
     if code in ADVICE and result['status'] == 'available':
         result.update(adviceCode=code, advice=ADVICE[code])
     if value.get('reason') in ('timeout', 'upstream-refused', 'invalid-advice', 'response-too-large', 'hop-not-owned',
-            'unsupported-selected-route', 'official-mode', 'opted-out', 'invalid-route', 'no-refusal', 'request-failed', 'state-changed', 'interrupted'):
+            'unsupported-selected-route', 'official-mode', 'opted-out', 'invalid-route', 'no-refusal', 'request-failed', 'state-changed', 'interrupted', 'not-requested'):
         result['reason'] = value['reason']
     if result['status'] == 'running' and time.time() * 1000 > value.get('updatedAtMs', 0) + (TIMEOUT + 5) * 1000:
         result.update(status='failed', reason='interrupted')
@@ -278,7 +286,7 @@ def run(root, now=None):
             if now < previous.get('nextAttemptAtMs', 0):
                 return status(root)
             owned_hop(root)
-            value = {'status': 'running', 'fingerprint': fingerprint, 'updatedAtMs': now,
+            value = {'status': 'running', 'jobId': job, 'fingerprint': fingerprint, 'updatedAtMs': now,
                      'nextAttemptAtMs': now + BACKOFF_MS, 'attempts': 1}
             write(root, value)  # Persist before any billable work; restart cannot replay.
             if selected_model(root) != model:
@@ -291,7 +299,7 @@ def run(root, now=None):
             previous_value = locals().get('value', {})
             reason = str(error) if isinstance(error, Refusal) else 'timeout' if isinstance(error, (TimeoutError, socket.timeout)) else 'request-failed'
             disabled = reason in ('official-mode', 'opted-out', 'unsupported-selected-route', 'no-refusal')
-            value = {**previous_value, 'status': 'disabled' if disabled else 'failed', 'reason': reason,
+            value = {**previous_value, 'jobId': locals().get('job'), 'status': 'disabled' if disabled else 'failed', 'reason': reason,
                      'updatedAtMs': now, 'nextAttemptAtMs': now + BACKOFF_MS}
         write(root, value)
         return status(root)

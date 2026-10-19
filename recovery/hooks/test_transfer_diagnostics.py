@@ -143,8 +143,15 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(m.run(self.root, now=1000)['status'], 'failed')
         self.request.assert_not_called()
 
+    def test_previous_job_advice_does_not_bleed_into_next_job(self):
+        m.run(self.root, now=1000)
+        self.state['jobId'] = '24238183-e7f8-48a2-96ea-994a641cf49b'
+        self.save_state()
+        self.assertEqual(m.status(self.root)['reason'], 'not-requested')
+        self.assertNotIn('advice', m.status(self.root))
+
     def test_status_filters_tampered_free_text(self):
-        m.write(self.root, {'status': 'available', 'adviceCode': 'history-review', 'advice': '<script>secret</script>',
+        m.write(self.root, {'jobId': self.state['jobId'], 'status': 'available', 'adviceCode': 'history-review', 'advice': '<script>secret</script>',
                            'reason': 'secret-key', 'nativeAppDeliveryVerified': True})
         result = m.status(self.root)
         self.assertEqual(result['advice'], m.ADVICE['history-review'])

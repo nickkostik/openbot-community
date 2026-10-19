@@ -388,6 +388,37 @@ Activation verifies destinations before retiring sources, preserves sidebar/main
 
 Existing journals are retained. Only an explicitly requested next generation can roll an entirely active journal forward while keeping prior mapping/backups and rejecting cycles/conflicts. No user/fleet IDs, fixed roster, copy artifacts or credentials belong in product exports.
 
+### Durable publication reload
+
+An authorized `remint-box-fleet.py publish` rechecks the registered copies' owned BOX bindings and requests the native startup publication sweep through [publication-reload.py](../../recovery/hooks/publication-reload.py). It no longer sets `computer-recovery-state.json.pendingHostReload` for publication. That state file remains recovery telemetry and may still contain pending reloads for other repairs; do not edit it to create, acknowledge or repair a publication request.
+
+The separate durable authority is `<data>/openbot-publication-reload.json` with sibling `openbot-publication-reload.json.lock`. Both must be current-user-owned regular nonsymlink files with no group/other permissions; the marker is bounded to 64 KiB. The writer and consumer hold the same exclusive lock. Marker writes use a private temporary file, file fsync, atomic replacement and directory fsync so telemetry rewrites cannot lose the request. Keep these files and the remint journal private; never copy another installation's request.
+
+| Field | Contract |
+|---|---|
+| `schema` | Exactly `1`. |
+| `requestId` | Fresh canonical UUID for this request, independent of bot/conversation IDs. |
+| `mode` | Exactly `custom`. |
+| `phase` | Persisted `pending`, `signal-issued` or `acknowledged`. Waiting observations do not replace this phase. |
+| `target` | Native process identity `{pid,startTicks}`; PID is a positive integer and `startTicks` is the `/proc/<pid>/stat` start identity string. PID alone cannot authorize a reload. |
+| `hostSha256` | SHA256 of the exact selected owned native host source when requested. |
+| `requestedAtMs` | Request creation time in Unix milliseconds. |
+| `signalIssuedAtMs` | Latest durably recorded signal-intent time in Unix milliseconds; also starts the ten-second retry grace. It does not prove SIGTERM reached the host. |
+| `signalAttempts` | Count of durably recorded signal intents, incremented before the initial attempt and each retry; not a successful-signal count. |
+| `acknowledgedAtMs`, `replacement` | Added on acknowledgement with the replacement native `{pid,startTicks}` identity. Acknowledgement does not prove publication or client delivery. |
+
+Request creation requires owned local-only opt-in, literal trimmed Custom and one native host. It captures the host source and process start identity, then rechecks mode and process authority before writing. The durable marker is published before `publish` saves `publicationReloadRequestedAtMs` and `publicationReloadRequestId` in `openbot-box-remint.json` and returns its request receipt. Compare the same request ID across marker, journal, publish result and watcher observation. If interrupted between marker publication and journal/result completion, inspect the retained marker before repeating the operation; a successful journal save is not required for the marker to survive.
+
+The Custom computer watcher consumes the request under its lock. It requires owned local-only opt-in and Custom mode, the exact requested host hash and source mtime quiet for at least two seconds. Missing, multiple or unidentifiable native hosts remain waiting. For the recorded native PID/start identity, the authenticated gateway must report literal `isBusy: false`; busy or unknown is not idle. After that potentially slow call it rechecks mode/local-only authority, source hash and quiet age, and exact native process identity before signalling.
+
+Before the initial SIGTERM and each retry, the watcher durably writes `phase: "signal-issued"`, updates `signalIssuedAtMs` and increments `signalAttempts` under the same `requestId`. While the same PID/start identity remains, ticks within ten seconds of the latest intent report `waiting-native-replacement` without signalling. After that grace, the watcher repeats the exact expected source hash, two-second source quiet age, Custom/local-only, unique process and gateway-idle checks, including every post-gateway authority recheck, before retrying SIGTERM against that same target. Busy or unknown gateway state waits for idle. There is no SIGKILL escalation. A failed signal call returns that request to `pending` and surfaces the failure; a persisted intent alone is not a successful signal receipt.
+
+Watcher `publicationReload` observations can report `absent`, a persisted phase, or `waiting-custom`, `waiting-request-refresh`, `waiting-stable-source`, `waiting-native-host`, `waiting-native-replacement`, `waiting-idle` or `waiting-authority`. In Official, the computer watcher does not consume or clear this Custom request. A changed host hash leaves it waiting for a request refresh; finish the checked source change and use an explicitly authorized `publish` to capture fresh source/process authority. The legacy `pendingHostReload` branch runs only when the durable observation is `absent` or `acknowledged`; an active durable request, including one waiting for source refresh, prevents that telemetry branch from bypassing these guards. Do not hand-edit the hash, target, mode, phase or request ID, remove the lock, or poll by repeatedly invoking mutating `publish`.
+
+The durable intent closes the telemetry-loss problem but still permits a crash between writing `signal-issued` and calling SIGTERM. Automatic recovery uses the same ten-second grace and fresh authority checks before retrying against the unchanged target identity. Retries are limited by this interval and ownership/idle/source conditions, not a fixed attempt-count ceiling. Once a unique owned native identity differs from `target`, the watcher rechecks Custom/native authority and acknowledges that request without signalling the replacement; an already replaced process can also acknowledge on the first consumer tick. A same PID with different `startTicks` is a replacement, so recycled PIDs do not authorize another bounce. No acknowledgement is written while the same target remains. Preserve the marker through Official selection, watcher restart and telemetry updates rather than resetting it or creating repeated requests to manufacture progress.
+
+`publish` reports `supervisedReloadRequested: true`, `publicationReloadRequestId`, `publicationVerified: false` and `nativeAppDeliveryVerified: false`. An `acknowledged` reload means a replacement native process was observed under the checked authority. It does not prove that the startup sweep completed, that copied transcript payloads reached the platform, that the UI displays them, or that chat sends/replies work. Run the separate full ordered paginated publication `verify` before activation, preserve incomplete/divergent history and test actual intended-client delivery separately. No acknowledgement authorizes activation, pruning, inferred billing or a live SDK/context merge.
+
 ### Reviewed terminal return and history merge receipts
 
 This is an explicit recovery after a completed journal’s Local copy was later migrated to Temporal while the original stock conversation was selected again. It is not an automatic save/model update, a first migration or permission to discard either branch. With separately authorized Custom/local-only recovery, initialize a new generation using:
@@ -467,6 +498,29 @@ Original assistant reasoning stays separate `reasoning_content`, including tool-
 Retention is 1–365 days; capture 1024–1048576 bytes; records 1–10000. Prefer PUT `/api/logs/settings` for pruning and Official tap reconcile; GET settings/logs/by-ID and POST `/api/logs/clear` are separate controls. Body logging requires authorized private handling. Never print credentials, full transcripts or summary sidecars.
 
 Hop and custom-host records share request identity for correlation, but harness observation is not a second provider request. Usage uses actual provider/model and reported input/output/cache fields; cached metadata and UI health are not billing/quota/phone proof. Read-only roster diagnostics/profile repairs do not establish native identity admission or delivery.
+
+### Optional tool-free transfer advisor
+
+The panel's deterministic Local-transfer coordinator remains the only transfer writer. When it persists a review-needed refusal, it may start the separate optional [transfer-diagnostics.py](../../recovery/hooks/transfer-diagnostics.py) advisor. This is a bounded inference classification, not a tool-enabled repair agent. It cannot mint/register/activate bots, reconcile histories or SDK roots, edit sections/routines/settings, reload a host, execute returned commands, select another route or declare verification complete. The transfer continues or waits according to its own existing guards regardless of advisor availability.
+
+Private files under the selected data root are `openbot-transfer-diagnostic.json` and its separate `openbot-transfer-diagnostic.lock`. The advisor reads the bounded owned `openbot-custom-dispatch-state.json`; it writes only its own atomic diagnostic receipt under its exclusive lock. Never edit the coordinator's phase, journal, receipt or holds to make the advisor run. These files are installation state and stay outside public source/backups intended for other users.
+
+```bash
+# Status only; no inference request:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json
+# Explicit bounded diagnostic invocation, also used by the coordinator:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json --run
+```
+
+Only strict allowlisted phases/refusal codes, bounded aggregate counts and boolean merge/publication observations form the model's diagnostic facts. No bot names/IDs, histories, instructions, summaries, sessions, credentials, raw errors, arbitrary strings or tool arguments leave through this diagnostic. Its opaque local job-scoped request identity is not a bot/conversation identity. Returned prose is never displayed or executed: accept only the exact JSON advice-code schema and render product-owned static allowlisted text. Tool/function calls, malformed/oversized answers and unrecognized codes fail instead of supplying an action.
+
+The selected global model must have one unambiguous saved route on an approved direct origin: OpenCode Go `https://opencode.ai/zen/go/v1`, OpenAI API `https://api.openai.com/v1`, or NVIDIA `https://integrate.api.nvidia.com/v1`. Other origins, including unsupported OAuth/backend origins, report unavailable; neither a provider family label nor a same-slug route authorizes substitution. The helper verifies the owned loopback hop process/listener and calls that existing hop, which retains provider credential/protocol handling. It does not read provider secrets, contact a provider directly, pool accounts, add a provider or fall back. Custom and current route/state authority are rechecked around the request; changes discard the result.
+
+Before network work, persist the fingerprint of the local job, selected route and sanitized refusal facts. At most one billable diagnostic is attempted per unchanged fingerprint, including after timeout or process restart; a changed fingerprint is additionally subject to the persisted 15-minute backoff. Do not delete the receipt/lock or change a job to bypass this protection. Network work has a 12-second deadline, bounded response size and a 15-second parent subprocess limit. Create `openbot-transfer-diagnostics.disable` in the data root to opt out; it disables future calls without changing transfer authority or saved routing.
+
+The panel must distinguish unavailable/disabled, failed, pending/running and available advice honestly. Missing advice is not successful diagnosis; a static suggestion is not a proven cause. `nativeAppDeliveryVerified` remains false. Neither advice, an inference HTTP 200 nor a completed transfer worker proves ordered full publication, loaded context, actual Grok client acceptance/tool return/delivered reply, billing or prune safety. Those remain separate deterministic checks and live tests.
 
 ### Routing diagnostic egress
 

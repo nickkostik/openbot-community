@@ -499,6 +499,29 @@ Retention is 1–365 days; capture 1024–1048576 bytes; records 1–10000. Pref
 
 Hop and custom-host records share request identity for correlation, but harness observation is not a second provider request. Usage uses actual provider/model and reported input/output/cache fields; cached metadata and UI health are not billing/quota/phone proof. Read-only roster diagnostics/profile repairs do not establish native identity admission or delivery.
 
+### Optional tool-free transfer advisor
+
+The panel's deterministic Local-transfer coordinator remains the only transfer writer. When it persists a review-needed refusal, it may start the separate optional [transfer-diagnostics.py](../../recovery/hooks/transfer-diagnostics.py) advisor. This is a bounded inference classification, not a tool-enabled repair agent. It cannot mint/register/activate bots, reconcile histories or SDK roots, edit sections/routines/settings, reload a host, execute returned commands, select another route or declare verification complete. The transfer continues or waits according to its own existing guards regardless of advisor availability.
+
+Private files under the selected data root are `openbot-transfer-diagnostic.json` and its separate `openbot-transfer-diagnostic.lock`. The advisor reads the bounded owned `openbot-custom-dispatch-state.json`; it writes only its own atomic diagnostic receipt under its exclusive lock. Never edit the coordinator's phase, journal, receipt or holds to make the advisor run. These files are installation state and stay outside public source/backups intended for other users.
+
+```bash
+# Status only; no inference request:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json
+# Explicit bounded diagnostic invocation, also used by the coordinator:
+python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
+  --state /home/box/sand-data/openbot-custom-dispatch-state.json --run
+```
+
+Only strict allowlisted phases/refusal codes, bounded aggregate counts and boolean merge/publication observations form the model's diagnostic facts. No bot names/IDs, histories, instructions, summaries, sessions, credentials, raw errors, arbitrary strings or tool arguments leave through this diagnostic. Its opaque local job-scoped request identity is not a bot/conversation identity. Returned prose is never displayed or executed: accept only the exact JSON advice-code schema and render product-owned static allowlisted text. Tool/function calls, malformed/oversized answers and unrecognized codes fail instead of supplying an action.
+
+The selected global model must have one unambiguous saved route on an approved direct origin: OpenCode Go `https://opencode.ai/zen/go/v1`, OpenAI API `https://api.openai.com/v1`, or NVIDIA `https://integrate.api.nvidia.com/v1`. Other origins, including unsupported OAuth/backend origins, report unavailable; neither a provider family label nor a same-slug route authorizes substitution. The helper verifies the owned loopback hop process/listener and calls that existing hop, which retains provider credential/protocol handling. It does not read provider secrets, contact a provider directly, pool accounts, add a provider or fall back. Custom and current route/state authority are rechecked around the request; changes discard the result.
+
+Before network work, persist the fingerprint of the local job, selected route and sanitized refusal facts. At most one billable diagnostic is attempted per unchanged fingerprint, including after timeout or process restart; a changed fingerprint is additionally subject to the persisted 15-minute backoff. Do not delete the receipt/lock or change a job to bypass this protection. Network work has a 12-second deadline, bounded response size and a 15-second parent subprocess limit. Create `openbot-transfer-diagnostics.disable` in the data root to opt out; it disables future calls without changing transfer authority or saved routing.
+
+The panel must distinguish unavailable/disabled, failed, pending/running and available advice honestly. Missing advice is not successful diagnosis; a static suggestion is not a proven cause. `nativeAppDeliveryVerified` remains false. Neither advice, an inference HTTP 200 nor a completed transfer worker proves ordered full publication, loaded context, actual Grok client acceptance/tool return/delivered reply, billing or prune safety. Those remain separate deterministic checks and live tests.
+
 ### Routing diagnostic egress
 
 `diagnose-routing.py.open_no_redirect` preserves detected operator `http`/`https`/`all` proxy choices and no-proxy exclusions. If any operator proxy is present, it skips the Computer fallback even when that fallback value is invalid. Only when none is configured may the provided `SAND_EGRESS_TUNNEL_PROXY_ADDR` supply the HTTPS diagnostic proxy; no address retains the existing direct behavior. This is a per-process diagnostic transport choice, not a saved networking, exit-node or mode change.

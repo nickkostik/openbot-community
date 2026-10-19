@@ -27,7 +27,7 @@ BACKOFF_MS = 15 * 60 * 1000
 MAX_JOB_CALLS = 16
 APPROVED_ORIGINS = {'https://opencode.ai/zen/go/v1', 'https://api.openai.com/v1',
                     'https://integrate.api.nvidia.com/v1'}
-PHASES = {'review-needed', 'checking-bindings', 'copying', 'registering', 'waiting-for-publication',
+PHASES = {'review-needed', 'checking-bindings', 'copying', 'registering', 'preserving-late-history', 'waiting-for-publication',
           'activating', 'waiting-for-rate-limit', 'waiting-for-control-plane', 'bound-box'}
 REFUSALS = {'history-conflict', 'identity-conflict', 'preflight-refused'}
 COUNTS = ('planned', 'copied', 'registered-box', 'active')

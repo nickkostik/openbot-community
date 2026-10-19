@@ -24,6 +24,8 @@ Pass the actual selected native host path; this helper defaults to the `/opt/san
 
 The helper applies canonical recovery transforms before BOX linking, wraps/stamps the latest and compatibility baseline pairs with the same installed payload, and runs native offline checks on the final source. A successful result has `state: "prepared"` and names `result.directory`, containing the complete `preparation.json` and four read-only 0400 source artifacts: `stock.cjs`, `wrapped.cjs`, `baseline.cjs` and `baseline-wrapped.cjs`. The report includes `baselineWrappedSha256`. Keep vendor-derived source local and private. Source drift, unsafe staging, changed payload, wrapping failure or failed/incomplete contracts refuse success. [Command, ownership rules and report fields](../skills/openbot-config/reference.md#prepare-a-reviewed-box-engine-from-public-vendor-source).
 
+The publication transform accepts the reviewed baseline's generated `node:path` alias without depending on its numeric suffix. It still requires one exact native publisher predicate and one matching `node:path` import; changed predicates or ambiguous imports are refused. This compatibility does not relax source hashes, enable a new vendor version, activate a staged engine, or establish message delivery.
+
 `activated`, `liveHostChanged` and `nativeDeliveryVerified` remain false during preparation. It does not select the pin, reload the host, remint identities, enable routines or switch models/mode; it does not substitute Temporal. First selection below and loading through the owned recovery integration remain separate. Offline hashes/contracts do not prove a fresh complete deployment, routine delivery or standalone mobile admission.
 
 ## Selecting the first local engine

@@ -29,6 +29,7 @@ custom=false;assert(openbotSkipTranscriptPublication('old-temporal','/agents')==
 
     def fixture(self):
         return '''function openbotLocalFleetEnabled() { return true; }
+var import_node_path172 = require("node:path");
 class TranscriptEntryPublisher {
 '''+M.DRAIN+'''
     return state;
@@ -76,6 +77,32 @@ class TranscriptEntryPublisher {
         self.assertNotIn('commitGrokBotTranscriptEntries',M.OBSERVER)
         self.assertNotIn('appendTranscriptEntry',M.OBSERVER)
         self.assertEqual(M.patch(changed),changed)
+
+    def test_reviewed_baseline_alias_renumbering_preserves_native_predicate(self):
+        for alias in ('import_node_path', 'import_node_path185', 'import_node_path207'):
+            with self.subTest(alias=alias):
+                source=self.fixture().replace('import_node_path172',alias)
+                changed=M.patch(source)
+                expected=M.STOCK.replace('import_node_path172',alias).replace(
+                    'readSandProfileHarness',
+                    'openbotSkipTranscriptPublication(agentId, agentsRootDir) || readSandProfileHarness')
+                self.assertIn(expected,changed)
+                self.assertEqual(M.patch(changed),changed)
+                subprocess.run(['node','--check'],input=changed,text=True,capture_output=True,check=True)
+
+    def test_alias_support_does_not_accept_changed_or_ambiguous_native_contracts(self):
+        source=self.fixture()
+        invalid=[source.replace('require("node:path")','require("other-module")'),
+                 source.replace('var import_node_path172 = require("node:path");',''),
+                 source.replace('var import_node_path172 = require("node:path");',
+                     'var import_node_path172 = require("node:path");\n' * 2),
+                 source+'\n'+M.STOCK,
+                 source.replace('agentsRootDir, agentId','agentsRootDir, otherId'),
+                 source.replace('=== "temporal"','!== "temporal"'),
+                 source.replace('import_node_path172.join','import_node_path172.resolve')]
+        for candidate in invalid:
+            with self.subTest(candidate=candidate[-100:]),self.assertRaises(RuntimeError):
+                M.patch(candidate)
 
     def test_changed_contract_or_partial_observer_is_refused(self):
         for source in [self.fixture().replace(M.REPORT,'report: changed'),

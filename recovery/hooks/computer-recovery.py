@@ -27,7 +27,8 @@ import uuid
 SD = pathlib.Path('/home/box/sand-data')
 HOST = pathlib.Path('/opt/sand/sand-host/host-main.cjs')
 HERE = pathlib.Path(__file__).resolve().parent
-PATCHES = ('local-mode-inject.py', 'gate-inject.py', 'room-mirror-guard-inject.py',
+PATCHES = ('native-routine-trigger-inject.py',
+           'local-mode-inject.py', 'gate-inject.py', 'room-mirror-guard-inject.py',
            'local-routines-inject.py', 'transcript-text-inject.py', 'subagent-state-inject.py',
            'local-engine-inject.py', 'exec-timing-inject.py', 'window-readiness-inject.py',
            'store-status-inject.py', 'store-request-compression-inject.py', 'store-byte-upload-inject.py', 'store-chrome-snapshot-inject.py',

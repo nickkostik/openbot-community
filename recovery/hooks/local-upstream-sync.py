@@ -757,7 +757,8 @@ def save_local_release(root, candidates, original_policy, metadata, report):
 def assessment_key(original_policy, upstream_sha):
     digest = hashlib.sha256(original_policy + upstream_sha.encode())
     paths = [HERE / name for name in ('local-upstream-sync.py', 'upstream-instructions.mjs',
-                                     'computer-recovery.py', 'local-engine.py', 'latest-local-engine.mjs',
+                                     'computer-recovery.py', 'native-routine-trigger-preservation.py',
+                                     'local-engine.py', 'latest-local-engine.mjs',
                                      'latest-box-ports.cjs', 'latest-box-compatibility.json',
                                      'verify-latest-local-engine.cjs')]
     paths += [HERE / name for name in load('computer-recovery').PATCHES]

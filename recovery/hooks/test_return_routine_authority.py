@@ -468,6 +468,35 @@ class RoutineAuthorityTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 R.authority_for(self.r, journal, entry, self.validator)
 
+    def test_preactive_extra_hidden_destination_routine_refuses_before_any_write(self):
+        journal, entry, authority = self.prepare()
+        extra = self.root / 'agents' / THIRD / 'automations/untracked-hidden/automation.json'
+        self.write(extra, {'enabled': False, 'prompt': 'untracked hidden destination recipe'})
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        calls = copy.deepcopy(self.calls)
+        with self.assertRaisesRegex(RuntimeError, 'destination routine roster must be exact and paused'):
+            R.validate(self.r, journal, entry, self.validator)
+        self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, before)
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(self.gateway_calls, [])
+
+    def test_preactive_known_local_only_destination_switch_must_remain_false(self):
+        relative = 'automations/local-only/automation.json'
+        local = {'enabled': False, 'prompt': 'retained separate Local recipe'}
+        self.write(self.target / relative, local)
+        self.write(self.folder / 'sources' / fleet.NEW / relative, local)
+        journal, entry, authority = self.prepare()
+        self.assertIs(authority['states'][relative], False)
+        target = self.root / 'agents' / THIRD / relative
+        self.write(target, {**local, 'enabled': True})
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        calls = copy.deepcopy(self.calls)
+        with self.assertRaisesRegex(RuntimeError, 'destination routine roster must be exact and paused'):
+            R.validate(self.r, journal, entry, self.validator)
+        self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, before)
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(self.gateway_calls, [])
+
     def test_codec_helper_and_output_hashes_are_bound_to_the_captured_plan(self):
         original = self.materializer
         def wrong(folder, plan):

@@ -272,6 +272,12 @@ def validate(r,journal,entry,validator):
     prequiesced=validate_prequiesced(r,journal,entry,authority,validator)
     paused=entry.get('returnRoutinePauseIntent')is True or prequiesced
     r.checked_routine_states(entry['newId'],authority['states'])
+    destination=r.m.SD/'agents'/entry['newId']
+    copied={str(path.relative_to(destination)):json.loads(validator.checked(r.m.SD,path))
+            for path in(destination/'automations').rglob('automation.json')}
+    if entry.get('phase')!='active'and(set(copied)!=set(authority['states'])or
+            any(value.get('enabled')is not False for value in copied.values())):
+        raise RuntimeError('Return destination routine roster must be exact and paused before activation')
     root=r.m.SD/'agents'/entry['oldId']
     paths={str(path.relative_to(root)):path for path in(root/'automations').rglob('automation.json')}
     if set(paths)!=set(authority['localDefinitions']):raise RuntimeError('Return routine list changed after intent capture')

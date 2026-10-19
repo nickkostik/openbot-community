@@ -1,4 +1,4 @@
-"""Patch the BOX turn gates as a checked transformation of the native source."""
+"""Preserve explicit local BOX turns and avoid background working-state warming."""
 import os
 import pathlib
 import re
@@ -66,11 +66,19 @@ def patch(source):
     legacy_inject = ('\n    if (%s === "grok_bot_box_harness_turns_blocked" || '
               '%s === "grok_bot_temporal_harness" || %s === "sand_create_temporal_agents") '
               '{ return false; /* %s */ }\n' % (name, name, name, MARK))
-    inject = legacy_inject.replace('if (', 'if (openbotLocalFleetEnabled() && (', 1).replace(
+    previous_inject = legacy_inject.replace('if (', 'if (openbotLocalFleetEnabled() && (', 1).replace(
         ') { return false;', ')) { return false;', 1)
+    # This gate is consumed only by the optional background warmer. Direct
+    # working-state exports, snapshots and agent sessions retain native behavior.
+    # Upgrade only the complete known earlier line; a marker cannot bless drift.
+    inject = previous_inject.replace(
+        '%s === "sand_create_temporal_agents"' % name,
+        '%s === "sand_create_temporal_agents" || %s === "sand_working_state_warming"' % (name, name), 1)
     if MARK in source:
-        if source.startswith(legacy_inject, match.end()):
-            source = source[:match.end()] + inject + source[match.end() + len(legacy_inject):]
+        for known in (legacy_inject, previous_inject):
+            if source.startswith(known, match.end()):
+                source = source[:match.end()] + inject + source[match.end() + len(known):]
+                break
         if source.count(MARK) != 1 or not source.startswith(inject, match.end()):
             raise RuntimeError('BOX feature gate patch drifted or is ambiguous')
         return source

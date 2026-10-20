@@ -1,4 +1,4 @@
-"""One bounded, native-codec late-tail append before hidden BOX cutover.
+"""Bounded, receipt-linked native-codec tail rounds before hidden BOX cutover.
 
 The inherited dispatch flock is mandatory. Immutable source captures and the
 prior receipt remain untouched. Two SQLite transactions are journaled so a
@@ -24,6 +24,7 @@ import uuid
 HERE = pathlib.Path(__file__).resolve().parent
 MAX_ROWS = 128
 MAX_TEXT = 4 * 1024 * 1024
+MAX_ROUNDS = 8
 REVIEWED_HOST_SHA = '74278c1ec791b38a235bf68e386dbbe86428bd2f9966baceb29a1173bc574dc3'
 FRESHNESS_ERROR = 'Source history changed after reviewed merge; incremental preservation required before activation'
 
@@ -203,10 +204,37 @@ def append_rows(r, mapping, store, additions):
     return projections, records
 
 
+def tail_rounds(journal, job):
+    """Keep completed files immutable once a later round references them."""
+    uuid.UUID(job); root = pathlib.Path(journal['backup'])
+    first = root / ('bounded-tail-job-' + job + '.json'); result = []
+    for number in range(1, MAX_ROUNDS + 2):
+        path = first if number == 1 else first.with_name(first.stem + '-round-' + str(number) + '.json')
+        if not path.exists():
+            if any(first.with_name(first.stem + '-round-' + str(later) + '.json').exists()
+                   for later in range(number + 1, MAX_ROUNDS + 2)):
+                raise RuntimeError('Tail round chain has a gap')
+            break
+        if number > MAX_ROUNDS: raise RuntimeError('Tail round budget exhausted')
+        state = json.loads(owned(path))
+        if state.get('jobId') != job: raise RuntimeError('Tail round job changed')
+        if number > 1:
+            previous_path, previous = result[-1]
+            acknowledgement = state.get('previousPublicationAcknowledgement', {})
+            if (state.get('roundIndex') != number or state.get('schemaVersion') != 2 or
+                    previous.get('phase') != 'completed' or state.get('previousRound') != reference(previous_path) or
+                    acknowledgement.get('phase') != 'acknowledged' or
+                    acknowledgement.get('requestId') != previous.get('reloadRequestId')):
+                raise RuntimeError('Tail round parent or publication acknowledgement changed')
+        result.append((path, state))
+    return result
+
+
 def publication_state(recovery):
-    journal = recovery.r.read(); job = recovery.progress['jobId']; uuid.UUID(job)
-    path = pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job + '.json')
-    return path, json.loads(owned(path)) if path.exists() else None
+    journal = recovery.r.read(); job = recovery.progress['jobId']
+    rounds = tail_rounds(journal, job)
+    if rounds: return rounds[-1]
+    return pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job + '.json'), None
 
 
 def record_publication(recovery, request):
@@ -230,9 +258,10 @@ def waiting_for_reload(recovery):
 
 
 def pending(journal, job_id):
-    uuid.UUID(job_id)
-    path = pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job_id + '.json')
-    return path.exists() and json.loads(owned(path)).get('phase') == 'prepared'
+    rounds = tail_rounds(journal, job_id)
+    if not rounds: return False
+    state = rounds[-1][1]
+    return state.get('phase') == 'prepared' or (state.get('schemaVersion') == 2 and state.get('phase') == 'preparing')
 
 
 class TailRepair:
@@ -458,14 +487,137 @@ class TailRepair:
         write(marker, {'phase': 'accepted', 'intent': intent_ref}); self.fault('accepted')
         return {'added': len(planned_rows) - len(before_rows), 'resumed': False}
 
+    @staticmethod
+    def witness(entry, source, old, fresh, additions):
+        def head(capture):
+            last = capture['entries'][-1] if capture['entries'] else None
+            return {'generation': capture['generation'], 'count': len(capture['entries']),
+                    'head': None if last is None else {'seq': int(last['seq']),
+                        'sha256': sha(base64.b64decode(last['body'], validate=True))}}
+        return {'newId': entry['newId'], 'parentReceipt': entry['historyMergeReceipt'],
+                'sourceAgentId': source['agentId'], 'before': head(old), 'after': head(fresh),
+                'addedMessages': len(additions), 'deltaSha256': sha(encoded(additions))}
+
+    def new_tail_witnesses(self, journal):
+        """Prove real, supported appends before reserving another round."""
+        witnesses = []; count = text_bytes = 0
+        for entry in journal['entries']:
+            if entry['phase'] == 'active' or not entry.get('historyMergeReceipt'): continue
+            self.require(); self.validator.validate(self.r, journal, entry)
+            receipt = json.loads(self.validator.referenced(journal['backup'], entry['historyMergeReceipt']))
+            self.local_sources(journal, entry, receipt)
+            for source in receipt['sources']:
+                if source['kind'] != 'platform': continue
+                old = json.loads(self.validator.referenced(journal['backup'], {key: source[key] for key in ('path', 'sha256')}))
+                fresh, additions = cloud_tail(self.r.m.rpc, source, old)
+                if not additions: continue
+                for item in additions:
+                    _, text = literal(json.loads(base64.b64decode(item['body'], validate=True)))
+                    count += 1; text_bytes += len(text.encode('utf8'))
+                if count > MAX_ROWS or text_bytes > MAX_TEXT:
+                    raise RuntimeError('Combined tail import exceeds one bounded round')
+                witnesses.append(self.witness(entry, source, old, fresh, additions))
+        return witnesses
+
+    def require_completed_parents(self, journal, rounds):
+        expected = {}
+        for _, state in rounds:
+            if state.get('phase') != 'completed': continue
+            for ref in state.get('intents', []):
+                intent = json.loads(self.validator.referenced(journal['backup'], ref))
+                expected[intent['newId']] = intent['newReceipt']
+        for identifier, receipt in expected.items():
+            if self.r.entry(journal, identifier).get('historyMergeReceipt') != receipt:
+                raise RuntimeError('Completed tail accepted parent changed')
+
+    def intent_witnesses(self, journal, entry, intent):
+        old_receipt = json.loads(self.validator.referenced(journal['backup'], intent['oldReceipt']))
+        new_receipt = json.loads(self.validator.referenced(journal['backup'], intent['newReceipt']))
+        updated = {(source['kind'], source['agentId']): source for source in new_receipt['sources']}
+        result = []
+        for source in old_receipt['sources']:
+            if source['kind'] != 'platform': continue
+            following = updated[(source['kind'], source['agentId'])]
+            old = json.loads(self.validator.referenced(journal['backup'], {key: source[key] for key in ('path', 'sha256')}))
+            fresh = json.loads(self.validator.referenced(journal['backup'], {key: following[key] for key in ('path', 'sha256')}))
+            boundary = int(old['entries'][-1]['seq']) if old['entries'] else 0
+            additions = [item for item in fresh['entries'] if int(item['seq']) > boundary]
+            if additions: result.append(self.witness(entry, source, old, fresh, additions))
+        return result
+
+    def prepare_next_round(self, journal, path, state):
+        parents = state['parents']; witnesses = state['newHeadWitnesses']
+        if not witnesses or set(parents) != {item['newId'] for item in witnesses}:
+            raise RuntimeError('Tail round has no exact new source-head witnesses')
+        for identifier, parent in parents.items():
+            entry = self.r.entry(self.r.read(), identifier)
+            if entry.get('historyMergeReceipt') != parent or entry.get('phase') != 'registered-box':
+                raise RuntimeError('Tail round accepted parent changed before preparation')
+        prepared = list(state.get('preparedEntries', [])); intents = list(state.get('intents', []))
+        if len(prepared) != len(intents) or len(set(prepared)) != len(prepared) or any(identifier not in parents for identifier in prepared):
+            raise RuntimeError('Tail round preparation cursor changed')
+        for identifier, ref in zip(prepared, intents):
+            self.validate_round_intent(journal, state, identifier, ref)
+        for identifier in parents:
+            self.require()
+            if identifier in prepared: continue
+            entry = self.r.entry(self.r.read(), identifier)
+            ref = self.prepare(journal, entry, parents[identifier])
+            if not ref: raise RuntimeError('Witnessed tail append disappeared')
+            intent = json.loads(self.validator.referenced(journal['backup'], ref))
+            expected = [item for item in witnesses if item['newId'] == identifier]
+            if (intent['newId'] != identifier or intent['oldReceipt'] != parents[identifier] or
+                    self.intent_witnesses(journal, entry, intent) != expected):
+                raise RuntimeError('Tail source head changed during round preparation')
+            intents.append(ref); prepared.append(identifier)
+            values = [json.loads(self.validator.referenced(journal['backup'], item)) for item in intents]
+            if sum(item['addedMessages'] for item in values) > MAX_ROWS or sum(item['textBytes'] for item in values) > MAX_TEXT:
+                raise RuntimeError('Combined tail import exceeds one bounded round')
+            state = {**state, 'intents': intents, 'preparedEntries': prepared}
+            write(path, state); self.fault('round-entry-prepared')
+        state = {**state, 'phase': 'prepared'}
+        write(path, state); self.fault('round-prepared')
+        return state
+
+    def validate_round_intent(self, journal, state, identifier, ref):
+        intent = json.loads(self.validator.referenced(journal['backup'], ref))
+        parent = state['parents'][identifier]
+        entry = {**self.r.entry(journal, identifier), 'historyMergeReceipt': parent}
+        expected = [item for item in state['newHeadWitnesses'] if item['newId'] == identifier]
+        if (not expected or intent['newId'] != identifier or intent['oldReceipt'] != parent or
+                self.intent_witnesses(journal, entry, intent) != expected):
+            raise RuntimeError('Tail round intent does not match its witnessed parent')
+        return intent
+
     def run(self):
         self.require(); journal = self.r.read()
         job = self.recovery.progress['jobId']; uuid.UUID(job)
-        path = pathlib.Path(journal['backup']) / ('bounded-tail-job-' + job + '.json')
-        if path.exists():
-            state = json.loads(owned(path))
-            if state['phase'] == 'preparing': raise RuntimeError('Interrupted tail preparation requires review')
-            if state['phase'] == 'completed': raise RuntimeError('One bounded tail attempt already completed for this job')
+        rounds = tail_rounds(journal, job)
+        path, state = publication_state(self.recovery)
+        if state and state['phase'] == 'completed':
+            self.require_completed_parents(journal, rounds)
+            witnesses = self.new_tail_witnesses(journal)
+            if not witnesses:
+                return {'phase': 'waiting-for-publication', 'repairedAgents': 0, 'importedMessages': 0,
+                        'noop': True, 'historicalActionsReplayed': False, 'nativeAppDeliveryVerified': False}
+            if len(rounds) >= MAX_ROUNDS: raise RuntimeError('Tail round budget exhausted')
+            request = self.r.reload.read(self.root)
+            if (not request or request.get('requestId') != state.get('reloadRequestId') or
+                    request.get('phase') != 'acknowledged'):
+                raise RuntimeError('Completed tail round requires publication acknowledgement')
+            number = len(rounds) + 1
+            next_path = rounds[0][0].with_name(rounds[0][0].stem + '-round-' + str(number) + '.json')
+            following = {'schemaVersion': 2, 'phase': 'preparing', 'jobId': job, 'roundIndex': number,
+                         'previousRound': reference(path),
+                         'previousPublicationAcknowledgement': {'requestId': request['requestId'], 'phase': 'acknowledged'},
+                         'parents': {item['newId']: item['parentReceipt'] for item in witnesses},
+                         'newHeadWitnesses': witnesses, 'intents': [], 'preparedEntries': []}
+            self.fault('before-round-rollover'); write(next_path, following, True)
+            path, state = next_path, following; self.fault('round-rollover')
+        if state is not None:
+            if state['phase'] == 'preparing':
+                if state.get('schemaVersion') != 2: raise RuntimeError('Interrupted tail preparation requires review')
+                state = self.prepare_next_round(journal, path, state)
             if state['phase'] != 'prepared': raise RuntimeError('Bounded tail attempt requires review')
         else:
             write(path, {'phase': 'preparing', 'jobId': job}, True)
@@ -485,7 +637,13 @@ class TailRepair:
                 write(path, state)
             except BaseException:
                 write(path, {'phase': 'review-needed', 'jobId': job}); raise
+        if state.get('schemaVersion') == 2:
+            identifiers = state.get('preparedEntries', [])
+            if len(identifiers) != len(state['intents']) or len(set(identifiers)) != len(identifiers) or set(identifiers) != set(state['parents']):
+                raise RuntimeError('Tail round preparation cursor changed')
+            for identifier, ref in zip(identifiers, state['intents']):
+                self.validate_round_intent(journal, state, identifier, ref)
         reports = [self.apply(journal, intent) for intent in state['intents']]
-        write(path, {**state, 'phase': 'completed', 'reports': reports})
+        write(path, {**state, 'phase': 'completed', 'reports': reports}); self.fault('round-completed')
         return {'phase': 'waiting-for-publication', 'repairedAgents': len(reports), 'importedMessages': sum(row['added'] for row in reports),
                 'historicalActionsReplayed': False, 'nativeAppDeliveryVerified': False}

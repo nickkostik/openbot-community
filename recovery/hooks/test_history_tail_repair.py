@@ -208,11 +208,12 @@ class ApplyTests(ReceiptTests):
             repair.run()
         prepare.assert_not_called();self.assertEqual(len(T.rows(target/'store.db')),1)
 
-    def test_completed_job_cannot_start_a_second_automatic_attempt(self):
+    def test_completed_job_with_unchanged_heads_is_an_immutable_noop(self):
         repair,intent,target,_=self.setup_apply();value=json.loads(T.owned(intent['path']));value.update(addedMessages=1,textBytes=5);T.write(pathlib.Path(intent['path']),value);intent=T.reference(pathlib.Path(intent['path']))
         repair.prepare=lambda *args:intent
         result=repair.run();self.assertEqual(result['importedMessages'],1)
-        with self.assertRaisesRegex(RuntimeError,'already completed'):repair.run()
+        path,_=T.publication_state(repair.recovery);before=path.read_bytes()
+        self.assertTrue(repair.run()['noop']);self.assertEqual(path.read_bytes(),before)
         self.assertEqual(len(T.rows(target/'store.db')),2)
 
     def test_interrupted_preparation_does_not_rebuild_over_unknown_state(self):
@@ -220,6 +221,47 @@ class ApplyTests(ReceiptTests):
         T.write(path,{'phase':'preparing','jobId':repair.recovery.progress['jobId']},True)
         with self.assertRaisesRegex(RuntimeError,'Interrupted'):repair.run()
         self.assertEqual(len(T.rows(target/'store.db')),1)
+
+    def test_second_completed_round_appends_real_sql_prefix_and_pins_linked_receipt(self):
+        repair,first,target,first_receipt=self.setup_apply()
+        value=json.loads(T.owned(first['path']));value.update(addedMessages=1,textBytes=30)
+        T.write(pathlib.Path(first['path']),value);first=T.reference(pathlib.Path(first['path']))
+        repair.prepare=lambda *args:first;repair.run()
+        ack={'requestId':str(uuid.uuid4()),'phase':'acknowledged'}
+        T.record_publication(repair.recovery,{'publicationReloadRequestId':ack['requestId']})
+        first_plan,_=T.publication_state(repair.recovery);plan_bytes=first_plan.read_bytes();parent_bytes=first_receipt.read_bytes()
+        prefix=T.rows(target/'store.db');sdk_before=T.graph(target/'conversation-blobs.db')
+        parent=T.reference(first_receipt);previous=json.loads(parent_bytes)
+        folder=first_receipt.parent/'second-round';folder.mkdir()
+        for filename in ('store.db','conversation-blobs.db'):
+            T.snapshot(target/filename,folder/filename);T.snapshot(target/filename,folder/('before-'+filename))
+        tail=item(2,'second literal tail');event=json.loads(base64.b64decode(tail['body']))
+        with contextlib.closing(sqlite3.connect(folder/'store.db'))as sql:
+            sql.execute('INSERT INTO transcript_entries VALUES(3,?,?)',(event['id'],json.dumps(event)));sql.commit()
+        child=T.incremental_receipt(previous,parent,{'store':T.reference(folder/'store.db'),'blobs':T.reference(folder/'conversation-blobs.db')})
+        captured=json.loads(T.owned(previous['sources'][-1]['path']));fresh={'generation':1,'entries':captured['entries']+[tail]}
+        capture=folder/'cloud.json';T.write(capture,fresh,True)
+        child['sources'][-1].update(T.reference(capture));child['sourceOrders'][-1]['entryIds'].append(event['id'])
+        child['projections'].append({'sourceId':OLD,'sourceKind':'platform','sourceEntryId':event['id'],'targetEntryId':event['id']})
+        receipt=folder/'receipt.json';T.write(receipt,child,True)
+        journal=self.r.read();entry=journal['entries'][0]
+        value={'newId':NEW,'oldReceipt':parent,'newReceipt':T.reference(receipt),'guards':repair.identity(journal,entry),
+               'databaseInodes':{name:T.database_identity(target/name)for name in ('store.db','conversation-blobs.db')},
+               'sourceHeads':child['sources'],'beforeStore':T.reference(folder/'before-store.db'),
+               'beforeSDK':T.reference(folder/'before-conversation-blobs.db'),'plannedStore':child['baseline']['store'],
+               'plannedSDK':child['baseline']['blobs'],'selectedRoute':repair.route(entry),'addedMessages':1,'textBytes':19}
+        intent=folder/'intent.json';T.write(intent,value,True)
+        repair.prepare=lambda journal,entry,accepted:T.reference(intent) if accepted==parent else self.fail('parent changed')
+        original=self.r.m.rpc
+        self.r.m.rpc=lambda method,body: {'generation':1,'entries':fresh['entries'][-body['limit']:][::-1]} if method=='ListGrokBotTranscriptEntries' else original(method,body)
+        with mock.patch.object(self.r.reload,'read',return_value=ack):
+            self.assertEqual(repair.run()['importedMessages'],1)
+        self.assertEqual(T.rows(target/'store.db')[:len(prefix)],prefix)
+        self.assertEqual(len(T.rows(target/'store.db')),3);self.assertEqual(T.graph(target/'conversation-blobs.db'),sdk_before)
+        self.assertEqual(self.r.read()['entries'][0]['historyMergeReceipt'],T.reference(receipt))
+        self.assertEqual(first_plan.read_bytes(),plan_bytes);self.assertEqual(first_receipt.read_bytes(),parent_bytes)
+        H.validate(self.r,self.r.read(),self.r.read()['entries'][0])
+        self.assertTrue(repair.run()['noop']);self.assertEqual(len(T.rows(target/'store.db')),3)
 
     def test_prepared_job_resumes_after_sql_crash_without_repreparing(self):
         repair,intent,target,_=self.setup_apply();path=self.backup/('bounded-tail-job-'+repair.recovery.progress['jobId']+'.json')
@@ -256,6 +298,138 @@ class ApplyTests(ReceiptTests):
 
 
 
+
+
+class TailRoundTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=pathlib.Path(self.temp.name);self.backup=self.root/'backup';self.backup.mkdir()
+        self.job=str(uuid.uuid4());self.writes=[];self.prepares=[];self.ack={'requestId':str(uuid.uuid4()),'phase':'acknowledged'}
+        def ref(name,value):
+            path=self.backup/name;T.write(path,value,True);return T.reference(path)
+        self.ref=ref;self.parent=ref('receipt-1.json',{'revision':1})
+        self.journal={'backup':str(self.backup),'entries':[{'newId':NEW,'phase':'registered-box','historyMergeReceipt':self.parent}]}
+        def referenced(root,reference):
+            raw=T.owned(reference['path']);self.assertEqual(T.sha(raw),reference['sha256']);return raw
+        self.r=types.SimpleNamespace(read=lambda:json.loads(json.dumps(self.journal)),
+            entry=lambda journal,identifier:next(e for e in journal['entries']if e['newId']==identifier),
+            reload=types.SimpleNamespace(read=lambda root:self.ack))
+        self.recovery=types.SimpleNamespace(root=self.root,r=self.r,progress={'jobId':self.job},require=lambda:None)
+        self.repair=object.__new__(T.TailRepair);self.repair.root=self.root;self.repair.r=self.r;self.repair.recovery=self.recovery
+        self.repair.validator=types.SimpleNamespace(referenced=referenced);self.repair.require=lambda:None;self.repair.fault=lambda phase:None
+        self.first=self.backup/('bounded-tail-job-'+self.job+'.json')
+        first_intent=ref('intent-1.json',{'newId':NEW,'newReceipt':self.parent})
+        T.write(self.first,{'phase':'completed','jobId':self.job,'intents':[first_intent],'reports':[{'added':1}],
+                            'reloadRequestId':self.ack['requestId']},True)
+        self.first_bytes=self.first.read_bytes();self.repair.new_tail_witnesses=lambda _:[]
+        def apply(journal,reference):
+            intent=json.loads(referenced(self.backup,reference));current=self.journal['entries'][0]['historyMergeReceipt']
+            if current==intent['newReceipt']:return {'added':1,'resumed':True}
+            self.assertEqual(current,intent['oldReceipt']);self.journal['entries'][0]['historyMergeReceipt']=intent['newReceipt'];self.writes.append(reference)
+            self.repair.fault('accepted');return {'added':1,'resumed':False}
+        self.repair.apply=apply
+
+    def queue(self,number=2):
+        parent=self.journal['entries'][0]['historyMergeReceipt'];child=self.ref('receipt-'+str(number)+'.json',{'revision':number})
+        witness={'newId':NEW,'parentReceipt':parent,'sourceAgentId':OLD,'before':{'generation':1,'count':number-1},
+                 'after':{'generation':1,'count':number},'addedMessages':1,'deltaSha256':str(number)*64}
+        intent=self.ref('intent-'+str(number)+'.json',{'newId':NEW,'oldReceipt':parent,'newReceipt':child,'addedMessages':1,'textBytes':4})
+        self.repair.new_tail_witnesses=lambda _:[witness] if self.journal['entries'][0]['historyMergeReceipt']==parent else []
+        def prepare(journal,entry,accepted):
+            self.assertEqual(accepted,parent);self.prepares.append(intent);return intent
+        self.repair.prepare=prepare;self.repair.intent_witnesses=lambda *args:[witness]
+        return intent,child
+
+    def fault(self,point):
+        self.repair.fault=lambda phase:(_ for _ in ()).throw(InterruptedError(point)) if phase==point else None
+
+    def acknowledge(self):
+        self.ack={'requestId':str(uuid.uuid4()),'phase':'acknowledged'}
+        T.record_publication(self.recovery,{'publicationReloadRequestId':self.ack['requestId']})
+
+    def test_second_actual_witness_keeps_same_job_and_completed_parent_bytes(self):
+        intent,child=self.queue();result=self.repair.run()
+        path,state=T.publication_state(self.recovery)
+        self.assertEqual(result['importedMessages'],1);self.assertEqual(state['roundIndex'],2)
+        self.assertEqual(state['previousRound'],T.reference(self.first));self.assertEqual(state['jobId'],self.job)
+        self.assertEqual(self.journal['entries'][0]['historyMergeReceipt'],child);self.assertEqual(self.first.read_bytes(),self.first_bytes)
+        self.acknowledge();self.assertFalse(T.waiting_for_reload(self.recovery))
+        before=path.read_bytes();self.assertTrue(self.repair.run()['noop']);self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(self.writes,[intent])
+
+    def test_no_growth_never_creates_an_empty_round(self):
+        self.assertTrue(self.repair.run()['noop']);self.assertEqual(list(self.backup.glob('*round-*')),[])
+        self.assertEqual(self.first.read_bytes(),self.first_bytes)
+
+    def test_pending_or_displaced_publication_ack_cannot_roll_over(self):
+        self.queue()
+        for ack in ({'requestId':self.ack['requestId'],'phase':'pending'}, {'requestId':str(uuid.uuid4()),'phase':'acknowledged'}, None):
+            self.ack=ack
+            with self.subTest(ack=ack),self.assertRaisesRegex(RuntimeError,'publication acknowledgement'):self.repair.run()
+        self.assertEqual(self.writes,[]);self.assertEqual(self.first.read_bytes(),self.first_bytes)
+
+    def test_crash_before_rollover_keeps_original_state(self):
+        self.queue();self.fault('before-round-rollover')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        self.assertEqual(list(self.backup.glob('*round-*')),[]);self.assertEqual(self.writes,[])
+        self.repair.fault=lambda _:None;self.assertEqual(self.repair.run()['importedMessages'],1)
+
+    def test_crash_after_rollover_resumes_same_round_without_new_job(self):
+        self.queue();self.fault('round-rollover')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        path,state=T.publication_state(self.recovery);before=state['previousRound'];self.assertTrue(T.pending(self.journal,self.job))
+        self.repair.new_tail_witnesses=lambda _:self.fail('must resume witnessed round')
+        self.repair.fault=lambda _:None;self.repair.run()
+        self.assertEqual(T.publication_state(self.recovery)[0],path);self.assertEqual(T.publication_state(self.recovery)[1]['previousRound'],before)
+        self.assertEqual(self.first.read_bytes(),self.first_bytes)
+
+    def test_crash_after_prepared_cursor_does_not_prepare_again(self):
+        self.queue();self.fault('round-entry-prepared')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        self.repair.prepare=lambda *args:self.fail('must reuse durable intent');self.repair.fault=lambda _:None
+        self.repair.run();self.assertEqual(len(self.prepares),1);self.assertEqual(len(self.writes),1)
+
+    def test_crash_after_acceptance_never_double_applies(self):
+        self.queue();self.fault('accepted')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        self.repair.fault=lambda _:None;self.repair.run();self.assertEqual(len(self.writes),1)
+        self.assertEqual(self.first.read_bytes(),self.first_bytes)
+
+    def test_crash_after_completion_still_requires_this_rounds_reload(self):
+        self.queue();self.fault('round-completed')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        path,state=T.publication_state(self.recovery);self.assertEqual(state['phase'],'completed');self.assertNotIn('reloadRequestId',state)
+        requested=str(uuid.uuid4());self.r.publish=lambda:{'publicationReloadRequestId':requested}
+        self.assertTrue(T.waiting_for_reload(self.recovery));self.assertEqual(json.loads(path.read_text())['reloadRequestId'],requested)
+        self.ack={'requestId':requested,'phase':'acknowledged'};self.assertFalse(T.waiting_for_reload(self.recovery));self.assertEqual(len(self.writes),1)
+
+    def test_same_parent_replay_and_changed_completed_file_refuse(self):
+        self.queue();self.repair.run();self.acknowledge()
+        self.journal['entries'][0]['historyMergeReceipt']=self.parent
+        with self.assertRaisesRegex(RuntimeError,'accepted parent changed'):self.repair.run()
+        self.journal['entries'][0]['historyMergeReceipt']=json.loads(T.owned(self.writes[0]['path']))['newReceipt']
+        self.first.write_bytes(self.first_bytes+b' ')
+        with self.assertRaisesRegex(RuntimeError,'parent or publication'):self.repair.run()
+
+    def test_prepared_cursor_and_intent_parent_tampering_refuse(self):
+        intent,_=self.queue();self.fault('round-prepared')
+        with self.assertRaises(InterruptedError):self.repair.run()
+        self.repair.fault=lambda _:None;path,state=T.publication_state(self.recovery);saved=dict(state)
+        state['preparedEntries']=[];T.write(path,state)
+        with self.assertRaisesRegex(RuntimeError,'cursor'):self.repair.run()
+        T.write(path,saved);value=json.loads(T.owned(intent['path']));value['oldReceipt']={'path':'wrong','sha256':'0'*64}
+        T.write(pathlib.Path(intent['path']),value);saved['intents']=[T.reference(pathlib.Path(intent['path']))];T.write(path,saved)
+        with self.assertRaisesRegex(RuntimeError,'witnessed parent'):self.repair.run()
+        self.assertEqual(self.writes,[])
+
+    def test_eight_total_rounds_are_bounded_and_unchanged_last_round_is_noop(self):
+        for number in range(2,T.MAX_ROUNDS+1):
+            self.queue(number);self.repair.run();self.acknowledge()
+        self.assertEqual(len(T.tail_rounds(self.journal,self.job)),8)
+        self.assertTrue(self.repair.run()['noop']);self.queue(9)
+        with self.assertRaisesRegex(RuntimeError,'budget exhausted'):self.repair.run()
+        self.assertEqual(len(self.writes),7);self.assertEqual(self.first.read_bytes(),self.first_bytes)
 
 
 class IdentifierThenTailTests(unittest.TestCase):

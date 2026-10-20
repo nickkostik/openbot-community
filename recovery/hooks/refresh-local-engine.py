@@ -37,7 +37,8 @@ def atomic(path, data, expected):
         pathlib.Path(name).unlink(missing_ok=True)
 
 
-def refresh(root, stock_backup=None, wrapped_backup=None, apply=False, transform=None, validate=None):
+def refresh(root, stock_backup=None, wrapped_backup=None, apply=False, transform=None, validate=None,
+            *, vendor_worker=None, worker_transform=None, worker_validate=None):
     engine = load('local-engine')
     path = root / 'openbot-local-engine.json'
     before = engine.owned_bytes(path, 16384)
@@ -71,14 +72,21 @@ def refresh(root, stock_backup=None, wrapped_backup=None, apply=False, transform
         candidates[kind] = source.encode('utf8')
     report = {'state': 'validated', 'hashes': {k: hashlib.sha256(v).hexdigest() for k, v in candidates.items()},
               'activated': False, 'hostReloadRequested': False}
+    worker = engine.optional_content_search_worker(root, vendor_worker, worker_transform,
+                                                   worker_validate, stage=apply)
+    if worker is not None:
+        report['contentSearchWorker'] = worker
     if not apply:
         return report
-    if 'generationId' in policy and all(report['hashes'][k] == policy[k + 'Sha256'] for k in candidates):
+    if ('generationId' in policy and all(report['hashes'][k] == policy[k + 'Sha256'] for k in candidates)
+            and policy.get('contentSearchWorker') == worker):
         return {**report, 'state': 'already-current', 'generationId': policy['generationId']}
-    return activate_pair(root, candidates, before)
+    return activate_pair(root, candidates, before, vendor_worker=vendor_worker,
+                         worker_transform=worker_transform, worker_validate=worker_validate)
 
 
-def activate_pair(root, candidates, expected, metadata=None, before_activate=None, *, select=True):
+def activate_pair(root, candidates, expected, metadata=None, before_activate=None, *, select=True,
+                  vendor_worker=None, worker_transform=None, worker_validate=None):
     """Activate an already checked pair; callers supply its exact provenance."""
     engine = load('local-engine')
     path = root / 'openbot-local-engine.json'
@@ -98,6 +106,10 @@ def activate_pair(root, candidates, expected, metadata=None, before_activate=Non
             raise RuntimeError('Engine candidate wrap kind differs')
     hashes = {key: hashlib.sha256(raw).hexdigest() for key, raw in candidates.items()}
     report = {'hashes': hashes, 'hostReloadRequested': False}
+    worker = engine.optional_content_search_worker(root, vendor_worker, worker_transform,
+                                                   worker_validate, stage=True)
+    if worker is not None:
+        report['contentSearchWorker'] = worker
     # Existing generation directories remain immutable. Fully stage the new
     # pair before an atomic manifest points readers to both files and hashes.
     generations = root / 'openbot-local-engine/generations'
@@ -114,13 +126,25 @@ def activate_pair(root, candidates, expected, metadata=None, before_activate=Non
     fd = os.open(folder / 'previous-policy.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'wb') as output:
         output.write(expected); output.flush(); os.fsync(output.fileno())
+    if worker is not None:
+        fd = os.open(folder / 'content-search-worker.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+        with os.fdopen(fd, 'wb') as output:
+            output.write((json.dumps(worker, sort_keys=True) + '\n').encode())
+            output.flush(); os.fsync(output.fileno())
     for directory in [folder, generations, generations.parent]:
         fd = os.open(directory, os.O_DIRECTORY)
         try: os.fsync(fd)
         finally: os.close(fd)
     updated = {**policy, **(metadata or {}), 'generationId': generation,
                **{k + 'Sha256': report['hashes'][k] for k in candidates}}
+    # Optional assets are captured from the current worker, not inherited from
+    # an older vendor release or accepted from caller-supplied provenance.
+    updated.pop('contentSearchWorker', None)
+    if worker is not None:
+        updated['contentSearchWorker'] = worker
     manifest = (json.dumps(updated, indent=2) + '\n').encode()
+    if len(manifest) > 16384:
+        raise RuntimeError('Engine manifest exceeds its reader bound')
     if not select:
         # Official updates save a complete immutable local release without
         # selecting it, changing the live host/version, or sending a BOX turn.

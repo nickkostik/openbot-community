@@ -5,13 +5,149 @@ patch cannot reconstruct it. This installation may retain its tested engine in
 sand-data; it never downloads or guesses a replacement during a recovery tick.
 """
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
 import stat
+import subprocess
+import tempfile
 
 MAX_BYTES = 48 * 1024 * 1024
+MAX_CONTENT_SEARCH_WORKER_BYTES = 1024 * 1024
+CONTENT_SEARCH_WORKER = pathlib.Path('/opt/sand/sand-host/extensions/content-search/search-index-worker.cjs')
+HERE = pathlib.Path(__file__).resolve().parent
+
+
+def content_search_worker_source_sha256(vendor_worker=None):
+    """Bounded vendor identity for assessment invalidation; never selects an asset."""
+    try:
+        return hashlib.sha256(_content_search_worker_bytes(vendor_worker)).hexdigest()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _content_search_worker_bytes(vendor_worker):
+    source_path = pathlib.Path(vendor_worker) if vendor_worker is not None else CONTENT_SEARCH_WORKER
+    fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or
+                not 0 < info.st_size <= MAX_CONTENT_SEARCH_WORKER_BYTES):
+            raise RuntimeError('Optional vendor worker is not a bounded regular source')
+        with os.fdopen(fd, 'rb', closefd=False) as source:
+            raw = source.read(MAX_CONTENT_SEARCH_WORKER_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_CONTENT_SEARCH_WORKER_BYTES:
+        raise RuntimeError('Optional vendor worker exceeds its bound')
+    return raw
+
+
+def optional_content_search_worker(sd, vendor_worker=None, transform=None, validate=None, *, stage=False):
+    """Describe/stage a reviewed optional sidecar; never change the vendor worker.
+
+    An unavailable or unfamiliar worker leaves the native path authoritative.
+    In particular, no old sidecar is carried forward merely because a previous
+    engine manifest named it. Runtime selection must recheck the vendor digest.
+    """
+    try:
+        if not pathlib.Path(sd).is_absolute():
+            return None
+        raw = _content_search_worker_bytes(vendor_worker)
+        if transform is None:
+            spec = importlib.util.spec_from_file_location('content_search_cache', HERE / 'content-search-cache-inject.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if hashlib.sha256(raw).hexdigest() != module.WORKER_SOURCE_SHA:
+                return None
+            transform = module.patch_worker
+        updated = transform(raw.decode('utf8'))
+        if not isinstance(updated, str) or transform(updated) != updated:
+            return None
+        data = updated.encode('utf8')
+        if not 0 < len(data) <= MAX_CONTENT_SEARCH_WORKER_BYTES:
+            return None
+        if validate is None:
+            def validate(value):
+                result = subprocess.run(['/exec-daemon/node', '--check'], input=value,
+                                        capture_output=True, text=True, timeout=45)
+                if result.returncode:
+                    raise RuntimeError('Optional content-search sidecar syntax differs')
+        validate(updated)
+        sha = hashlib.sha256(data).hexdigest()
+        directory = pathlib.Path(sd) / 'openbot-local-engine' / 'sidecars' / sha
+        target = directory / 'search-index-worker.cjs'
+        asset = {'schemaVersion': 1, 'sourceSha256': hashlib.sha256(raw).hexdigest(),
+                 'sha256': sha, 'path': str(target)}
+        if stage:
+            _stage_content_search_sidecar(pathlib.Path(sd), directory, target, data)
+        return asset
+    except (OSError, ValueError, UnicodeError, RuntimeError, subprocess.SubprocessError):
+        # This optimization cannot block canonical host repair or Official work.
+        return None
+
+
+def _stage_content_search_sidecar(sd, directory, target, data):
+    def owned_directory(path):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError('Content-search sidecar directory must be owned and not symlinked')
+    owned_directory(sd)
+    for path in (sd / 'openbot-local-engine', directory.parent, directory):
+        path.mkdir(mode=0o700, exist_ok=True)
+        owned_directory(path)
+    def existing():
+        if owned_bytes(target, MAX_CONTENT_SEARCH_WORKER_BYTES) != data or target.lstat().st_mode & 0o222:
+            raise RuntimeError('Existing immutable content-search sidecar differs')
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        fd, temporary = tempfile.mkstemp(prefix='.content-search-worker-', dir=directory)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                output.write(data)
+                output.flush()
+                os.fchmod(output.fileno(), 0o400)
+                os.fsync(output.fileno())
+            try:
+                os.link(temporary, target, follow_symlinks=False)
+            except FileExistsError:
+                existing()
+        finally:
+            pathlib.Path(temporary).unlink(missing_ok=True)
+    else:
+        existing()
+    for path in (directory, directory.parent, directory.parent.parent):
+        fd = os.open(path, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def content_search_worker_current(sd, asset, vendor_worker=None, *, transform=None):
+    """Cheap read-only watch proof; no syntax process, source write or policy edit."""
+    try:
+        sd = pathlib.Path(sd)
+        if not isinstance(asset, dict) or not sd.is_absolute() or sd.resolve() != sd:
+            return False
+        expected = optional_content_search_worker(sd, vendor_worker, transform, lambda _: None)
+        if expected is None or asset != expected:
+            return False
+        target = pathlib.Path(expected['path'])
+        for path in (sd, sd / 'openbot-local-engine', target.parent.parent, target.parent):
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                return False
+        info = target.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o222:
+            return False
+        data = owned_bytes(target, MAX_CONTENT_SEARCH_WORKER_BYTES)
+        return hashlib.sha256(data).hexdigest() == asset['sha256']
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def owned_bytes(path, limit):

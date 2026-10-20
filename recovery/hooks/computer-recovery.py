@@ -28,6 +28,7 @@ SD = pathlib.Path('/home/box/sand-data')
 HOST = pathlib.Path('/opt/sand/sand-host/host-main.cjs')
 HERE = pathlib.Path(__file__).resolve().parent
 PATCHES = ('native-routine-trigger-inject.py', 'roster-read-concurrency-inject.py',
+           'content-search-cache-inject.py',
            'credential-restore-preflight-inject.py',
            'local-mode-inject.py', 'gate-inject.py', 'room-mirror-guard-inject.py',
            'local-routines-inject.py', 'transcript-text-inject.py', 'subagent-state-inject.py',
@@ -610,6 +611,25 @@ def ensure_upstream_sync():
     return module.maybe_start(SD)
 
 
+def ensure_content_search_sidecar(mode):
+    """Repair only an optional known asset; current vendor always remains intact."""
+    if mode != 'custom':
+        return {'state': 'native-worker'}
+    engine = local_engine()
+    selected = engine.policy(SD)
+    if selected is None:
+        return {'state': 'not-pinned'}
+    current = selected.get('contentSearchWorker')
+    if engine.content_search_worker_current(SD, current):
+        return {'state': 'ready', 'sourceSha256': current['sourceSha256'],
+                'sha256': current['sha256'], 'optional': True}
+    asset = engine.optional_content_search_worker(SD, stage=True)
+    if asset is None:
+        return {'state': 'compatibility-required', 'optional': True}
+    return {'state': 'ready' if selected.get('contentSearchWorker') == asset else 'saved-unselected',
+            'sourceSha256': asset['sourceSha256'], 'sha256': asset['sha256'], 'optional': True}
+
+
 def ensure_custom_dispatch():
     spec = importlib.util.spec_from_file_location('custom_dispatch', HERE / 'custom-dispatch-recovery.py')
     module = importlib.util.module_from_spec(spec)
@@ -661,6 +681,12 @@ def tick():
         state['upstreamSync'] = ensure_upstream_sync()
     except Exception as error:
         state['upstreamSync'] = {'state': 'failed', 'errorType': type(error).__name__}
+    try:
+        state['contentSearchCache'] = ensure_content_search_sidecar(mode)
+    except Exception as error:
+        # This optional dependency must not stop native updates or backup repair.
+        state['contentSearchCache'] = {'state': 'compatibility-required', 'optional': True,
+                                       'errorType': type(error).__name__}
     try:
         state['backupRepair'] = ensure_backup_permissions()
         if state['backupRepair'].get('nativeFlushChannel', {}).get('state') == 'created':

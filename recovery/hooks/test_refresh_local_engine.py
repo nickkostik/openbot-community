@@ -98,6 +98,72 @@ class EngineUpgradeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): self.refresh(apply=True)
         self.assertEqual(self.path.read_bytes(), before)
 
+    def worker_options(self):
+        vendor = self.root / 'vendor-worker.cjs'
+        vendor.write_text('const nativeWorker = true;\n')
+        def bounded(source):
+            original = 'const nativeWorker = true;\n'
+            patched = original + 'const connectionLimit = 8;\n'
+            if source in (original, patched):
+                return patched
+            raise RuntimeError('Unreviewed worker')
+        return {'vendor_worker': vendor, 'worker_transform': bounded,
+                'worker_validate': lambda _: None}
+
+    def test_optional_worker_plan_does_not_stage_and_apply_records_current_immutable_asset(self):
+        options = self.worker_options()
+        before = options['vendor_worker'].read_bytes()
+        plan = self.refresh(**options)
+        self.assertIn('contentSearchWorker', plan)
+        self.assertFalse(pathlib.Path(plan['contentSearchWorker']['path']).exists())
+        result = self.refresh(apply=True, **options)
+        policy = json.loads(self.path.read_bytes())
+        self.assertEqual(policy['contentSearchWorker'], result['contentSearchWorker'])
+        asset = pathlib.Path(policy['contentSearchWorker']['path'])
+        self.assertEqual(asset.stat().st_mode & 0o777, 0o400)
+        self.assertEqual(hashlib.sha256(asset.read_bytes()).hexdigest(), policy['contentSearchWorker']['sha256'])
+        folder = self.root / 'openbot-local-engine/generations' / result['generationId']
+        self.assertEqual(json.loads((folder / 'content-search-worker.json').read_bytes()), policy['contentSearchWorker'])
+        self.assertEqual(options['vendor_worker'].read_bytes(), before)
+        self.assertEqual(self.refresh(apply=True, **options)['state'], 'already-current')
+        asset.unlink()
+        self.assertEqual(self.refresh(apply=True, **options)['state'], 'already-current')
+        self.assertTrue(asset.exists(), 'an owned missing asset may be reproduced without selecting a new pair')
+
+    def test_unknown_new_worker_clears_old_asset_without_blocking_engine_refresh(self):
+        options = self.worker_options()
+        self.refresh(apply=True, **options)
+        policy = json.loads(self.path.read_bytes()); previous = pathlib.Path(policy['contentSearchWorker']['path'])
+        options['vendor_worker'].write_text('new unsupported vendor worker')
+        result = self.refresh(apply=True, **options)
+        self.assertTrue(result['activated'])
+        self.assertNotIn('contentSearchWorker', json.loads(self.path.read_bytes()))
+        self.assertTrue(previous.exists(), 'old immutable generations stay recoverable but are not selected')
+        self.assertEqual(options['vendor_worker'].read_text(), 'new unsupported vendor worker')
+
+    def test_staged_optional_asset_does_not_publish_policy_when_pair_cas_fails(self):
+        options = self.worker_options()
+        def concurrent_edit(_):
+            self.path.write_text(json.dumps({**self.policy, 'ownerEdited': True}))
+        with self.assertRaisesRegex(RuntimeError, 'concurrently'):
+            M.activate_pair(self.root, self.sources, self.path.read_bytes(), before_activate=concurrent_edit, **options)
+        current = json.loads(self.path.read_bytes())
+        self.assertTrue(current['ownerEdited'])
+        self.assertNotIn('contentSearchWorker', current)
+
+    def test_caller_provenance_cannot_pin_a_stale_optional_worker(self):
+        result = M.activate_pair(self.root, self.sources, self.path.read_bytes(),
+                                 metadata={'contentSearchWorker': {'path': 'stale'}})
+        self.assertTrue(result['activated'])
+        self.assertNotIn('contentSearchWorker', json.loads(self.path.read_bytes()))
+
+    def test_sidecar_metadata_cannot_publish_an_unreadable_oversized_manifest(self):
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'reader bound'):
+            M.activate_pair(self.root, self.sources, before, metadata={'audit': 'x' * 16384},
+                            **self.worker_options())
+        self.assertEqual(self.path.read_bytes(), before)
+
 
 if __name__ == '__main__':
     unittest.main()

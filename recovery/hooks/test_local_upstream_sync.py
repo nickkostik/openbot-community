@@ -29,6 +29,27 @@ RUNNER = ('  async sendPrompt(prompt, options2) {\n' + '    // native retained r
 
 
 class UpstreamSyncTests(unittest.TestCase):
+    def test_content_search_injector_invalidates_cached_engine_assessment(self):
+        original = pathlib.Path.read_bytes
+        before = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        def revised_dependency(path):
+            raw = original(path)
+            return raw + b'\n# revised optional search worker\n' if path.name == 'content-search-cache-inject.py' else raw
+        with mock.patch.object(pathlib.Path, 'read_bytes', revised_dependency):
+            after = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        self.assertNotEqual(before, after)
+
+    def test_current_vendor_worker_identity_invalidates_assessment_without_pinning_it(self):
+        original = M.load
+        with mock.patch.object(M, 'load', side_effect=lambda name: ENGINE if name == 'local-engine' else original(name)):
+            with mock.patch.object(ENGINE, 'content_search_worker_source_sha256', return_value='1' * 64):
+                before = M.assessment_key(b'unchanged-policy', 'a' * 64)
+            with mock.patch.object(ENGINE, 'content_search_worker_source_sha256', return_value='2' * 64):
+                changed = M.assessment_key(b'unchanged-policy', 'a' * 64)
+            with mock.patch.object(ENGINE, 'content_search_worker_source_sha256', return_value=None):
+                missing = M.assessment_key(b'unchanged-policy', 'a' * 64)
+        self.assertEqual(len({before, changed, missing}), 3)
+
     def test_credential_preflight_invalidates_cached_engine_assessment(self):
         original = pathlib.Path.read_bytes
         before = M.assessment_key(b'unchanged-policy', 'a' * 64)
@@ -103,6 +124,25 @@ class UpstreamSyncTests(unittest.TestCase):
         for kind, raw in self.candidates.items():
             self.assertEqual((saved / (kind + '.cjs')).read_bytes(), raw)
             self.assertEqual(hashlib.sha256(raw).hexdigest(), ready['manifest'][kind + 'Sha256'])
+
+    def test_unknown_optional_worker_does_not_block_official_saved_release_or_reuse_old_asset(self):
+        (self.root / 'openbot-mode').write_text('official')
+        vendor = self.root / 'vendor-search-worker.cjs'; vendor.write_text('new unreviewed native worker')
+        original_policy = {**self.policy, 'contentSearchWorker': {'path': 'old-worker-must-not-be-pinned'}}
+        self.path.write_text(json.dumps(original_policy)); before = self.path.read_bytes()
+        real_load = M.load
+        refresh_load = REFRESH.load
+        with mock.patch.object(M, 'load', side_effect=lambda name: REFRESH if name == 'refresh-local-engine' else real_load(name)), \
+                mock.patch.object(REFRESH, 'load', side_effect=lambda name: ENGINE if name == 'local-engine' else refresh_load(name)), \
+                mock.patch.object(ENGINE, 'CONTENT_SEARCH_WORKER', vendor):
+            result = M.save_local_release(self.root, self.candidates, before,
+                {'upstreamVersion': 'abcdef1'}, {'nativeBoxRunnerPresent': True})
+        self.assertEqual(result['phase'], 'local-release-ready')
+        ready = M.owned_json(self.root / 'openbot-upstream-local-ready.json')
+        self.assertNotIn('contentSearchWorker', ready['manifest'])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(vendor.read_text(), 'new unreviewed native worker')
+        self.assertFalse((self.root / 'openbot-local-engine/sidecars').exists())
 
     def test_official_update_rejects_partial_release_or_a_concurrent_mode_change(self):
         for mode, report, message in [('official', {'nativeBoxRunnerPresent': False}, 'partial'),

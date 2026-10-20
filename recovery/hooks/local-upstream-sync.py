@@ -760,12 +760,17 @@ def assessment_key(original_policy, upstream_sha):
                                      'computer-recovery.py', 'native-routine-trigger-preservation.py',
                                      'roster-read-concurrency-inject.py',
                                      'credential-restore-preflight-inject.py',
+                                     'content-search-cache-inject.py',
                                      'local-engine.py', 'latest-local-engine.mjs',
                                      'latest-box-ports.cjs', 'latest-box-compatibility.json',
                                      'verify-latest-local-engine.cjs')]
     paths += [HERE / name for name in load('computer-recovery').PATCHES]
     for path in dict.fromkeys(paths):
         digest.update(path.name.encode()); digest.update(path.read_bytes())
+    # Host source can stay identical while its separately shipped worker changes.
+    # This identity never selects or reuses an earlier optional worker artifact.
+    worker_sha = load('local-engine').content_search_worker_source_sha256()
+    digest.update(b'content-search-worker\0' + (worker_sha or 'unavailable').encode())
     return digest.hexdigest()
 
 

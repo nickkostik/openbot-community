@@ -20,6 +20,56 @@ spec.loader.exec_module(m)
 
 
 class ComputerRecoveryTests(unittest.TestCase):
+    def test_content_search_optional_stage_never_loads_engine_for_official(self):
+        with mock.patch.object(m, 'local_engine', side_effect=AssertionError('Official worker changed')):
+            self.assertEqual(m.ensure_content_search_sidecar('official'), {'state': 'native-worker'})
+
+    def test_content_search_optional_unknown_worker_preserves_selected_policy(self):
+        selected = {'contentSearchWorker': {'sha256': 'a' * 64}}
+        engine = SimpleNamespace(policy=lambda _: selected,
+                                 content_search_worker_current=lambda *_: False,
+                                 optional_content_search_worker=mock.Mock(return_value=None))
+        with mock.patch.object(m, 'local_engine', return_value=engine):
+            result = m.ensure_content_search_sidecar('custom')
+        self.assertEqual(result['state'], 'compatibility-required')
+        self.assertEqual(selected, {'contentSearchWorker': {'sha256': 'a' * 64}})
+
+    def test_content_search_known_sidecar_reports_selected_or_unselected(self):
+        asset = {'sourceSha256': 'a' * 64, 'sha256': 'b' * 64}
+        selected = {'contentSearchWorker': asset}
+        engine = SimpleNamespace(policy=lambda _: selected,
+                                 content_search_worker_current=lambda *_: False,
+                                 optional_content_search_worker=mock.Mock(return_value=asset))
+        with mock.patch.object(m, 'local_engine', return_value=engine):
+            self.assertEqual(m.ensure_content_search_sidecar('custom')['state'], 'ready')
+            selected.clear()
+            self.assertEqual(m.ensure_content_search_sidecar('custom')['state'], 'saved-unselected')
+        engine.optional_content_search_worker.assert_called_with(m.SD, stage=True)
+
+    def test_healthy_sidecar_watch_uses_no_staging_or_node_process(self):
+        asset = {'sourceSha256': 'a' * 64, 'sha256': 'b' * 64}
+        engine = SimpleNamespace(policy=lambda _: {'contentSearchWorker': asset},
+                                 content_search_worker_current=lambda *_: True,
+                                 optional_content_search_worker=mock.Mock(side_effect=AssertionError('Unneeded stage')))
+        with mock.patch.object(m, 'local_engine', return_value=engine):
+            self.assertEqual(m.ensure_content_search_sidecar('custom')['state'], 'ready')
+        engine.optional_content_search_worker.assert_not_called()
+
+    def test_optional_sidecar_failure_does_not_skip_official_backup_repairs(self):
+        with tempfile.TemporaryDirectory() as root:
+            sd = pathlib.Path(root); (sd / 'openbot-local-only.enable').touch()
+            (sd / 'openbot-mode').write_text('official'); host = sd / 'host.cjs'; host.write_text('NATIVE')
+            with mock.patch.object(m, 'SD', sd), mock.patch.object(m, 'HOST', host), \
+                    mock.patch.object(m, 'ensure_named_tunnel', return_value={}), \
+                    mock.patch.object(m, 'ensure_backup_permissions', return_value={}), \
+                    mock.patch.object(m, 'ensure_content_search_sidecar', side_effect=RuntimeError('Unknown worker')), \
+                    mock.patch.object(m, 'restore_official_stock', return_value=[]), \
+                    mock.patch.object(m, 'repair_official_store_status', return_value=False) as backups:
+                result = m.tick()
+            backups.assert_called_once()
+            self.assertEqual(result['state'], 'official-stock')
+            self.assertEqual(result['contentSearchCache']['state'], 'compatibility-required')
+
     def test_unknown_credential_restore_refuses_before_host_backup_or_replacement(self):
         self.assertIn('credential-restore-preflight-inject.py', m.PATCHES)
         with tempfile.TemporaryDirectory() as root:

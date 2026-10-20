@@ -138,6 +138,14 @@ After the idle restart, verify the actual selected mode and preserved settings. 
 Report what actually activated and what is still pending or blocked. Keep the previous source and engine available until fresh turn verification passes.
 ```
 
+## Keep transfer evidence recoverable
+
+For a migration or preserve-data image update, use the installed canonical receipt acceptor, tail repair and return coordinator so receipt and prepared-intent closures are retained before acceptance, live apply or authority commit. Their private ordinary `openbot-evidence-retention/` directory holds exact gzip-tar archives and SHA256 manifests. Native backup excludes nested `store.db` and `conversation-blobs.db`; JSON receipts without captured database/blob bytes are insufficient. Ordinary archive paths avoid depending on hidden-directory eligibility. Require its explicit manifest policy: prepared returns retain current candidate dependencies and exact opaque previous-journal metadata, while each older generation keeps its own separately checked archive. Unknown policy or references outside that generation must refuse; do not widen paths into active sand-data. Prepared-return retention must also cover the current typed source inventories and their nested session SQLite/SDK captures as opaque immutable bytes under the same recorded backup. This preserves those captures without inventing session-merge authority or following arbitrary sibling paths.
+
+Use canonical locked missing-only recovery before resumed validators inspect evidence. All-present preflight checks owned regular existence/size; canonical validation still hashes the exact references without inflating every archive each tick. Missing evidence requires the complete checked archive/manifest and matching existing bytes. Do not manually extract over data, rewrite paths/hashes or overwrite a live store. Keep original pending inode, route and freshness guards; image recreation may require explicit review, never a fake restamp. Read the [bounded retention contract](../skills/openbot-config/reference.md#immutable-receipt-evidence-retention).
+
+Report archive capture separately from fresh native snapshot acceptance and a verified encrypted off-box backup. Coverage is canonical receipt/prepared-intent references, not every older standalone fleet-state tree. Archive presence proves neither upload nor message delivery. Keep real archives, conversations, credentials, SDK graphs and vendor files outside public source.
+
 ## What the agent should report
 
 | Item | Useful evidence |

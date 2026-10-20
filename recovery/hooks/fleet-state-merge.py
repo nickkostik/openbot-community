@@ -188,6 +188,7 @@ def snapshot_tree(source, destination):
         with contextlib.closing(sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)) as src:
             with contextlib.closing(sqlite3.connect(target)) as dst:
                 src.backup(dst)
+                dst.execute('PRAGMA journal_mode=DELETE'); dst.commit()
                 if dst.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise RuntimeError('SQLite backup integrity failed')
 

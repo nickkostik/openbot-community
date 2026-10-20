@@ -7,6 +7,7 @@ is pinned in the migration journal; later new turns may extend its transcript.
 import base64
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -453,5 +454,10 @@ def accept(r,journal,entry,path):
     elif pinned is None and json.loads(raw).get('schema')in(DELTA_SCHEMA,IDENTIFIER_SCHEMA):
         raise RuntimeError('Incremental merge requires a previously pinned immutable receipt')
     result=validate(r,journal,entry,reference)
+    # Native snapshots omit nested native SQLite basenames. Pin a retained exact
+    # closure before the journal can accept this receipt; do not rewrite refs.
+    spec=importlib.util.spec_from_file_location('evidence_retention',pathlib.Path(__file__).with_name('evidence-retention.py'))
+    retention=importlib.util.module_from_spec(spec);spec.loader.exec_module(retention)
+    retention.retain(journal['backup'],reference)
     entry['historyMergeReceipt']=reference
     return result

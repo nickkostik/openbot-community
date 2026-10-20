@@ -132,6 +132,25 @@ class ApplyTests(ReceiptTests):
         self.assertEqual(self.r.read()['entries'][0]['historyMergeReceipt'],T.reference(path))
         self.assertFalse(self.r.read()['entries'][0]['phase']=='active')
 
+    def test_prepared_tail_evidence_recovers_before_exact_apply_without_replanning(self):
+        repair, intent, target, receipt = self.setup_apply()
+        retention = T.module('evidence-retention'); journal = self.r.read()
+        retention.retain(journal['backup'], intent)
+        job = repair.recovery.progress['jobId']
+        T.write(self.backup / ('bounded-tail-job-' + job + '.json'),
+                {'phase': 'prepared', 'jobId': job, 'intents': [intent]}, True)
+        _, metadata, _ = retention.locations(self.backup, intent)
+        required = [self.backup / item['path'] for item in json.loads(T.owned(metadata))['files']]
+        captures = {path: path.read_bytes() for path in required if path.suffix == '.db'}
+        native_before = {path: path.read_bytes() for path in target.iterdir() if path.is_file()}
+        for path in captures: path.unlink()
+        self.assertEqual(retention.recover_pending(journal, self.root, self.fd, job)['restored'], len(captures))
+        self.assertEqual({path: path.read_bytes() for path in captures}, captures)
+        self.assertEqual({path: path.read_bytes() for path in native_before}, native_before)
+        self.assertEqual(repair.apply(journal, intent)['added'], 1)
+        H.validate(self.r, self.r.read(), self.r.read()['entries'][0])
+        self.assertEqual(self.r.read()['entries'][0]['historyMergeReceipt'], T.reference(receipt))
+
     def test_crash_after_ui_commit_resumes_exact_plan_without_double_append(self):
         repair,intent,target,path=self.setup_apply()
         def fault(phase):

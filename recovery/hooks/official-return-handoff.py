@@ -89,7 +89,10 @@ class Capture:
             if pathlib.Path(str(path)+'-wal').exists()!=('-wal'in before):
                 raise RuntimeError('Return native WAL appeared during snapshot')
             with contextlib.closing(sqlite3.connect(isolated.as_uri()+'?mode=ro',uri=True,timeout=2)) as source_db:
-                with contextlib.closing(sqlite3.connect(':memory:')) as snapshot:
+                # A memory connection cannot switch a WAL-format header to
+                # DELETE. Normalize the NEW detached disk snapshot before its
+                # first evidence hash; accepted historical bytes stay exact.
+                with contextlib.closing(sqlite3.connect(pathlib.Path(temporary)/'normalized.sqlite')) as snapshot:
                     started=time.monotonic()
                     def progress(*_):
                         self.require()
@@ -738,8 +741,11 @@ class FreshReturn(Capture):
             next_journal.update(officialReturnRequestId=request,officialReturnPreviousJournal=self.tail.reference(attempt/'previous-journal.json'))
             for entry in prepared:
                 self.validator.validate(self.r,next_journal,entry,entry['historyMergeReceipt'],_check_live=False)
+                self.recovery.module.helper('evidence-retention').retain(next_journal['backup'],entry['historyMergeReceipt'])
             self.tail.write(attempt/'prepared-intent.json',{'journal':next_journal,'prepared':prepared,'indexed':indexed},True)
-            self.state['preparedIntent']=self.tail.reference(attempt/'prepared-intent.json')
+            prepared_reference=self.tail.reference(attempt/'prepared-intent.json')
+            self.recovery.module.helper('evidence-retention').retain_prepared(next_journal['backup'],prepared_reference)
+            self.state['preparedIntent']=prepared_reference
             self.status('preparing',preparedAgents=len(prepared))
             for entry in prepared:
                 # Validate evidence against the exact proposed generation before
@@ -770,6 +776,7 @@ class FreshReturn(Capture):
         self.fresh(journal,prepared,intent['indexed'],folder)
         for entry in prepared:
             self.validator.validate(self.r,proposed,entry,entry['historyMergeReceipt'],_check_live=False)
+            self.recovery.module.helper('evidence-retention').retain(proposed['backup'],entry['historyMergeReceipt'])
             self.install(entry)
             self.validator.validate(self.r,proposed,entry,entry['historyMergeReceipt'])
             self.recovery.module.helper('return-routine-authority').authority_for(self.r,proposed,entry,self.validator)

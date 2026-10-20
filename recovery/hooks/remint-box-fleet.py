@@ -337,13 +337,41 @@ class Reminter:
             raise RuntimeError('Copied transcript entries are missing')
         return profile, count
 
-    def accept_history_merge(self, aid, receipt):
+    def require_restoration_writer(self, lock_fd):
+        """A live same-ID repair never races the dispatcher or a native turn."""
+        self.require_local_mode()
+        helper('evidence-retention').require_lock(self.m.SD,lock_fd)
+        if self.m.gateway('getHostStatus',{}).get('isBusy') is not False:
+            raise RuntimeError('Live restoration requires an idle native host')
+
+    def restoration_binding(self, entry):
+        directory=self.m.SD/'agents'/entry['newId']
+        profile=owned_json(directory/'profile.json')
+        rows=[row for row in self.rows() if row.get('agentId')==entry['newId']]
+        if len(rows)!=1:raise RuntimeError('Restoration BOX binding is ambiguous')
+        sid=self.publisher.require_box_row(rows[0],entry['newId'])
+        if (profile.get('harness')!='box' or sid!=entry.get('serverId') or
+                sid!=profile.get('serverId') or rows[0].get('kind')!=registration_kind(entry)):
+            raise RuntimeError('Restoration BOX binding changed')
+        if any(owned_json(path).get('enabled') is not False
+                for path in (directory/'automations').rglob('automation.json')):
+            raise RuntimeError('Live restoration requires all target routines paused')
+        return rows[0]
+
+    def accept_history_merge(self, aid, receipt, restoration_lock_fd=None):
         """Pin reviewed immutable evidence without erasing original copy conflicts."""
         self.require_local_mode()
         with self.m.migration_lock():
             journal=self.read();entry=self.entry(journal,aid)
             validator=helper('history-merge-receipt')
-            if entry['phase']=='registered-box':
+            candidate=json.loads(validator.checked(journal['backup'],receipt))
+            if candidate.get('schema')==validator.RESTORATION_SCHEMA:
+                self.require_restoration_writer(restoration_lock_fd)
+                if entry['phase'] not in ('registered-box','active'):
+                    raise RuntimeError('Live restoration requires a registered existing BOX copy')
+                self.restoration_binding(entry)
+                helper('same-id-history-restoration').validate_live_graph(self,journal,entry,candidate)
+            elif entry['phase']=='registered-box':
                 # A hidden registered copy can receive a reviewed late source
                 # tail before activation, with every previous receipt retained.
                 candidate=json.loads(validator.checked(journal['backup'],receipt))
@@ -366,8 +394,49 @@ class Reminter:
             elif entry['phase']!='copied':
                 raise RuntimeError('Only a staged copy may accept reviewed history evidence')
             proof=validator.accept(self,journal,entry,receipt)
+            if candidate.get('schema')==validator.RESTORATION_SCHEMA:
+                self.require_restoration_writer(restoration_lock_fd)
+                self.restoration_binding(entry)
             self.save(journal)
             return proof
+
+    def adopt_restored_existing(self, template, receipt, restoration_lock_fd=None):
+        """Record a proven, already registered copy; never copy or create an agent.
+
+        The target must already contain its actual validated union and SDK graph.
+        The only write is the journal pin after retention succeeds. No visibility,
+        sections, settings, routines, server registration or publication ACK moves.
+        """
+        self.require_local_mode();self.require_restoration_writer(restoration_lock_fd)
+        validator=helper('history-merge-receipt')
+        with self.m.migration_lock():
+            journal=self.read()
+            allowed={'oldId','newId','selectionSourceId','name','kind','sourceServerId','selectionSourceServerId','serverId','hiddenTemporalSdkAvailable','requiresHistoryMerge'}
+            if not isinstance(template,dict) or set(template)!=allowed:
+                raise RuntimeError('Unknown existing restoration entry template')
+            entry=json.loads(json.dumps(template))
+            for key in ('oldId','newId','selectionSourceId'):canonical(entry[key])
+            if entry['oldId']==entry['newId'] or entry['requiresHistoryMerge'] is not True:
+                raise RuntimeError('Restoration template must identify an existing copied lineage')
+            if any(entry[key] in (value['oldId'],value['newId']) for value in journal['entries'] for key in ('oldId','newId')):
+                raise RuntimeError('Restoration entry already overlaps the current journal')
+            candidate=json.loads(validator.checked(journal['backup'],receipt))
+            if candidate.get('schema')!=validator.RESTORATION_SCHEMA or candidate.get('previousReceipt') is not None:
+                raise RuntimeError('An unpinned existing copy requires a fresh restoration receipt')
+            self.restoration_binding(entry)
+            # This prospective entry is not persisted unless all actual source,
+            # union, authored-state and native graph validations below succeed.
+            entry['phase']='registered-box'
+            prospective={**journal,'entries':[*journal['entries'],entry]}
+            helper('same-id-history-restoration').validate_live_graph(self,prospective,entry,candidate)
+            proof=validator.accept(self,prospective,entry,receipt)
+            entry['copyProof']={'transcriptEntries':proof['baselineEntries'],
+                                'restorationReceipt':entry['historyMergeReceipt']}
+            self.require_restoration_writer(restoration_lock_fd)
+            self.restoration_binding(entry)
+            self.save(prospective)
+            return {'agentId':entry['newId'],'registeredExisting':True,**proof,
+                    'publicationVerified':False,'nativeAppDeliveryVerified':False}
 
     def restage_room(self, aid, adopt_id=None):
         """Retain a refused hidden room copy; never replace an active destination."""
@@ -1181,17 +1250,21 @@ class Reminter:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=('plan','init','stage','accept-history-merge','restage-room','register','publish','verify','activate','restore-routines','refresh-roster'))
+    parser.add_argument('command',choices=('plan','init','stage','accept-history-merge','adopt-restored-existing','restage-room','register','publish','verify','activate','restore-routines','refresh-roster'))
     parser.add_argument('--agent-id')
     parser.add_argument('--return-from-terminal',action='store_true')
     parser.add_argument('--receipt')
+    parser.add_argument('--template',help='For adopt-restored-existing only: immutable existing-entry JSON under journal backup.')
+    parser.add_argument('--dispatch-lock-fd',type=int,help='Inherited exclusive custom-dispatch descriptor, required for live restoration.')
     parser.add_argument('--next-generation',action='store_true',help='For init only: preserve a completed journal and stage another observed Temporal-to-BOX recovery.')
     parser.add_argument('--native-box-room',action='store_true',help='Register an existing native BOX group as BOX AGENT; preserves local membership, does not repair platform ROOM kind.')
     parser.add_argument('--adopt-copy',help='For restage-room only: reuse a verified hidden BOX copy with this UUID.')
     parser.add_argument('--existing-copy',action='append',default=[],metavar='OLD=NEW',help='For refresh-roster only: verify a separately recovered complete BOX copy before remapping its existing peer entry.')
     args=parser.parse_args();r=Reminter()
     if args.return_from_terminal and (args.command!='init' or not args.next_generation):parser.error('--return-from-terminal requires init --next-generation')
-    if args.receipt and args.command!='accept-history-merge':parser.error('--receipt is for accept-history-merge only')
+    if args.receipt and args.command not in ('accept-history-merge','adopt-restored-existing'):parser.error('--receipt requires a history acceptance command')
+    if args.template and args.command!='adopt-restored-existing':parser.error('--template is for adopt-restored-existing only')
+    if args.dispatch_lock_fd is not None and args.command not in ('accept-history-merge','adopt-restored-existing'):parser.error('--dispatch-lock-fd requires a history acceptance command')
     if args.next_generation and args.command!='init':parser.error('--next-generation is for init only')
     if args.native_box_room and args.command!='register':parser.error('--native-box-room is for register only')
     if args.adopt_copy and args.command!='restage-room':parser.error('--adopt-copy is for restage-room only')
@@ -1209,7 +1282,12 @@ def main():
     elif args.command=='register':result=r.register(args.agent_id,args.native_box_room)
     elif args.command=='accept-history-merge':
         if not args.receipt:parser.error('--receipt is required')
-        result=r.accept_history_merge(args.agent_id,args.receipt)
+        result=r.accept_history_merge(args.agent_id,args.receipt,args.dispatch_lock_fd)
+    elif args.command=='adopt-restored-existing':
+        if not args.receipt or not args.template or args.dispatch_lock_fd is None:
+            parser.error('--receipt, --template and --dispatch-lock-fd are required')
+        journal=r.read();template=json.loads(helper('history-merge-receipt').checked(journal['backup'],args.template))
+        result=r.adopt_restored_existing(template,args.receipt,args.dispatch_lock_fd)
     elif args.command=='stage':result=r.stage(args.agent_id)
     elif args.command=='restage-room':result=r.restage_room(args.agent_id,args.adopt_copy)
     elif args.command=='init':result=r.initialize(args.next_generation,args.return_from_terminal)

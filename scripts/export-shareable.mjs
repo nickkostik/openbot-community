@@ -15,7 +15,7 @@ const rootFiles = new Set([
 ]);
 const roots = ['src/', 'web/', 'ui/', 'payload/', 'skills/', '.github/', 'scripts/', 'docs/', 'agent-box/', 'recovery/hooks/'];
 const publicDocs = new Set(['agent-install.md', 'models-and-tools.md', 'portable-installation.md',
-  'portable-recovery.md', 'public-release.md', 'troubleshooting.md', 'updating.md',
+  'portable-recovery.md', 'public-release.md', 'troubleshooting.md', 'updating.md', 'same-id-live-restoration.md',
   'shareable-readme.md', 'shareable-readme.zh-CN.md']);
 const publicDocuments = new Map([
   ['README.md', 'docs/shareable-readme.md'],

@@ -18,6 +18,7 @@ import stat
 SCHEMA='openbot-history-merge-receipt/v1'
 DELTA_SCHEMA='openbot-history-merge-receipt/incremental-v1'
 IDENTIFIER_SCHEMA='openbot-history-merge-receipt/identifier-projection-v1'
+RESTORATION_SCHEMA='openbot-history-merge-receipt/live-restoration-v1'
 IDENTIFIER_PROOF='openbot-unpublished-identifier-projection/v1'
 IDENTIFIER_WORKER_SHA='e7d54d24d6ce6e82fb0c1b76d7572dbbb51b9437f958f04e6057b59e673a80fb'
 MAX_RECEIPT_DEPTH=16
@@ -139,17 +140,23 @@ def validate(r,journal,entry,reference=None,_depth=0,_check_live=True):
     receipt=json.loads(referenced(root,reference))
     incremental=receipt.get('schema')==DELTA_SCHEMA
     identifier_revision=receipt.get('schema')==IDENTIFIER_SCHEMA
-    chained=incremental or identifier_revision
+    restoration=receipt.get('schema')==RESTORATION_SCHEMA
+    chained=incremental or identifier_revision or (restoration and receipt.get('previousReceipt') is not None)
     fields='schema oldId newId selectionSourceId backup baseline sources projections sourceOrders orderResolutions sdkProof'
-    exact(receipt,fields+(' previousReceipt' if chained else '')+(' identifierProof' if identifier_revision else ''))
+    exact(receipt,fields+(' previousReceipt' if chained or restoration else '')+(' identifierProof' if identifier_revision else '')+(' restorationProof' if restoration else ''))
+    prior=None
     if chained:
         previous=receipt['previousReceipt']
         if previous==reference:raise RuntimeError('History merge receipt cycle')
         validate(r,journal,entry,previous,_depth+1,False)
         prior=json.loads(referenced(root,previous))
         if incremental:validate_extension(root,receipt,prior)
-        else:validate_identifier_projection(r,root,receipt,prior)
-    if (receipt['schema'] not in (SCHEMA,DELTA_SCHEMA,IDENTIFIER_SCHEMA) or receipt['backup']!=str(root) or
+        elif identifier_revision:validate_identifier_projection(r,root,receipt,prior)
+    if restoration:
+        spec=importlib.util.spec_from_file_location('same_id_history_restoration',pathlib.Path(__file__).with_name('same-id-history-restoration.py'))
+        transition=importlib.util.module_from_spec(spec);spec.loader.exec_module(transition)
+        transition.validate(r,root,receipt,prior)
+    if (receipt['schema'] not in (SCHEMA,DELTA_SCHEMA,IDENTIFIER_SCHEMA,RESTORATION_SCHEMA) or receipt['backup']!=str(root) or
             receipt['oldId']!=entry['oldId'] or receipt['newId']!=entry['newId'] or
             receipt['selectionSourceId']!=entry.get('selectionSourceId',entry['oldId'])):
         raise RuntimeError('Merge receipt belongs to a different lineage or journal')
@@ -449,10 +456,12 @@ def accept(r,journal,entry,path):
     pinned=entry.get('historyMergeReceipt')
     if pinned not in (None,reference):
         candidate=json.loads(raw)
-        if candidate.get('schema')not in(DELTA_SCHEMA,IDENTIFIER_SCHEMA)or candidate.get('previousReceipt')!=pinned:
+        if candidate.get('schema')not in(DELTA_SCHEMA,IDENTIFIER_SCHEMA,RESTORATION_SCHEMA)or candidate.get('previousReceipt')!=pinned:
             raise RuntimeError('A different immutable merge receipt is already pinned')
     elif pinned is None and json.loads(raw).get('schema')in(DELTA_SCHEMA,IDENTIFIER_SCHEMA):
         raise RuntimeError('Incremental merge requires a previously pinned immutable receipt')
+    elif pinned is None and json.loads(raw).get('schema')==RESTORATION_SCHEMA and json.loads(raw).get('previousReceipt') is not None:
+        raise RuntimeError('Restoration cannot invent an unpinned accepted parent')
     result=validate(r,journal,entry,reference)
     # Native snapshots omit nested native SQLite basenames. Pin a retained exact
     # closure before the journal can accept this receipt; do not rewrite refs.

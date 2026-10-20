@@ -153,7 +153,7 @@ export function allocatorSlice(raw) {
   return reviewedSource(Buffer.from(source.slice(start, end)), 'allocator');
 }
 
-function loadNative(hostPath, workerPath, allocatorPath) {
+export function loadNative(hostPath, workerPath, allocatorPath) {
   regularPath(hostPath); regularPath(workerPath); regularPath(allocatorPath);
   const raw = fs.readFileSync(hostPath), workerRaw = fs.readFileSync(workerPath), allocatorRaw = fs.readFileSync(allocatorPath);
   let source = reviewedSource(raw, 'host'), workerSource = reviewedSource(workerRaw, 'worker');
@@ -162,7 +162,7 @@ function loadNative(hostPath, workerPath, allocatorPath) {
   const start = source.indexOf(boot), end = source.indexOf(license, start);
   check(start > 0 && end > start && source.indexOf(boot, start + 1) < 0, 'HOST_BOOT_BOUNDARY');
   const exports = `module.exports={Root:ConversationStateStructure,Turn:ConversationTurnStructure,User:UserMessage,
-    History:ConversationHistory,Token:ConversationTokenDetails,parseCore:parseCoreMessageJson,
+    History:ConversationHistory,Token:ConversationTokenDetails,metadata:agentMetadataSerde,parseCore:parseCoreMessageJson,
     convert:conversationHistoryToCoreMessages,estimate:estimateTokenCount,derive:deriveConversationStateFromStructure,
     Handle:ConversationStateHandle,redact:toRedactedConversationStateStructure,context:createContext,
     unredact:messages=>fromRedactedCoreMessages(messages,PrivacyCapability.UNSAFE_ALWAYS_ALLOWED),

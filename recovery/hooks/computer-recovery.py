@@ -162,6 +162,15 @@ def local_engine():
     return module
 
 
+def ensure_native_dependencies(mode):
+    if mode != 'custom':
+        return {'state': 'native-dependencies'}
+    spec = importlib.util.spec_from_file_location('native_engine_dependencies', HERE / 'native-engine-dependencies.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.repair(SD, local_engine(), apply=True)
+
+
 def patched(source):
     for name in PATCHES:
         source = load_patch(name)(source)
@@ -655,6 +664,10 @@ def tick():
         state = {}
     # Tunnel recovery is independent of a platform patch anchor changing.
     state['tunnel'] = ensure_named_tunnel()
+    try:
+        state['nativeDependencies'] = ensure_native_dependencies(mode)
+    except Exception as error:
+        state['nativeDependencies'] = {'state': 'compatibility-required', 'errorType': type(error).__name__}
     try:
         state['openbotService'] = ensure_openbot_service()
     except Exception as error:

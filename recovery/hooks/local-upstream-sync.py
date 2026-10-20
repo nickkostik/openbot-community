@@ -757,7 +757,7 @@ def save_local_release(root, candidates, original_policy, metadata, report):
 def assessment_key(original_policy, upstream_sha):
     digest = hashlib.sha256(original_policy + upstream_sha.encode())
     paths = [HERE / name for name in ('local-upstream-sync.py', 'upstream-instructions.mjs',
-                                     'computer-recovery.py', 'native-routine-trigger-preservation.py',
+                                     'computer-recovery.py', 'native-engine-dependencies.py', 'native-routine-trigger-preservation.py',
                                      'roster-read-concurrency-inject.py',
                                      'credential-restore-preflight-inject.py',
                                      'content-search-cache-inject.py',

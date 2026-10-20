@@ -19,9 +19,17 @@ import tarfile
 import tempfile
 import uuid
 
-SCHEMA = 'openbot-evidence-retention/v1'
-REFERENCE_POLICY = 'absolute-reference-closure/v1'
-PREPARED_POLICY = 'prepared-return-closure/v1'
+LEGACY_SCHEMA = 'openbot-evidence-retention/v1'
+SCHEMA = 'openbot-evidence-retention/v2'
+LEGACY_REFERENCE_POLICY = 'absolute-reference-closure/v1'
+LEGACY_PREPARED_POLICY = 'prepared-return-closure/v1'
+REFERENCE_POLICY = 'typed-sdk-reference-closure/v2'
+PREPARED_POLICY = 'prepared-return-closure/v2'
+SDK_NAMESPACE = '@sdk-inputs/'
+LINEAGE_REPORT = 'openbot-lineage-sdk-native-report/v1'
+RESTORATION_REPORT = 'openbot-same-id-sdk-restoration/v1'
+LINEAGE_REPORT_FIELDS = 'activeReachableRefs activeRootSha256 activeRootUnchanged allHistoricalSourceGraphsArchived blobCount engineSha256 historicalGraphsActivated liveApplied pendingWorkCreated schema sourceRoots sources targetAgentId walkerSha256'
+LINEAGE_SOURCE_FIELDS = 'agentId allSourceBlobBytesArchived blobSnapshotRelativePath blobSnapshotSha256 fixedRootRevisions inputSnapshots nativeReachableRefs rootSha256 rootSlot sourceBlobCount sourceStoreRelativePath sourceStoreSha256 unresolvedProtoRefs'
 DIRECTORY = 'openbot-evidence-retention'
 MAX_FILES = 8192
 MAX_FILE = 128 * 1024 * 1024
@@ -56,7 +64,7 @@ def digest(raw):
 def file_digest(root, path, limit):
     """Hash archives without retaining a second compressed copy in memory."""
     relative(root, path); directory(path.parent)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > limit:
@@ -96,7 +104,7 @@ def directory(path):
     return path
 
 
-def relative(root, path):
+def relative(root, path, legacy=False):
     path = pathlib.Path(path)
     if not path.is_absolute() or '..' in path.parts:
         raise RuntimeError('Retention path must be absolute and contained')
@@ -104,7 +112,56 @@ def relative(root, path):
     except ValueError: raise RuntimeError('Retention path escapes backup')
     if not name or name == '.' or name.split('/')[0] == DIRECTORY:
         raise RuntimeError('Retention cannot archive its own metadata')
+    if not legacy and name.startswith(SDK_NAMESPACE):
+        raise RuntimeError('Retention source conflicts with reserved SDK namespace')
     return name
+
+
+def legacy_policy(policy):
+    return policy in (LEGACY_REFERENCE_POLICY, LEGACY_PREPARED_POLICY)
+
+
+def valid_policy(policy):
+    return policy in (REFERENCE_POLICY, PREPARED_POLICY, LEGACY_REFERENCE_POLICY, LEGACY_PREPARED_POLICY)
+
+
+def sdk_relative(path, owner=None):
+    """Only original per-owner SQLite inputs in immutable fleet captures."""
+    if not isinstance(path, str): raise RuntimeError('Unsafe typed SDK input path')
+    value = pathlib.PurePosixPath(path)
+    if (value.is_absolute() or '..' in value.parts or
+            value.as_posix() != path or len(value.parts) != 4):
+        raise RuntimeError('Unsafe typed SDK input path')
+    fleet, branch, agent, filename = value.parts
+    if (not re.fullmatch(r'fleet-state-\d{8}-\d{6}-[0-9a-f]{8}', fleet) or branch != 'branches' or
+            str(uuid.UUID(agent)) != agent or (owner is not None and agent != owner) or
+            filename not in ('store.db', 'conversation-blobs.db')):
+        raise RuntimeError('Typed SDK input owner or snapshot root differs')
+    return value
+
+
+def storage_target(root, name, legacy=False):
+    """Map archive names, never grant authority; closure validation does that."""
+    if not legacy and name.startswith(SDK_NAMESPACE):
+        suffix = name[len(SDK_NAMESPACE):]; sdk_relative(suffix)
+        return root.parent, root.parent / suffix
+    canonical = relative(root, root / name, legacy)
+    if canonical != name: raise RuntimeError('Noncanonical retention member path')
+    return root, root / name
+
+
+def storage_name(root, path, mode, legacy=False):
+    p = pathlib.Path(path)
+    try: p.relative_to(root)
+    except ValueError:
+        if legacy or not isinstance(mode, tuple) or mode[0] != 'sdk-input':
+            raise RuntimeError('Retention path escapes backup')
+        if not p.is_absolute() or '..' in p.parts: raise RuntimeError('Unsafe typed SDK input path')
+        try: suffix = p.relative_to(root.parent).as_posix()
+        except ValueError: raise RuntimeError('Typed SDK input escapes sibling snapshots')
+        sdk_relative(suffix, mode[1])
+        return SDK_NAMESPACE + suffix
+    return relative(root, p, legacy)
 
 
 def references(value):
@@ -127,7 +184,7 @@ def child_refs(raw):
     return list(references(value))
 
 
-def prepared_dependencies(raw):
+def prepared_dependencies(raw, reference_policy=REFERENCE_POLICY):
     value = json.loads(raw); validator().exact(value, 'journal prepared indexed')
     journal, prepared = value['journal'], value['prepared']
     if (not isinstance(journal, dict) or not isinstance(value['indexed'], dict) or
@@ -160,14 +217,108 @@ def prepared_dependencies(raw):
     # Preserve the previous journal's EXACT JSON as metadata without treating
     # independent sibling generation archives as this receipt's write scope.
     previous = journal['officialReturnPreviousJournal']; validator().exact(previous, 'path sha256')
-    return [(ref, REFERENCE_POLICY, None) for ref in references(prepared)] + dependencies + [(previous, 'opaque', None)]
+    return [(ref, reference_policy, None) for ref in references(prepared)] + dependencies + [(previous, 'opaque', None)]
+
+
+def typed_dependencies(raw):
+    if raw.lstrip()[:1] not in (b'{', b'['): return []
+    value = json.loads(raw)
+    schemas = (validator().SCHEMA, validator().DELTA_SCHEMA, validator().IDENTIFIER_SCHEMA,
+               getattr(validator(), 'RESTORATION_SCHEMA', None))
+    if isinstance(value, dict) and value.get('schema') in schemas and value.get('schema') is not None:
+        # The report pins the pre-remint source checkpoint. Its bytes are
+        # copied unchanged when a reviewed baseline acquires the new owner.
+        target = value['oldId']
+        if str(uuid.UUID(target)) != target: raise RuntimeError('Invalid typed SDK receipt target')
+        roots = {}
+        for source in value['sources']:
+            if source.get('kind') != 'sqlite': continue
+            owner, root_sha = source['agentId'], source['sdkRootSha256']
+            if owner in roots or str(uuid.UUID(owner)) != owner: raise RuntimeError('Invalid typed SDK source owner')
+            if root_sha is not None: validator().sha(root_sha)
+            roots[owner] = root_sha
+        ordinary = {key: item for key, item in value.items() if key != 'sdkProof'}
+        return ([(ref, REFERENCE_POLICY, None) for ref in references(ordinary)] +
+                [(value['sdkProof'], ('sdk-proof', target, tuple(sorted(roots.items()))), None)])
+    return [(ref, REFERENCE_POLICY, None) for ref in references(value)]
+
+
+def sdk_proof_dependencies(raw, mode):
+    value = json.loads(raw)
+    validator().exact(value, 'schema engineSha256 rootSlot rootSha256 blobs sourceRoots nativeReport')
+    if value['schema'] != 'openbot-sdk-merge-proof/v1' or value['sourceRoots'] != dict(mode[2]):
+        raise RuntimeError('Typed SDK proof differs from its anchored receipt')
+    validator().sha(value['engineSha256'])
+    return [(value['nativeReport'], ('sdk-report', value['engineSha256'], mode[2], mode[1]), None)]
+
+
+def sdk_input_dependencies(raw, mode):
+    value = json.loads(raw)
+    if not isinstance(value, dict) or value.get('schema') != LINEAGE_REPORT:
+        # Other reviewed native-report schemas still retain their exact bytes
+        # and ordinary contained references; they acquire no external access.
+        dependencies = typed_dependencies(raw)
+        if isinstance(value, dict) and value.get('schema') == RESTORATION_REPORT:
+            inputs = value.get('inputFiles')
+            if not isinstance(inputs, dict) or not 1 <= len(inputs) <= MAX_FILES:
+                raise RuntimeError('Unknown SDK restoration input inventory')
+            for path, sha in inputs.items():
+                if not isinstance(path, str) or not pathlib.Path(path).is_absolute():
+                    raise RuntimeError('Unsafe SDK restoration input path')
+                validator().sha(sha)
+                dependencies.append(({'path': path, 'sha256': sha}, REFERENCE_POLICY, None))
+        return dependencies
+    validator().exact(value, LINEAGE_REPORT_FIELDS)
+    if (value['engineSha256'] != mode[1] or value['sourceRoots'] != dict(mode[2]) or
+            value['walkerSha256'] != validator().IDENTIFIER_WORKER_SHA or
+            any(value[k] is not True for k in ('activeRootUnchanged', 'allHistoricalSourceGraphsArchived')) or
+            any(value[k] is not False for k in ('liveApplied', 'historicalGraphsActivated', 'pendingWorkCreated')) or
+            value['targetAgentId'] != mode[3] or
+            not isinstance(value['sources'], list) or not 0 <= len(value['sources']) <= 512 or
+            any(type(value[k]) is not int or not 0 <= value[k] <= MAX_FILES * MAX_FILE
+                for k in ('activeReachableRefs', 'blobCount'))):
+        raise RuntimeError('Typed SDK input provenance differs from pinned proof')
+    dependencies = []; owners = set()
+    for source in value['sources']:
+        validator().exact(source, LINEAGE_SOURCE_FIELDS)
+        owner = source['agentId']
+        if (owner in owners or owner not in value['sourceRoots'] or str(uuid.UUID(owner)) != owner or
+                source['rootSha256'] != value['sourceRoots'][owner] or source['allSourceBlobBytesArchived'] is not True or
+                source['sourceStoreRelativePath'] != 'sources/' + owner + '/store.db' or
+                source['blobSnapshotRelativePath'] != 'sources/' + owner + '/conversation-blobs.db' or
+                type(source['sourceBlobCount']) is not int or not 0 <= source['sourceBlobCount'] <= MAX_FILES * MAX_FILE or
+                type(source['nativeReachableRefs']) is not int or not 0 <= source['nativeReachableRefs'] <= MAX_FILES * MAX_FILE or
+                type(source['unresolvedProtoRefs']) is not int or source['unresolvedProtoRefs'] != 0):
+            raise RuntimeError('Typed SDK input source ownership differs')
+        owners.add(owner); snapshots = source['inputSnapshots']; filenames = set(); source_parent = None
+        if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 2:
+            raise RuntimeError('Typed SDK input snapshot list differs')
+        for reference in snapshots:
+            validator().exact(reference, 'path sha256'); validator().sha(reference['sha256'])
+            path = pathlib.Path(reference['path'])
+            if path.parent.name != owner or path.name in filenames or path.name not in ('store.db', 'conversation-blobs.db'):
+                raise RuntimeError('Typed SDK input snapshot owner differs')
+            if path.name == 'store.db' and reference['sha256'] != source['sourceStoreSha256']:
+                raise RuntimeError('Typed SDK source store hash differs')
+            if source_parent is not None and path.parent != source_parent:
+                raise RuntimeError('Typed SDK inputs come from different captures')
+            source_parent = path.parent
+            filenames.add(path.name); dependencies.append((reference, ('sdk-input', owner), None))
+        # A separate blob store is optional: original SDK blobs can live in
+        # store.db itself. Keep precisely the producer's pinned raw inputs.
+        if 'store.db' not in filenames:
+            raise RuntimeError('Typed SDK input graph source is incomplete')
+    if owners != set(value['sourceRoots']): raise RuntimeError('Typed SDK source coverage differs')
+    return dependencies
 
 
 def closure(root, reference, read, policy=REFERENCE_POLICY):
+    if not valid_policy(policy): raise RuntimeError('Unknown retention dependency policy')
+    legacy = legacy_policy(policy)
     pending = [(reference, policy, None)]; found = {}; expanded = set(); total = 0
     while pending:
         ref, mode, expected_size = pending.pop(); validator().exact(ref, 'path sha256'); validator().sha(ref['sha256'])
-        name = relative(root, ref['path'])
+        name = storage_name(root, ref['path'], mode, legacy)
         if name in found:
             if found[name]['sha256'] != ref['sha256']: raise RuntimeError('Retention reference hash conflicts')
             if expected_size is not None and found[name]['size'] != expected_size:
@@ -183,21 +334,39 @@ def closure(root, reference, read, policy=REFERENCE_POLICY):
         if total > MAX_TOTAL: raise RuntimeError('Retention closure byte bound exceeded')
         found[name] = {'path': name, 'sha256': ref['sha256'], 'size': len(raw)}
         expanded.add((name, mode))
-        if mode == PREPARED_POLICY: pending.extend(prepared_dependencies(raw))
-        elif mode == REFERENCE_POLICY: pending.extend((child, REFERENCE_POLICY, None) for child in child_refs(raw))
+        if mode in (PREPARED_POLICY, LEGACY_PREPARED_POLICY):
+            pending.extend(prepared_dependencies(raw, LEGACY_REFERENCE_POLICY if legacy else REFERENCE_POLICY))
+        elif mode == LEGACY_REFERENCE_POLICY:
+            pending.extend((child, LEGACY_REFERENCE_POLICY, None) for child in child_refs(raw))
+        elif mode == REFERENCE_POLICY: pending.extend(typed_dependencies(raw))
+        elif isinstance(mode, tuple) and mode[0] == 'sdk-proof': pending.extend(sdk_proof_dependencies(raw, mode))
+        elif isinstance(mode, tuple) and mode[0] == 'sdk-report': pending.extend(sdk_input_dependencies(raw, mode))
+        elif isinstance(mode, tuple) and mode[0] == 'sdk-input': pass  # Exact SQLite bytes; no interpretation or rewriting.
         elif mode != 'opaque': raise RuntimeError('Unknown retention dependency policy')
     return sorted(found.values(), key=lambda item: item['path'])
 
 
-def read_evidence(root, name):
-    path = root / name
-    raw = validator().checked(root, path)
+def read_evidence(root, name, legacy=False):
+    container, path = storage_target(root, name, legacy)
+    wal = pathlib.Path(str(path) + '-wal')
+    def wal_state():
+        try: info = wal.lstat()
+        except FileNotFoundError: return None
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    before = wal_state()
+    raw = validator().checked(container, path)
     if raw.startswith(b'SQLite format 3\x00'):
         # Captures must be normalized BEFORE their receipt hash is produced.
         # Never recreate an already pinned database using SQLite backup().
-        wal = pathlib.Path(str(path) + '-wal')
-        if wal.exists() or wal.is_symlink():
+        after = wal_state()
+        if before != after:
+            raise RuntimeError('Retention SQLite WAL changed during read')
+        if after is not None and (legacy or not name.startswith(SDK_NAMESPACE) or
+                not stat.S_ISREG(after[2]) or after[3] != os.getuid() or after[4] != 0):
             raise RuntimeError('Retention requires a normalized immutable SQLite capture')
+        # Original, already accepted SDK inputs may have stable empty sidecars.
+        # Zero WAL bytes carry no uncheckpointed rows; preserve the pinned main
+        # file exactly, without opening SQLite or rewriting/deleting sidecars.
     return raw
 
 
@@ -230,7 +399,7 @@ def create(path, raw, root=None):
                 stream.write(raw); stream.flush(); os.fsync(stream.fileno())
             try: os.link(name, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
             except FileExistsError:
-                existing = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+                existing = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                 with os.fdopen(existing, 'rb') as stream:
                     info = os.fstat(stream.fileno())
                     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
@@ -240,24 +409,25 @@ def create(path, raw, root=None):
         finally: os.unlink(name, dir_fd=parent)
 
 
-def locations(root, reference):
+def locations(root, reference, legacy=False):
     validator().exact(reference, 'path sha256'); validator().sha(reference['sha256'])
     relative(root, reference['path'])
     base = root / DIRECTORY
-    return base, base / (reference['sha256'] + '.json'), base / (reference['sha256'] + '.tar.gz')
+    prefix = '' if legacy else 'v2-'
+    return base, base / (prefix + reference['sha256'] + '.json'), base / (prefix + reference['sha256'] + '.tar.gz')
 
 
 def retain(root, reference, policy=REFERENCE_POLICY):
     """Called after canonical validation and before accepting its exact receipt."""
-    root = directory(root); base, metadata, archive = locations(root, reference)
+    root = directory(root); legacy = legacy_policy(policy); base, metadata, archive = locations(root, reference, legacy)
     if not base.exists():
         base.mkdir(mode=0o700)
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try: os.fsync(fd)
         finally: os.close(fd)
     directory(base)
-    if policy not in (REFERENCE_POLICY, PREPARED_POLICY): raise RuntimeError('Unknown retention dependency policy')
-    entries = closure(root, reference, lambda name: read_evidence(root, name), policy)
+    if not valid_policy(policy): raise RuntimeError('Unknown retention dependency policy')
+    entries = closure(root, reference, lambda name: read_evidence(root, name, legacy), policy)
     # Tar metadata is deterministic; gzip mtime is fixed for resumable creation.
     fd, temporary = tempfile.mkstemp(prefix='.archive-', dir=base)
     try:
@@ -266,7 +436,7 @@ def retain(root, reference, policy=REFERENCE_POLICY):
             with gzip.GzipFile(fileobj=stream, mode='wb', mtime=0, filename='') as zipped:
                 with tarfile.open(fileobj=zipped, mode='w|', format=tarfile.PAX_FORMAT) as tar:
                     for entry in entries:
-                        raw = read_evidence(root, entry['path'])
+                        raw = read_evidence(root, entry['path'], legacy)
                         if digest(raw) != entry['sha256']: raise RuntimeError('Retention source changed during capture')
                         info = tarfile.TarInfo(entry['path']); info.size = len(raw); info.mode = 0o600
                         tar.addfile(info, io.BytesIO(raw))
@@ -275,7 +445,7 @@ def retain(root, reference, policy=REFERENCE_POLICY):
         if pathlib.Path(temporary).stat().st_size > MAX_ARCHIVE:
             raise RuntimeError('Retention compressed byte bound exceeded')
         archive_sha = file_digest(base, pathlib.Path(temporary), MAX_ARCHIVE)
-        manifest = {'schema': SCHEMA, 'policy': policy, 'root': str(root), 'receipt': reference,
+        manifest = {'schema': LEGACY_SCHEMA if legacy else SCHEMA, 'policy': policy, 'root': str(root), 'receipt': reference,
                     'archiveSha256': archive_sha, 'files': entries}
         if len(encoded(manifest)) > MAX_MANIFEST: raise RuntimeError('Retention manifest bound exceeded')
         try: os.link(temporary, archive, follow_symlinks=False)
@@ -305,22 +475,28 @@ def require_lock(sd, fd):
 def restore(root, reference, sd, lock_fd, policy=REFERENCE_POLICY):
     """Restore only absent, exact evidence after checking the ENTIRE closure."""
     require_lock(sd, lock_fd); root = directory(root)
-    base, metadata, archive = locations(root, reference)
+    if not valid_policy(policy): raise RuntimeError('Unknown retention dependency policy')
+    legacy = legacy_policy(policy); base, metadata, archive = locations(root, reference, legacy)
+    if not legacy and not metadata.exists() and not metadata.is_symlink():
+        # Read old successful v1 archives under their original stricter scope;
+        # do not rewrite their metadata or grant them v2 external capabilities.
+        old = LEGACY_PREPARED_POLICY if policy == PREPARED_POLICY else LEGACY_REFERENCE_POLICY
+        return restore(root, reference, sd, lock_fd, old)
     if not metadata.exists() and not metadata.is_symlink():
         return {'restored': 0, 'retained': False}  # Legacy validation still fails closed if evidence is absent.
     directory(base)
     manifest = json.loads(validator().checked(base, metadata, MAX_MANIFEST))
     validator().exact(manifest, 'schema policy root receipt archiveSha256 files')
-    if (policy not in (REFERENCE_POLICY, PREPARED_POLICY) or manifest['policy'] != policy or
-            manifest['schema'] != SCHEMA or manifest['root'] != str(root) or manifest['receipt'] != reference):
+    if (manifest['policy'] != policy or manifest['schema'] != (LEGACY_SCHEMA if legacy else SCHEMA) or
+            manifest['root'] != str(root) or manifest['receipt'] != reference):
         raise RuntimeError('Retention manifest belongs to different evidence')
     if not isinstance(manifest['files'], list) or not 1 <= len(manifest['files']) <= MAX_FILES:
         raise RuntimeError('Retention manifest file bound exceeded')
     expected = {}
     for entry in manifest['files']:
         validator().exact(entry, 'path sha256 size'); validator().sha(entry['sha256'])
-        name = relative(root, root / entry['path'])
-        if name != entry['path'] or name in expected or type(entry['size']) is not int or not 0 <= entry['size'] <= MAX_FILE:
+        name = entry['path']; storage_target(root, name, legacy)
+        if name in expected or type(entry['size']) is not int or not 0 <= entry['size'] <= MAX_FILE:
             raise RuntimeError('Invalid retention member')
         expected[name] = entry
     if sum(item['size'] for item in expected.values()) > MAX_TOTAL:
@@ -328,8 +504,9 @@ def restore(root, reference, sd, lock_fd, policy=REFERENCE_POLICY):
     missing = False
     for name, item in expected.items():
         try:
-            with parent_fd(root, root / name) as parent:
-                fd = os.open(pathlib.Path(name).name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            container, path = storage_target(root, name, legacy)
+            with parent_fd(container, path) as parent:
+                fd = os.open(pathlib.Path(name).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                 try:
                     info = os.fstat(fd)
                     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -373,18 +550,18 @@ def restore(root, reference, sd, lock_fd, policy=REFERENCE_POLICY):
             raise RuntimeError('Retention archive does not match exact receipt closure')
         # Refuse every conflict before making even the first absent file.
         for name, item in expected.items():
-            path = root / name; cursor = root
-            for part in path.relative_to(root).parts[:-1]:
+            container, path = storage_target(root, name, legacy); cursor = container
+            for part in path.relative_to(container).parts[:-1]:
                 cursor /= part
                 if cursor.exists() or cursor.is_symlink(): directory(cursor)
             if path.exists() or path.is_symlink():
-                if digest(validator().checked(root, path)) != item['sha256']:
+                if digest(validator().checked(container, path)) != item['sha256']:
                     raise RuntimeError('Existing immutable evidence differs; recovery refused')
         restored = 0
         for name in sorted(expected):
-            require_lock(sd, lock_fd); path = root / name
+            require_lock(sd, lock_fd); container, path = storage_target(root, name, legacy)
             if path.exists(): continue
-            create(path, staged(name), root); restored += 1
+            create(path, staged(name), container); restored += 1
         return {'restored': restored, 'retained': True}
 
 

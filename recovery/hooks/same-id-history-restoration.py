@@ -43,7 +43,7 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 
-def _capture(h, root, ref, owner=None):
+def _capture(h, root, ref, owner=None, require_contiguous=False):
     value = json.loads(h.referenced(root, ref))
     _require(isinstance(value, dict) and value.get('readOnly') is True and
              isinstance(value.get('capturedAtMs'), (int, float)) and not isinstance(value['capturedAtMs'], bool) and
@@ -54,11 +54,17 @@ def _capture(h, root, ref, owner=None):
     generation = value.get('generation')
     _require(type(generation) is int and generation >= 0 or isinstance(generation, str) and
              re.fullmatch(r'0|[1-9][0-9]*', generation) is not None, 'Invalid restoration capture generation')
-    rows = []
+    rows = []; previous_seq = 0
     for index, item in enumerate(value['entries'], 1):
         seq = item.get('seq') if isinstance(item, dict) else None
-        _require(type(seq) is int and seq == index or isinstance(seq, str) and seq == str(index),
-                 'Restoration capture must contain the full sequence from one')
+        _require(type(seq) is int or isinstance(seq, str) and re.fullmatch(r'[1-9][0-9]*', seq) is not None,
+                 'Restoration capture has an invalid sequence')
+        sequence = int(seq)
+        _require(0 < sequence <= 2 ** 53 - 1 and sequence > previous_seq and (index != 1 or sequence == 1),
+                 'Restoration capture sequence must start at one and strictly increase')
+        if require_contiguous:
+            _require(sequence == index, 'Restoration capture must contain the full sequence from one')
+        previous_seq = sequence
         try:
             raw = base64.b64decode(item['body'], validate=True)
             row = json.loads(raw)
@@ -303,7 +309,7 @@ def validate(r, root, current, previous=None):
     candidate = h.db_entries(current['baseline']['store']['path'])
     h.referenced(root, proof['currentStoreSnapshot'])
     existing = h.db_entries(proof['currentStoreSnapshot']['path'])
-    published_capture, published = _capture(h, root, proof['fullPublishedCapture'], target)
+    published_capture, published = _capture(h, root, proof['fullPublishedCapture'], target, require_contiguous=True)
     _require(candidate[:len(published)] == published, 'Restoration must preserve the full published prefix')
     original = h.db_entries(previous['baseline']['store']['path']) if previous is not None else []
     known_ids = {row['id'] for row in [*original, *existing]}

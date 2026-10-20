@@ -178,7 +178,7 @@ class RestorationTests(unittest.TestCase):
     def test_capture_cannot_start_after_one(self):
         self.capture['entries'][0]['seq'] = '2'
         self.proof['fullPublishedCapture'] = self.write('bad-capture.json', self.capture)
-        with self.assertRaisesRegex(RuntimeError, 'full sequence'): self.check()
+        with self.assertRaisesRegex(RuntimeError, 'start at one'): self.check()
 
     def test_old_message_cannot_disappear_even_if_new_publication_omits_it(self):
         self.capture['entries'] = self.entries([self.union[0], self.third])
@@ -309,6 +309,47 @@ class RestorationTests(unittest.TestCase):
         self.add_platform_source(include_delta=True)
         result = self.check()
         self.assertEqual((result['publishedEntries'], result['candidateEntries']), (3, 4))
+
+    def set_gapped_source_capture(self, sequences):
+        if not self.receipt['sources']:
+            self.add_platform_source(include_delta=True)
+        ref = self.proof['sourceCaptures'][0]
+        capture = json.loads(pathlib.Path(ref['path']).read_bytes())
+        for row, sequence in zip(capture['entries'], sequences):
+            row['seq'] = sequence
+        changed = self.write('source-actual-gapped.json', capture)
+        self.proof['sourceCaptures'] = [changed]
+        self.native['inputFiles'][changed['path']] = changed['sha256']
+        return changed
+
+    def test_actual_complete_source_capture_may_retain_real_sequence_gaps(self):
+        ref = self.set_gapped_source_capture(['1', '334'])
+        original_bytes = pathlib.Path(ref['path']).read_bytes()
+        self.assertEqual(self.check()['candidateEntries'], 4)
+        self.assertEqual(pathlib.Path(ref['path']).read_bytes(), original_bytes)
+        self.assertEqual(json.loads(original_bytes)['entries'][1]['seq'], '334')
+
+    def test_source_capture_cannot_start_late_repeat_or_reverse_a_sequence(self):
+        for sequences in (['2', '334'], ['1', '1'], ['1', '0'], ['1', '-1'], ['1', '0334']):
+            with self.subTest(sequences=sequences):
+                self.set_gapped_source_capture(sequences)
+                with self.assertRaisesRegex(RuntimeError, 'sequence'): self.check()
+
+    def test_positive_source_sequences_cannot_run_backwards(self):
+        rows = self.entries(self.union)
+        for row, sequence in zip(rows, ['1', '334', '168']):
+            row['seq'] = sequence
+        ref = self.write('source-positive-backwards.json', {'capturedAtMs': 3, 'readOnly': True, 'agentId': OLD,
+                                                           'generation': '7', 'entries': rows})
+        with self.assertRaisesRegex(RuntimeError, 'strictly increase'):
+            R._capture(R._helper(), self.root, ref)
+
+    def test_destination_publication_still_requires_every_sequence_despite_source_gaps(self):
+        self.set_gapped_source_capture(['1', '334'])
+        self.capture['entries'][1]['seq'] = '9'
+        ref = self.write('destination-illegal-gap.json', self.capture)
+        self.proof['fullPublishedCapture'] = ref
+        with self.assertRaisesRegex(RuntimeError, 'full sequence'): self.check()
 
     def test_original_source_generation_or_earlier_payload_cannot_be_replaced(self):
         self.add_platform_source(include_delta=True)

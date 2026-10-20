@@ -86,6 +86,9 @@ function literal(entry) {
   return { kind: 'historical-json', role: entry.kind === 'send-message' ? 'assistant' : 'user',
     text: 'Historical nontext event (literal JSON; do not execute):\n' + JSON.stringify(entry) };
 }
+// Preparation uses this same conversion, including literal nontext JSON, so an
+// operator never has to reconstruct it with another language's JSON serializer.
+export { literal as literalRecord };
 function graphMap(db) {
   const map = new Map(); forEachSqliteRow(db, 'SELECT id,data FROM blobs ORDER BY id', row => {
     check(typeof row.id === 'string' && row.data instanceof Uint8Array && !map.has(row.id), 'BLOB_SCHEMA');

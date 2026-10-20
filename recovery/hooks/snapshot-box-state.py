@@ -14,6 +14,7 @@ for src in (sd/'agents').iterdir():
   target=dst/db.relative_to(src);target.parent.mkdir(parents=True,exist_ok=True)
   with sqlite3.connect('file:'+str(db)+'?mode=ro',uri=True) as origin, sqlite3.connect(target) as backup:
    origin.backup(backup)
+   backup.execute('PRAGMA journal_mode=DELETE');backup.commit()
    if backup.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise RuntimeError('Snapshot integrity failed: '+str(db))
   db_count+=1
 config_names={'openbot-plan.json','openbot-bot-models.json','openbot-bot-models.json.before-remove-bulk-pins','openbot-mode','settings.json','secrets.json','openbot-local-migration.json','openbot-box-remint.json','computer-recovery-state.json','openbot-local-only.enable','openbot-pause.json','openbot-pause-bots.json','openbot-logs.json','openbot-injection.json','provider-maps.cjs'}

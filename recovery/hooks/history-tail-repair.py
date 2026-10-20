@@ -413,6 +413,7 @@ class TailRepair:
                   'plannedStore': reference(folder / 'store.db'), 'plannedSDK': reference(folder / 'conversation-blobs.db'), 'selectedRoute': selected,
                   'addedMessages': len(records), 'textBytes': sum(len(record['text'].encode()) for record in records)}
         write(folder / 'intent.json', intent, True)
+        module('evidence-retention').retain(journal['backup'], reference(folder / 'intent.json'))
         return reference(folder / 'intent.json')
 
     def fresh_cloud(self, sources):

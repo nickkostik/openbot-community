@@ -842,6 +842,112 @@ class FreshReturnTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in before}, before)
         self.assertFalse((self.root / H.STATE).exists())
 
+    def test_prepared_return_recovers_excluded_source_sql_before_resumed_install(self):
+        before = self.protected(); previous = self.r.read()
+        with mock.patch.object(self.builder, 'install', side_effect=InterruptedError('before hidden install')):
+            with self.assertRaisesRegex(InterruptedError, 'before hidden install'): self.builder.run()
+        self.assertEqual(self.r.read(), previous)
+        state = json.loads((self.root / H.STATE).read_bytes())
+        self.assertIn('preparedIntent', state)
+        backup = pathlib.Path(previous['backup'])
+        removed = {str(p): p.read_bytes() for p in backup.rglob('*')
+                   if p.is_file() and p.name in ('store.db', 'conversation-blobs.db')}
+        self.assertTrue(removed)
+        for path in removed: pathlib.Path(path).unlink()
+        retention = self.rec.module.helper('evidence-retention')
+        _, metadata, _ = retention.locations(backup, state['preparedIntent'])
+        required = {str(backup / item['path']) for item in json.loads(metadata.read_bytes())['files']}
+        captured = {path: raw for path, raw in removed.items() if path in required}
+        result = retention.recover_pending(previous, self.root, self.fd, self.rec.progress['jobId'])
+        self.assertEqual(result['restored'], len(captured))
+        self.assertEqual({path: pathlib.Path(path).read_bytes() for path in captured}, captured)
+        journal = self.builder.run(); entry = journal['entries'][0]
+        self.builder.validator.validate(self.r, journal, entry)
+        self.assertEqual([v['content'] for v in self.builder.validator.db_entries(
+            self.root / 'agents' / entry['newId'] / 'store.db')],
+            ['original literal', 'Local advanced checkpoint', 'Official literal\nkeep exactly'])
+        self.assert_protected(before)
+
+    def test_sibling_generation_is_recovered_independently_and_prior_journal_json_stays_exact(self):
+        retention = self.rec.module.helper('evidence-retention'); validator = self.builder.validator
+        sibling = self.backup.parent / 'sibling-immutable'; sibling.mkdir(mode=0o700)
+        source = sibling / 'source'; baseline = sibling / 'baseline'; source.mkdir(); baseline.mkdir()
+        shutil.copyfile(self.source / 'store.db', source / 'store.db')
+        shutil.copyfile(self.target / 'store.db', baseline / 'store.db')
+        shutil.copyfile(self.target / 'conversation-blobs.db', baseline / 'conversation-blobs.db')
+        with contextlib.closing(sqlite3.connect(source / 'conversation-blobs.db')) as db:
+            db.execute('CREATE TABLE blobs(id TEXT PRIMARY KEY,data BLOB)'); db.commit()
+        with contextlib.closing(sqlite3.connect(baseline / 'conversation-blobs.db')) as db:
+            graph = {row[0]: H.sha(row[1]) for row in db.execute('SELECT id,data FROM blobs')}
+        ref = self.builder.tail.reference
+        self.write(sibling / 'native.json', {})
+        self.write(sibling / 'sdk.json', {'schema': 'openbot-sdk-merge-proof/v1', 'engineSha256': 'a' * 64,
+            'rootSlot': ROOT_SLOT, 'rootSha256': graph[ROOT_SLOT], 'blobs': graph,
+            'sourceRoots': {fleet.OLD: None}, 'nativeReport': ref(sibling / 'native.json')})
+        self.write(sibling / 'receipt.json', {'schema': validator.SCHEMA, 'oldId': fleet.OLD, 'newId': fleet.NEW,
+            'selectionSourceId': fleet.OLD, 'backup': str(sibling),
+            'baseline': {'store': ref(baseline / 'store.db'), 'blobs': ref(baseline / 'conversation-blobs.db')},
+            'sources': [{'agentId': fleet.OLD, 'kind': 'sqlite', **ref(source / 'store.db'), 'generation': None,
+                'sdkRootSha256': None, 'blobSnapshot': ref(source / 'conversation-blobs.db')}],
+            'projections': [{'sourceId': fleet.OLD, 'sourceKind': 'sqlite', 'sourceEntryId': 'first', 'targetEntryId': 'first'}],
+            'sourceOrders': [{'sourceId': fleet.OLD, 'sourceKind': 'sqlite', 'entryIds': ['first']}],
+            'orderResolutions': [], 'sdkProof': ref(sibling / 'sdk.json')})
+        generation = copy.deepcopy(self.r.read()); generation['backup'] = str(sibling)
+        generation['entries'][0]['historyMergeReceipt'] = ref(sibling / 'receipt.json')
+        validator.validate(self.r, generation, generation['entries'][0])
+        retention.retain(sibling, generation['entries'][0]['historyMergeReceipt'])
+        journal = self.r.read(); journal.setdefault('previousGenerations', []).append(generation); self.r.save(journal)
+        previous = self.r.read(); exact = H.encoded(previous)
+        with mock.patch.object(self.builder, 'install', side_effect=InterruptedError('before install')):
+            with self.assertRaises(InterruptedError): self.builder.run()
+        state = json.loads((self.root / H.STATE).read_bytes()); prepared = json.loads(pathlib.Path(state['preparedIntent']['path']).read_bytes())
+        prior = prepared['journal']['officialReturnPreviousJournal']
+        self.assertEqual(pathlib.Path(prior['path']).read_bytes(), exact)
+        for root in (self.backup, sibling):
+            for path in root.rglob('*'):
+                if path.is_file() and path.name in ('store.db', 'conversation-blobs.db'): path.unlink()
+        self.assertGreater(retention.recover_journal(previous, self.root, self.fd)['restored'], 0)
+        validator.validate(self.r, generation, generation['entries'][0])
+        self.assertGreater(retention.recover_pending(previous, self.root, self.fd, self.rec.progress['jobId'])['restored'], 0)
+        self.assertEqual(pathlib.Path(prior['path']).read_bytes(), exact)
+        proposed = self.builder.run(); validator.validate(self.r, proposed, proposed['entries'][0])
+
+    def test_prepared_retention_failure_does_not_pin_resumable_intent_or_install(self):
+        original = self.rec.module.helper; retention = original('evidence-retention'); before = self.protected(); journal = self.r.read()
+        failed = types.SimpleNamespace(retain=retention.retain,
+            retain_prepared=mock.Mock(side_effect=RuntimeError('retention unavailable')))
+        def helper(name): return failed if name == 'evidence-retention' else original(name)
+        with mock.patch.object(self.rec.module, 'helper', side_effect=helper), mock.patch.object(self.builder, 'install') as install:
+            with self.assertRaisesRegex(RuntimeError, 'retention unavailable'): self.builder.run()
+        install.assert_not_called(); self.assertEqual(self.r.read(), journal); self.assert_protected(before)
+        self.assertNotIn('preparedIntent', json.loads((self.root / H.STATE).read_bytes()))
+
+    def test_prepared_source_inventory_recovers_nested_session_sql_and_all_sdk_blobs(self):
+        nested = self.target / 'sessions' / 'retained-session'; nested.mkdir(parents=True)
+        with contextlib.closing(sqlite3.connect(nested / 'store.db')) as db:
+            db.execute('CREATE TABLE session_entries(value TEXT)')
+            db.execute('INSERT INTO session_entries VALUES(?)', ('original separate session context',)); db.commit()
+        session_blobs = {'session-root': b'{"child":"historical-context"}', 'historical-context': b'exact old tool context'}
+        with contextlib.closing(sqlite3.connect(nested / 'conversation-blobs.db')) as db:
+            db.execute('CREATE TABLE blobs(id TEXT PRIMARY KEY,data BLOB)')
+            db.executemany('INSERT INTO blobs VALUES(?,?)', session_blobs.items()); db.commit()
+        untouched = {path: path.read_bytes() for path in nested.iterdir()}
+        previous = self.r.read()
+        with mock.patch.object(self.builder, 'install', side_effect=InterruptedError('before install')):
+            with self.assertRaises(InterruptedError): self.builder.run()
+        for path in self.backup.rglob('*'):
+            if path.is_file() and path.name in ('store.db', 'conversation-blobs.db'): path.unlink()
+        retention = self.rec.module.helper('evidence-retention')
+        self.assertGreater(retention.recover_pending(previous, self.root, self.fd, self.rec.progress['jobId'])['restored'], 0)
+        proposed = self.builder.run(); entry = proposed['entries'][0]
+        restored = self.root / 'agents' / entry['newId'] / 'sessions' / 'retained-session'
+        with contextlib.closing(sqlite3.connect(restored / 'store.db')) as db:
+            self.assertEqual(db.execute('SELECT value FROM session_entries').fetchall(), [('original separate session context',)])
+        with contextlib.closing(sqlite3.connect(restored / 'conversation-blobs.db')) as db:
+            self.assertEqual(dict(db.execute('SELECT id,data FROM blobs')), session_blobs)
+        self.assertEqual({path: path.read_bytes() for path in untouched}, untouched)
+        self.builder.validator.validate(self.r, proposed, entry)
+
 
 if __name__ == '__main__':
     unittest.main()

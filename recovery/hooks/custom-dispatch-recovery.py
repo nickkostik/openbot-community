@@ -465,6 +465,12 @@ class Recovery:
             return result
         self.r.rows = rows
         journal = self.r.read() if (self.root / 'openbot-box-remint.json').exists() else None
+        if journal is not None:
+            # An explicit owned writer preflight may recreate missing immutable
+            # evidence only. All ordinary validators stay strictly read-only.
+            load('evidence-retention').recover_journal(journal, self.root, self.worker_lock_fd)
+            if self.worker_lock_fd is not None:
+                load('evidence-retention').recover_pending(journal, self.root, self.worker_lock_fd, self.progress['jobId'])
         if journal is not None and journal.get('officialReturnRequestId'):
             load('official-return-handoff').FreshReturn(self, self.worker_lock_fd).finish_models(journal)
         if journal is not None and not self.check_roster_scope(journal):

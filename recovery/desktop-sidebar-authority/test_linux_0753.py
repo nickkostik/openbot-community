@@ -71,7 +71,7 @@ class Linux0753Tests(unittest.TestCase):
         source = "const M7=({row})=>row,Yxn=(r,v)=>({...r,...v}),j7=()=>({}),kj=()=>0;"
         source += a.ROSTER_0753_FIXED.decode()
         source += "const cached=[{id:'coach',path:'/old',harness:'box',updatedAt:20,lastMessagePreview:'history'},{id:'gone'},{id:'pending'}];"
-        source += "const fresh=[{id:'coach',path:'/agents/coach',name:'Dating Coach',harness:'temporal',updatedAt:10,isHiddenFromSidebar:false}];"
+        source += "const fresh=[{id:'coach',path:'/agents/coach',name:'Example Assistant',harness:'temporal',updatedAt:10,isHiddenFromSidebar:false}];"
         source += "const rows=tSn(cached,fresh,new Map([['pending',{}]]));if(rows.length!==2||rows[0].path!=='/agents/coach'||rows[0].lastMessagePreview!=='history'||rows[0].updatedAt!==20)throw Error('roster data lost');if(tSn(cached,null)!==cached)throw Error('incomplete roster pruned');"
         subprocess.check_call(['node', '--input-type=module', '-e', source])
 

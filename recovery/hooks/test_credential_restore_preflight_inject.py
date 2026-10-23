@@ -20,6 +20,7 @@ PRODUCTION_PATCHED_SHA256 = '7f9a2a45ed5d4afae60a446e6d5ec4770274df5f156758a4939
 PRODUCTION_OWNER_PREFIX_SHA256 = 'b3a740e4e7e1ee9d5d5a8fd22ccdd7c8aade2e5ec7ccbb689f001efc539e3357'
 SYNTHETIC_STOCK_SHA256 = 'c402225467fa88c12ed9b4ce8cc3506d58e60b2f6b3bfa79d2ee1209156447cc'
 SYNTHETIC_PATCHED_SHA256 = 'c6cfe353e871ba3c6f9a59d4040e32d23ef280cddf2e75a80f418394f410b5e0'
+SYNTHETIC_CURRENT_PATCHED_SHA256 = '34dcb6684d8bdbd47a11f5d9387b61a9c343076ed2ca500144c435bc0effb890'
 SYNTHETIC_OWNER_PREFIX_SHA256 = hashlib.sha256(b'\n').hexdigest()
 
 
@@ -28,9 +29,9 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const {DatabaseSync} = require('node:sqlite');
 const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'credential-preflight-test-'));
-const dir = path.join(root, 'agent'); fs.mkdirSync(dir);
+const dir = path.join(root, request.scenario.nativeSafety ? 'test-agent' : 'agent'); fs.mkdirSync(dir);
 const dbPath = path.join(dir, 'store.db');
-const trace = {constructors:[], sql:[], parser:[], closes:0, iteration:0, all:0, heldAtClose:[]};
+const trace = {constructors:[], sql:[], parser:[], closes:0, iteration:0, all:0, heldAtClose:[], nativeSafety:[]};
 const heldSets = [];
 class HoldingSet extends Set { constructor(...args) { super(...args); heldSets.push(this); } }
 let writer, changed = false;
@@ -147,9 +148,24 @@ try {
     if (name === 'node:sqlite') return {DatabaseSync:ReadOnlyDatabase};
     throw Error('unexpected dependency: ' + name);
   };
+  const nativeId = id => {
+    trace.nativeSafety.push('validate-id');
+    if (request.scenario.nativeSafetyFailure === 'id') throw Error('native id refused');
+    return id;
+  };
+  const nativeRefuse = file => {
+    trace.nativeSafety.push('refuse-links');
+    if (request.scenario.nativeSafetyFailure === 'links') throw Error('native links refused');
+  };
+  let nativeChecks = 0;
+  const nativeCheck = (db, file) => {
+    trace.nativeSafety.push('check-database');
+    if (++nativeChecks === request.scenario.nativeSafetyFailure) throw Error('native database refused');
+  };
   const probe = new Function('require', 'parseTranscriptEntry', 'Set',
+    'assertValidSandAgentId', 'refuseSandDataDatabaseLinksSync', 'checkSandDataDatabaseSync',
     request.helper + '\nreturn openbotCredentialRestoreHasNoPendingEntries;')(
-      wrappedRequire, parseTranscriptEntry, HoldingSet);
+      wrappedRequire, parseTranscriptEntry, HoldingSet, nativeId, nativeRefuse, nativeCheck);
   const store = {getAgentDir: id => {
     if (id !== 'test-agent') throw Error('wrong getAgentDir identifier');
     if (request.scenario.getDirError) throw Error('getAgentDir failed');
@@ -312,9 +328,13 @@ def dependency_fixture():
 
 @unittest.skipUnless(shutil.which('node'), 'Node with node:sqlite is required')
 class CredentialRestorePreflightTests(unittest.TestCase):
+    helper = m.READONLY_PREFLIGHT
+    native_safety = False
+
     def probe(self, scenario):
         result = subprocess.run(['node', '--no-warnings', '-e', NODE_PREFLIGHT],
-            input=json.dumps({'helper': m.READONLY_PREFLIGHT, 'scenario': scenario}),
+            input=json.dumps({'helper': self.helper, 'scenario': {
+                'nativeSafety': self.native_safety, **scenario}}),
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = json.loads(result.stdout)
@@ -419,6 +439,33 @@ class CredentialRestorePreflightTests(unittest.TestCase):
                 if change == 'wal':
                     scenario['wal'] = True
                 self.assertFalse(self.probe(scenario)['result'])
+
+
+@unittest.skipUnless(shutil.which('node'), 'Node with node:sqlite is required')
+class CurrentCredentialRestorePreflightTests(CredentialRestorePreflightTests):
+    # Re-run the full absence/uncertainty/WAL suite against the guarded helper.
+    helper = m.CURRENT_READONLY_PREFLIGHT
+    native_safety = True
+
+    def test_native_safety_is_required_before_open_and_after_the_complete_scan(self):
+        output = self.probe({'rows': [row(1)], 'verifyRows': True})
+        self.assertTrue(output['result'])
+        self.assertEqual(output['trace']['nativeSafety'], [
+            'validate-id', 'refuse-links', 'check-database', 'check-database'])
+        self.assertEqual(output['storedBefore'], output['storedAfter'])
+
+    def test_native_safety_refusal_never_becomes_an_absence_proof(self):
+        for failure, opens in [('id', 0), ('links', 0), (1, 1), (2, 1)]:
+            with self.subTest(failure=failure):
+                output = self.probe({'rows': [row(1)], 'nativeSafetyFailure': failure})
+                self.assertFalse(output['result'])
+                self.assertEqual(len(output['trace']['constructors']), opens)
+                self.assertEqual(output['trace']['closes'], opens)
+
+    def test_valid_id_cannot_scan_a_different_agent_directory(self):
+        output = self.probe({'rows': [], 'nativeSafety': False})
+        self.assertFalse(output['result'])
+        self.assertEqual(output['trace']['constructors'], [])
 
 
 @unittest.skipUnless(shutil.which('node'), 'Node with node:sqlite is required')
@@ -603,8 +650,68 @@ class CredentialRestoreTransformTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 m.patch(self.source)
 
+    def current_layout(self, contracts):
+        return patch.multiple(m, CURRENT_SAFETY_ANCHOR='function syntheticRead(',
+                              CURRENT_SAFETY_FUNCTIONS=('syntheticRead',),
+                              CURRENT_DEPENDENCY_CONTRACTS=contracts,
+                              CURRENT_PATCHED_SHA256=SYNTHETIC_CURRENT_PATCHED_SHA256)
+
+    def test_current_layout_upgrades_exact_legacy_preflight_and_is_a_fixed_point(self):
+        dependencies, contracts = dependency_fixture()
+        old = m.patch(self.source)
+        with self.current_layout(contracts):
+            fresh = m.patch(dependencies + self.source)
+            upgraded = m.patch(dependencies + old)
+            self.assertEqual(fresh, upgraded)
+            self.assertEqual(m.patch(upgraded), upgraded)
+            self.assertNotIn(m.READONLY_PREFLIGHT, upgraded)
+            self.assertEqual(upgraded.count(m.CURRENT_READONLY_PREFLIGHT), 1)
+            self.assertEqual(upgraded.replace(m.CURRENT_READONLY_PREFLIGHT, m.READONLY_PREFLIGHT),
+                             dependencies + old)
+
+    def test_current_layout_cannot_skip_dependencies_or_accept_changed_prior_loop(self):
+        dependencies, contracts = dependency_fixture()
+        legacy = m.patch(self.source)
+        with self.current_layout(contracts):
+            current = m.patch(dependencies + self.source)
+            self.assertEqual(m.patch(self.source), legacy)
+            self.assertEqual(m.patch(legacy), legacy)
+            for source in ((dependencies + self.source).replace('var SyntheticStore', 'var UnreviewedStore'),
+                           current.removeprefix(dependencies),
+                           (dependencies + legacy).replace('verifiedEmpty = false;', 'verifiedEmpty = true;', 1),
+                           current.replace('        checkSandDataDatabaseSync(db, dbPath);', '', 1)):
+                with self.subTest(source=source[:80]), self.assertRaises(RuntimeError):
+                    m.patch(source)
+            for before in (dependencies + self.source, dependencies + legacy, current):
+                with self.assertRaisesRegex(RuntimeError, 'Unreviewed.*test-read'):
+                    m.patch(before.replace('read-v1', 'unreviewed-read'))
+                with self.assertRaisesRegex(RuntimeError, 'Ambiguous native credential safety'):
+                    m.patch(before + '\nfunction syntheticRead (ignored) {}\n')
+
+    def test_current_layout_checks_output_digest_for_both_fresh_and_upgrade_paths(self):
+        dependencies, contracts = dependency_fixture()
+        legacy = m.patch(self.source)
+        with self.current_layout(contracts), patch.object(m, 'CURRENT_PATCHED_SHA256', '0' * 64):
+            for source in (self.source, legacy):
+                with self.subTest(source=source[:80]), self.assertRaises(RuntimeError):
+                    m.patch(dependencies + source)
+
 
 class CredentialRestoreDependencyGuardTests(unittest.TestCase):
+    def test_current_native_safety_contract_set_is_separate_and_pinned(self):
+        legacy = dict((row[0], row[4]) for row in m.DEPENDENCY_CONTRACTS)
+        current = dict((row[0], row[4]) for row in m.CURRENT_DEPENDENCY_CONTRACTS)
+        self.assertEqual(set(current) - set(legacy), {
+            'native-no-follow-walk', 'native-data-file-safety',
+            'native-agent-id-validation', 'native-agent-id-parser'})
+        for name, hashes in current.items():
+            self.assertTrue(hashes)
+            for value in hashes:
+                self.assertEqual(len(value), 64)
+                int(value, 16)
+            if name in m.CURRENT_DEPENDENCY_HASHES:
+                self.assertTrue(set(hashes).isdisjoint(legacy[name]))
+
     def test_scoped_and_last_member_dependencies_extract_exact_synthetic_bytes(self):
         source, contracts = dependency_fixture()
         expected = ['function syntheticRead() { return "read-v1"; }\n',

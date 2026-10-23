@@ -1,6 +1,7 @@
 """Avoid cold SDK opens only after a conservative read-only credential scan."""
 import hashlib
 import pathlib
+import re
 import sys
 
 MARK = 'openbot-credential-restore-preflight'
@@ -11,6 +12,10 @@ END = '  cancelCredentialRequestExpiry('
 STOCK_SHA256 = '90b3d219f6f52b1627da6a50bbb9e063638c898dceac80b8660246fcafe282f6'
 OWNER_PREFIX_SHA256 = 'b3a740e4e7e1ee9d5d5a8fd22ccdd7c8aade2e5ec7ccbb689f001efc539e3357'
 PATCHED_SHA256 = '7f9a2a45ed5d4afae60a446e6d5ec4770274df5f156758a4939baf13ff64f4ae'
+CURRENT_PATCHED_SHA256 = 'af66729b7008ab5ba589245304a077ceb158aa34689b9c1aaf697462f591d460'
+CURRENT_SAFETY_ANCHOR = 'function refuseSandDataDatabaseLinksSync('
+CURRENT_SAFETY_FUNCTIONS = ('refuseSandDataDatabaseLinksSync', 'checkSandDataDatabaseSync',
+                            'assertValidSandAgentId', 'isAgentId', 'parseAgentId')
 
 # Read the same complete ordered metadata as the native restore path, one row
 # at a time. Unknown rows and concurrent database/WAL changes cannot prove absence.
@@ -83,6 +88,20 @@ READONLY_PREFLIGHT = '''    const openbotCredentialPreflightStatements = new Set
       return verifiedEmpty;
     };
 '''
+CURRENT_READONLY_PREFLIGHT = READONLY_PREFLIGHT.replace(
+    '        const agentDir = sessionStore.getAgentDir(agentId);',
+    '        const validAgentId = assertValidSandAgentId(agentId);\n'
+    '        const agentDir = sessionStore.getAgentDir(validAgentId);').replace(
+    '        const dbPath = path.join(directory, "store.db");',
+    '        if (path.basename(directory) !== validAgentId) return false;\n'
+    '        const dbPath = path.join(directory, "store.db");').replace(
+    '        db = new (require("node:sqlite").DatabaseSync)(dbPath, { readOnly: true });',
+    '        refuseSandDataDatabaseLinksSync(dbPath);\n'
+    '        db = new (require("node:sqlite").DatabaseSync)(dbPath, { readOnly: true });\n'
+    '        checkSandDataDatabaseSync(db, dbPath);').replace(
+    '        const after = [dbPath, dbPath + "-wal", dbPath + "-journal"].map(fingerprint);',
+    '        checkSandDataDatabaseSync(db, dbPath);\n'
+    '        const after = [dbPath, dbPath + "-wal", dbPath + "-journal"].map(fingerprint);')
 LOOP_ANCHOR = '    for (const agentId of agentIds) {'
 COLD_ANCHOR = '      let session;\n      try {\n        session = liveSession ?? await this.tm.sessionStore.openSession(agentId);'
 COLD_REPLACEMENT = '''      if (liveSession == null && openbotCredentialRestoreHasNoPendingEntries(this.tm.sessionStore, agentId)) {
@@ -144,6 +163,34 @@ DEPENDENCY_CONTRACTS = (('schema-and-prepared-statements',
   ('c66462bbcf66734ec3e65445c3670dc6f4bb555d40ee54e09155ee3b6a6c6921',
    'ccdb49e0fd7001fbd529d6a76094d1b1e83ba3a117d0fcd67d3c42d1c201d538')))
 
+# Review the complete dependency set as one layout. Never mix old database
+# initialization with new session behavior, or trust a safety-helper name alone.
+CURRENT_DEPENDENCY_HASHES = {
+    'database-open-initialization': '6814585876b0ed071eb71dd89f0029fe388d6c809255e01914687c6b7ee1a00b',
+    'database-constructor': 'b04226e9d4911fb87b3f1cd34caaa2a860438242805eff665fdc758c23353f0a',
+    'conversation-rebuild': 'a4a6a30a30488e81f12abc1bbb55a0d5b5bba68b5c239108bb841898a93c6955',
+    'session-maintenance': 'b7f6dfb20a78bcc05cc78856eb197740da0cca6038940cd6ee5b2448f3f7e9f3',
+    'session-open': '0b43b5960ddd2a16eed8c2f4234f9465935bce8eddcbb06ea357d76fb17aa98b',
+}
+CURRENT_DEPENDENCY_CONTRACTS = tuple(
+    (name, start, end, owner, (CURRENT_DEPENDENCY_HASHES[name],)
+     if name in CURRENT_DEPENDENCY_HASHES else reviewed)
+    for name, start, end, owner, reviewed in DEPENDENCY_CONTRACTS
+) + (
+    ('native-no-follow-walk', '// src/host/no-follow-walk.ts',
+     'var import_node_fs8 = require("node:fs");', None,
+     ('73d1c306ac2dd7632a3cd0859b71a961bd4c00a84466766a7eeb5ec4ac1b0387',)),
+    ('native-data-file-safety', 'var import_node_fs8 = require("node:fs");',
+     'var hostSecretsSchema = object({ machineId: string2().min(1) });', None,
+     ('9c8311911cda5006075e281f85cfe3d6b0124af932b95849f9c13f001fbba9b8',)),
+    ('native-agent-id-validation', 'function assertValidSandAgentId(raw) {',
+     'function resolveSandAgentDir(', None,
+     ('5d60450a61cbca80e3ed92c2736a780ac14fa0e6bb4b661f423a8b0cf06d87da',)),
+    ('native-agent-id-parser', 'function isAgentId(raw) {',
+     'function isVisualId(', None,
+     ('fea639c8f01cec1df7565361f34256ae921d92b44991ec884cde24d3650ace3f',)),
+)
+
 
 def dependency_component(source, start, end, owner=None):
     scope = source
@@ -165,14 +212,23 @@ def dependency_component(source, start, end, owner=None):
 
 
 def check_dependencies(source):
-    for name, start, end, owner, reviewed in DEPENDENCY_CONTRACTS:
+    current = CURRENT_SAFETY_ANCHOR in source
+    if current:
+        for name in CURRENT_SAFETY_FUNCTIONS:
+            if len(re.findall(r'\bfunction\s+' + re.escape(name) + r'\s*\(', source)) != 1:
+                raise RuntimeError('Ambiguous native credential safety function: ' + name)
+    contracts = CURRENT_DEPENDENCY_CONTRACTS if current else DEPENDENCY_CONTRACTS
+    for name, start, end, owner, reviewed in contracts:
         if digest(dependency_component(source, start, end, owner)) not in reviewed:
             raise RuntimeError('Unreviewed credential preflight dependency: ' + name)
+    return current
 
 
 def patch(source):
     """Select the active native/retained class and reject unfamiliar components."""
-    check_dependencies(source)
+    current = check_dependencies(source)
+    helper = CURRENT_READONLY_PREFLIGHT if current else READONLY_PREFLIGHT
+    expected = CURRENT_PATCHED_SHA256 if current else PATCHED_SHA256
     if source.count(NATIVE_CLASS) != 1 or source.count(RETAINED_CLASS) > 1:
         raise RuntimeError('Expected the reviewed credential-response class composition')
     active = RETAINED_CLASS if RETAINED_CLASS in source else NATIVE_CLASS
@@ -189,13 +245,22 @@ def patch(source):
     component = source[start:end]
     fingerprint = digest(component)
     if MARK in source:
-        if source.count(MARK) != 1 or fingerprint != PATCHED_SHA256:
+        if source.count(MARK) != 1:
             raise RuntimeError('Modified or incomplete credential restore preflight')
-        return source
+        if fingerprint == expected:
+            return source
+        # A current composition can retain the exact reviewed old patched loop.
+        # Upgrade only its helper after checking all new native safety contracts.
+        if not current or fingerprint != PATCHED_SHA256 or component.count(READONLY_PREFLIGHT) != 1:
+            raise RuntimeError('Modified or incomplete credential restore preflight')
+        updated = component.replace(READONLY_PREFLIGHT, helper, 1)
+        if digest(updated) != expected:
+            raise RuntimeError('Credential restore safety upgrade differs from review')
+        return source[:start] + updated + source[end:]
     if fingerprint != STOCK_SHA256 or component.count(LOOP_ANCHOR) != 1 or component.count(COLD_ANCHOR) != 1:
         raise RuntimeError('Credential restore component differs from the reviewed source')
-    updated = component.replace(LOOP_ANCHOR, READONLY_PREFLIGHT + LOOP_ANCHOR, 1).replace(COLD_ANCHOR, COLD_REPLACEMENT, 1)
-    if digest(updated) != PATCHED_SHA256:
+    updated = component.replace(LOOP_ANCHOR, helper + LOOP_ANCHOR, 1).replace(COLD_ANCHOR, COLD_REPLACEMENT, 1)
+    if digest(updated) != expected:
         raise RuntimeError('Credential restore preflight differs from the reviewed transformation')
     return source[:start] + updated + source[end:]
 

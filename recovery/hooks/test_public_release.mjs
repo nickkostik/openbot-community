@@ -34,6 +34,35 @@ test('public audit rejects dotted Token Plan credentials without echoing values'
   assert.ok(report.findings.some(x => x.kind === 'token-plan-credential'));
   assert.equal(JSON.stringify(report).includes(secret), false);
 });
+test('public audit scans credentials in allowed binary assets without echoing values', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-audit-')); t.after(() => fs.rmSync(root,{recursive:true,force:true}));
+  const secret = ['sk-sp-H', 'synthetic', 'x'.repeat(80)].join('.');
+  for (const ext of ['png', 'jpg', 'jpeg', 'ico', 'woff', 'woff2']) {
+    fs.writeFileSync(path.join(root, 'asset.' + ext), Buffer.concat([
+      Buffer.from([0x89, 0, 0xff]), Buffer.from('metadata=' + secret), Buffer.from([0]),
+    ]));
+  }
+  const report = auditTree(root);
+  assert.equal(report.ok, false);
+  assert.equal(report.findings.filter(x => x.kind === 'token-plan-credential').length, 6);
+  assert.equal(JSON.stringify(report).includes(secret), false);
+});
+test('public audit applies private denylist to binary metadata', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-audit-')); t.after(() => fs.rmSync(root,{recursive:true,force:true}));
+  const privateValue = 'private-installation.example';
+  fs.writeFileSync(path.join(root, 'asset.png'), Buffer.concat([Buffer.from([0]), Buffer.from(privateValue)]));
+  const report = auditTree(root, { deny: [privateValue] });
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some(x => x.kind === 'private-denylist'));
+  assert.equal(JSON.stringify(report).includes(privateValue), false);
+});
+test('public audit keeps permitted product assets while refusing unreviewed binary source', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-audit-')); t.after(() => fs.rmSync(root,{recursive:true,force:true}));
+  fs.writeFileSync(path.join(root, 'asset.png'), Buffer.from([0x89, 0, 0xff]));
+  assert.equal(auditTree(root).ok, true);
+  fs.writeFileSync(path.join(root, 'source.ts'), Buffer.from([0]));
+  assert.deepEqual(auditTree(root).findings, [{ file: 'source.ts', kind: 'unreviewed-binary' }]);
+});
 test('desktop export includes reviewed repair tools and excludes account evidence', async () => {
   const { included } = await import('../../scripts/export-shareable.mjs');
   assert.equal(included('recovery/desktop-sidebar-authority/patch-sidebar-authority.py'), true);

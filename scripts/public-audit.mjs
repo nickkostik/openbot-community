@@ -27,14 +27,16 @@ export function auditTree(root, { deny = [] } = {}) {
       if (!item.isFile()) { findings.push({ file: name, kind: 'special-file' }); continue; }
       files++;
       const bytes = fs.readFileSync(full);
+      // Asset metadata can contain credentials too. Scan before classifying
+      // binary content so an allowed extension cannot bypass privacy checks.
+      const text = bytes.toString('utf8');
+      for (const [kind, pattern] of checks) if (pattern.test(text)) findings.push({ file: name, kind });
+      if (deny.some(value => value && text.toLowerCase().includes(value.toLowerCase()))) findings.push({ file: name, kind: 'private-denylist' });
       if (bytes.includes(0)) {
         // Only reviewed product image/font assets are allowed as binary files.
         if (!/\.(?:png|jpg|jpeg|ico|woff2?)$/i.test(name)) findings.push({ file: name, kind: 'unreviewed-binary' });
         continue;
       }
-      const text = bytes.toString('utf8');
-      for (const [kind, pattern] of checks) if (pattern.test(text)) findings.push({ file: name, kind });
-      if (deny.some(value => value && text.toLowerCase().includes(value.toLowerCase()))) findings.push({ file: name, kind: 'private-denylist' });
     }
   }
   walk(root);

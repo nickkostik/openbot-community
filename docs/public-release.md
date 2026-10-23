@@ -20,7 +20,7 @@ It excludes Git history, private incident evidence, fleet state, encrypted recov
 
 Initialize the exported tree as a **new private repository** and review it there first. Making an old recovery repository public can expose deleted material through its history. This guide does not authorize changing repository visibility.
 
-Run `node scripts/public-audit.mjs /path/to/export --deny-file /private/denied-strings.json` with an installation-specific private JSON list before publication. Keep that list outside the export. Diagnostics report filenames and rule names, never matched secrets. Start a new Git history; never copy the private `.git` directory or backups.
+Run `node scripts/public-audit.mjs /path/to/export --deny-file /private/denied-strings.json` with an installation-specific private JSON list before publication. Keep that list outside the export. Credential and denylist checks also scan readable metadata in permitted binary images and fonts. They do not recognize faces, read text rendered inside images, or inspect compressed metadata; review assets separately or omit them. Diagnostics report filenames and rule names, never matched secrets. Start a new Git history; never copy the private `.git` directory or backups.
 
 ## Before making it public
 

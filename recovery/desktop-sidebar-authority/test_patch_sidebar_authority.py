@@ -93,10 +93,10 @@ class PatchTests(unittest.TestCase):
 
     def test_authority_replaces_stale_path_and_visibility_but_keeps_preview(self):
         cached = [{"id": "canonical", "name": "OLD", "harness": "box", "path": "/retired/store.db", "isHiddenFromSidebar": True, "isRemovedFromSidebar": True, "updatedAt": 20, "lastMessagePreview": "real history"}, {"id": "probe", "harness": "box"}]
-        incoming = [{"id": "canonical", "name": "Dating Coach", "harness": "temporal", "path": "/agents/canonical", "isHiddenFromSidebar": False, "updatedAt": 10}]
+        incoming = [{"id": "canonical", "name": "Example Assistant", "harness": "temporal", "path": "/agents/canonical", "isHiddenFromSidebar": False, "updatedAt": 10}]
         result = self.merge(cached, incoming)
         self.assertEqual([r["id"] for r in result], ["canonical"])
-        self.assertEqual(result[0]["name"], "Dating Coach")
+        self.assertEqual(result[0]["name"], "Example Assistant")
         self.assertEqual(result[0]["path"], "/agents/canonical")
         self.assertFalse(result[0]["isHiddenFromSidebar"])
         self.assertNotIn("isRemovedFromSidebar", result[0])

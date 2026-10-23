@@ -93,8 +93,60 @@ class NativeRoutineTriggerPreservationTests(unittest.TestCase):
     def test_component_injector_refuses_dependency_edits_and_duplicate_native_copies(self):
         source, expected, deps = self.component_fixture()
         with self.reviewed_fixture(source, expected), patch.object(m, 'DEPENDENCIES', deps):
-            for altered in [source.replace('return raw;', 'return null;'), source + source]:
+            for altered, reason in [(source.replace('return raw;', 'return null;'), 'dependency'),
+                                    (source + source, 'boundary')]:
+                with self.assertRaisesRegex(RuntimeError, reason):
+                    m.patch_component(altered)
+
+    def current_component_fixture(self):
+        source, _, deps = self.component_fixture()
+        source = source.replace('config3', 'config2')
+        layout = dict(m.CURRENT_COMPONENT)
+        start = source.index(layout['start'])
+        end = source.index(m.END)
+        block = source[start:end]
+        expected = source.replace(layout['old'], layout['new'])
+        layout.update(before=m.sha256(block),
+                      after=m.sha256(block.replace(layout['old'], layout['new'])),
+                      dependencies=deps)
+        return source, expected, layout
+
+    def test_current_component_keeps_outer_bytes_and_is_a_fixed_point(self):
+        source, expected, layout = self.current_component_fixture()
+        with patch.object(m, 'CURRENT_COMPONENT', layout):
+            outer = '/* checked engine generation */\n' + source + '\nconst after = true;'
+            result = m.patch_component(outer)
+            self.assertEqual(result, '/* checked engine generation */\n' + expected + '\nconst after = true;')
+            self.assertEqual(m.patch_component(result), result)
+            self.assertEqual(result.replace(layout['new'], layout['old']), outer)
+            with self.assertRaisesRegex(RuntimeError, 'Unreviewed'):
+                m.patch(source)
+
+    def test_current_component_refuses_changed_parser_and_trigger_dependencies(self):
+        source, _, layout = self.current_component_fixture()
+        with patch.object(m, 'CURRENT_COMPONENT', layout):
+            for altered in [source.replace('return raw;', 'return null;'),
+                            source.replace('return t;', 'return null;')]:
                 with self.assertRaisesRegex(RuntimeError, 'dependency'):
+                    m.patch_component(altered)
+
+    def test_current_component_refuses_unknown_body_partial_marker_and_wrong_output(self):
+        source, expected, layout = self.current_component_fixture()
+        with patch.object(m, 'CURRENT_COMPONENT', layout):
+            for altered in [source + m.MARK, source.replace(layout['old'], '      trigger: null,'),
+                            expected + layout['old'], source.replace('config2', 'unreviewed')]:
+                with self.assertRaises(RuntimeError):
+                    m.patch_component(altered)
+        with patch.object(m, 'CURRENT_COMPONENT', {**layout, 'after': '0' * 64}):
+            with self.assertRaisesRegex(RuntimeError, 'output differs'):
+                m.patch_component(source)
+
+    def test_duplicate_or_mixed_current_components_are_refused(self):
+        source, _, layout = self.current_component_fixture()
+        legacy, _, _ = self.component_fixture()
+        with patch.object(m, 'CURRENT_COMPONENT', layout):
+            for altered in [source + source, source + legacy]:
+                with self.assertRaisesRegex(RuntimeError, 'boundary'):
                     m.patch_component(altered)
 
     def test_component_injector_refuses_unknown_serializer_and_partial_markers(self):

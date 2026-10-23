@@ -503,14 +503,20 @@ class RosterReadConcurrencyInjectorTests(unittest.TestCase):
                 m.patch(self.source)
 
     def test_keep_agent_dirs_variant_preserves_rows_fallback_and_global_bound(self):
+        self.assert_native_variant('NATIVE_STOCK_SHA256', 'NATIVE_PATCHED_SHA256')
+
+    def test_current_native_variant_preserves_rows_fallback_and_global_bound(self):
+        self.assert_native_variant('CURRENT_NATIVE_STOCK_SHA256', 'CURRENT_NATIVE_PATCHED_SHA256')
+
+    def assert_native_variant(self, stock_key, patched_key):
         native = self.baseline.replace(m.ORIGINAL_OPEN, m.NATIVE_ORIGINAL_OPEN).replace(
             'const id = entry.name;', 'const id = agentId;')
         self.assertEqual(hashlib.sha256(native.encode()).hexdigest(), SYNTHETIC_NATIVE_STOCK_SHA256)
         wrapped = PREFIX + native + SUFFIX
         with self.assertRaises(RuntimeError):
             m.patch(wrapped)
-        with patch.multiple(m, NATIVE_STOCK_SHA256=SYNTHETIC_NATIVE_STOCK_SHA256,
-                            NATIVE_PATCHED_SHA256=SYNTHETIC_NATIVE_PATCHED_SHA256):
+        with patch.multiple(m, **{stock_key: SYNTHETIC_NATIVE_STOCK_SHA256,
+                                patched_key: SYNTHETIC_NATIVE_PATCHED_SHA256}):
             patched = m.patch(wrapped)
             self.assertEqual(m.patch(patched), patched)
             self.assertTrue(patched.startswith(PREFIX))

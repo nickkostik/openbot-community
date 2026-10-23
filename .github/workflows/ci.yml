@@ -23,8 +23,11 @@ jobs:
         run: node scripts/export-shareable.mjs --destination "$RUNNER_TEMP/openbot-shareable" --repository "$GITHUB_REPOSITORY"
       - name: Scan public source for private state
         run: node scripts/public-audit.mjs "$RUNNER_TEMP/openbot-shareable"
+      - name: Scan the repository before export normalization
+        run: node scripts/public-audit.mjs .
       - run: npm test
       - run: npm run typecheck
       - run: python3 -m unittest discover -s recovery/hooks -p 'test_*.py'
+      - run: python3 -m unittest discover -s recovery/desktop-sidebar-authority -p 'test_*.py'
       - run: python3 -m pip install -r recovery/hooks/requirements-standalone-proxy.txt
       - run: python3 recovery/hooks/standalone-proxy-check.py

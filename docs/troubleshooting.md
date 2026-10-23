@@ -147,3 +147,12 @@ A timed-out native store-status request means durability is unknown. A flush hoo
 Include OpenBot commit, vendor app/host version, client type/version, route family/protocol without secrets, exact safe error, timestamps with timezone, and which stage failed. Add a small reproduction using a harmless read and the checks that actually completed.
 
 Exclude OAuth files, keys, gateway/tunnel/Tailscale state, raw database copies, private transcripts, and request bodies. [Public release and sharing checklist](public-release.md).
+
+## Linux desktop conversation rendering
+
+If a recovered conversation shows `Something went wrong` or `Invalid time
+value`, capture the renderer error on that desktop. The optional
+[Linux desktop repair](../recovery/desktop-sidebar-authority/README.md) covers
+the reviewed 0.75.0 and 0.75.3 layouts. It preserves message content and stored
+timestamps and does not change bot routing. Follow its preflight and real
+composer-reply checks; the shared Computer installer does not run it.

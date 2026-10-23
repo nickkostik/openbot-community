@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const checks = [
   ['private-key', /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/],
   ['credential', /\b(?:sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{40,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/],
+  ['token-plan-credential', /\bsk-sp-[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}\b/],
   ['saved-login', /\beyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/],
   ['non-synthetic-identity', /\b(?!00000000-0000-4000-8000-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i],
   ['personal-home', /\/home\/(?!box(?:\/|\b)|runner(?:\/|\b)|user(?:\/|\b)|example(?:\/|\b)|test(?:\/|\b))[A-Za-z][\w.-]+\//],

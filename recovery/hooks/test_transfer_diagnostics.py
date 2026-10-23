@@ -24,7 +24,7 @@ class DiagnosticsTests(unittest.TestCase):
             'providers': [{'id': 'opencode-2', 'origin': 'https://opencode.ai/zen/go/v1'}],
             'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse', 'reasoningLevels': ['default', 'low', 'medium', 'high', 'xhigh'], 'activeReasoning': 'xhigh', 'maxOutputTokens': 65536, 'contextTokens': 1048576, 'catalogLimits': {'maxOutputTokens':131072}}]}}
         self.save_plan()
-        self.state = {'jobId': '14238183-e7f8-48a2-96ea-994a641cf49b', 'phase': 'review-needed',
+        self.state = {'jobId': '00000000-0000-4000-8000-000000000004', 'phase': 'review-needed',
             'refusalPhase': 'waiting-for-publication', 'diagnosticCode': 'preflight-refused',
             'counts': {'planned': 34, 'copied': 34, 'registered-box': 34, 'active': 0},
             'privateError': 'secret-key customer@example.test /home/private', 'history': ['private conversation']}
@@ -104,7 +104,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result['reason'], 'diagnostic-budget-exhausted')
         self.assertEqual(self.request.call_count, m.MAX_JOB_CALLS)
         self.assertEqual(json.loads((self.root/m.NAME).read_text())['seenFingerprints'], saved['seenFingerprints'])
-        self.state['jobId'] = '24238183-e7f8-48a2-96ea-994a641cf49b'
+        self.state['jobId'] = '00000000-0000-4000-8000-000000000005'
         self.save_state()
         m.run(self.root, now=1000+(m.MAX_JOB_CALLS+1)*m.BACKOFF_MS)
         self.assertEqual(self.request.call_count, m.MAX_JOB_CALLS+1)
@@ -372,7 +372,7 @@ console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParamete
 
     def test_previous_job_advice_does_not_bleed_into_next_job(self):
         m.run(self.root, now=1000)
-        self.state['jobId'] = '24238183-e7f8-48a2-96ea-994a641cf49b'
+        self.state['jobId'] = '00000000-0000-4000-8000-000000000005'
         self.save_state()
         self.assertEqual(m.status(self.root)['reason'], 'not-requested')
         self.assertNotIn('advice', m.status(self.root))
@@ -424,7 +424,7 @@ class HopRequestTests(unittest.TestCase):
         response.read1.side_effect = chunks
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection) as factory:
             try:
-                result = m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {'phase': 'waiting-for-publication'}, 'low', 4096)
+                result = m.request('opencode:muse', '00000000-0000-4000-8000-000000000004', {'phase': 'waiting-for-publication'}, 'low', 4096)
             finally:
                 connection.close.assert_called_once()
                 factory.assert_called_once_with('127.0.0.1', 9280, timeout=m.TIMEOUT)
@@ -458,7 +458,7 @@ class HopRequestTests(unittest.TestCase):
         with mock.patch.object(m.http.client, 'HTTPConnection', return_value=connection), \
              mock.patch.object(m.time, 'monotonic', side_effect=[0, 1, 2, m.TIMEOUT + 1]):
             with self.assertRaisesRegex(m.Refusal, 'timeout'):
-                m.request('opencode:muse', '14238183-e7f8-48a2-96ea-994a641cf49b', {}, 'low', 4096)
+                m.request('opencode:muse', '00000000-0000-4000-8000-000000000004', {}, 'low', 4096)
         connection.close.assert_called_once()
 
 

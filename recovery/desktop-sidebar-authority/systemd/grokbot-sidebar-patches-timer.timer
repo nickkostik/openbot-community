@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Grok Bot sidebar authority patches
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

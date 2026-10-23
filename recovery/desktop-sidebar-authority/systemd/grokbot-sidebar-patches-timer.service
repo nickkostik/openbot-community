@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep Grok Bot sidebar authority patches applied
+After=grokbot-desktop.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/openbot/desktop-sidebar-recovery/ensure-sidebar-patches.sh
+TimeoutStartSec=90

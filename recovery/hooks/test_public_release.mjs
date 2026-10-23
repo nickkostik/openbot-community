@@ -24,3 +24,21 @@ test('public audit permits synthetic fixture identity and generic product source
   fs.writeFileSync(path.join(root,'fixture.py'),'ID="00000000-0000-4000-8000-000000000001"');
   assert.equal(auditTree(root).ok,true);
 });
+
+test('public audit rejects dotted Token Plan credentials without echoing values', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'release-audit-')); t.after(() => fs.rmSync(root,{recursive:true,force:true}));
+  const secret = ['sk-sp-H', 'synthetic', 'x'.repeat(80)].join('.');
+  fs.writeFileSync(path.join(root, 'source.py'), 'VALUE=' + JSON.stringify(secret));
+  const report = auditTree(root);
+  assert.equal(report.ok, false);
+  assert.ok(report.findings.some(x => x.kind === 'token-plan-credential'));
+  assert.equal(JSON.stringify(report).includes(secret), false);
+});
+test('desktop export includes reviewed repair tools and excludes account evidence', async () => {
+  const { included } = await import('../../scripts/export-shareable.mjs');
+  assert.equal(included('recovery/desktop-sidebar-authority/patch-sidebar-authority.py'), true);
+  assert.equal(included('recovery/desktop-sidebar-authority/test_linux_0753.py'), true);
+  assert.equal(included('recovery/desktop-sidebar-authority/evidence/client-verification.json'), false);
+  assert.equal(included('recovery/desktop-sidebar-authority/private-runtime.json'), false);
+  assert.equal(included('recovery/desktop-sidebar-authority/systemd/private-tunnel.service'), false);
+});

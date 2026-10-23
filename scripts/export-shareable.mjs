@@ -13,7 +13,7 @@ const rootFiles = new Set([
   'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts',
   'install.sh', 'uninstall.sh', 'quickstart.sh',
 ]);
-const roots = ['src/', 'web/', 'ui/', 'payload/', 'skills/', '.github/', 'scripts/', 'docs/', 'agent-box/', 'recovery/hooks/'];
+const roots = ['src/', 'web/', 'ui/', 'payload/', 'skills/', '.github/', 'scripts/', 'docs/', 'agent-box/', 'recovery/hooks/', 'recovery/desktop-sidebar-authority/'];
 const publicDocs = new Set(['agent-install.md', 'models-and-tools.md', 'portable-installation.md',
   'portable-recovery.md', 'public-release.md', 'troubleshooting.md', 'updating.md', 'same-id-live-restoration.md',
   'shareable-readme.md', 'shareable-readme.zh-CN.md']);
@@ -24,7 +24,16 @@ const publicDocuments = new Map([
   ['skills/openbot-config/reference.md', 'docs/shareable-config/reference.md'],
   ['docs/updating.md', 'docs/updating.md'],
 ]);
+const desktopRecoveryFiles = new Set([
+  'README.md', 'patch-sidebar-authority.py', 'patch-temporal-sidebar-preferences.py',
+  'repair-client-cache.py', 'ensure-sidebar-patches.sh', 'test_patch_sidebar_authority.py',
+  'test_temporal_sidebar_preferences.py', 'test_linux_0753.py', 'test_sidebar_watcher.py',
+  'systemd/grokbot-desktop.service.d/sidebar-authority.conf',
+  'systemd/grokbot-sidebar-patches-timer.service', 'systemd/grokbot-sidebar-patches-timer.timer',
+]);
 export function included(file) {
+  if (file.startsWith('recovery/desktop-sidebar-authority/')
+    && !desktopRecoveryFiles.has(file.slice('recovery/desktop-sidebar-authority/'.length))) return false;
   if (!(rootFiles.has(file) || roots.some(root => file.startsWith(root)))) return false;
   if (file.startsWith('docs/') && !publicDocs.has(file.slice(5)) && !file.startsWith('docs/shareable-config/')) return false;
   if (['update-fleet-instructions.py', 'build-acp-opencode-direct.py', 'patch-acp-fleet.py',

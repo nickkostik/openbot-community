@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { digest } from './history-identifier-sdk-check.mjs';
 import { validateRoutinePlan,validateRecord,authoredRoutineSemantic,normalizeAuthoredTrigger,
   mergeHistoricalRuns,mergeRawHistoricalRuns,reviewedRoutineSource } from './return-routine-codec.mjs';
-const targetId = '22222222-2222-4222-8222-222222222222';
+const targetId = '00000000-0000-4000-8000-000000000002';
 const record = () => ({id:'daily-recipe',name:'Daily recipe',prompt:' Retain this recipe exactly. ',
   trigger:{type:'cron',schedule:'8 8 * * *',timing:'flexible',window:{earlyMinutes:10,lateMinutes:20}},
   triggerPresentation:{version:1,trigger:{type:'cron',schedule:'8 8 * * *',timing:'flexible',window:{earlyMinutes:10,lateMinutes:20}}},

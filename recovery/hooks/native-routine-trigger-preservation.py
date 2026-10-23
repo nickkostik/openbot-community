@@ -71,6 +71,21 @@ DEPENDENCIES = (
      '78b74e04b37f88326b7b0b143d48b6a8b27e884679422fb0ebedb38c4a66728f'),
 )
 
+# The 0.76.0-pre.16 vendor build only renames local parser/serializer bindings.
+# Pin that exact component separately; do not normalize arbitrary source text.
+CURRENT_COMPONENT = {
+    'start': 'function serializeStoredAutomationConfig(config2) {',
+    'old': '      ...config2.trigger.type === "cron" ? {} : { trigger: serializeStoredTrigger(config2.trigger) },',
+    'new': '      trigger: serializeStoredTrigger(config2.trigger), /* openbot-native-routine-trigger-v1 */',
+    'before': '9d3f4768d4c49d1e88d96519f0940d8e61005f6c538a5d65c7c01546ee596ff9',
+    'after': '07c71248ab799077671d2764337c8b73aa681d491741e60af81495d832b12b46',
+    'dependencies': (
+        ('function parseStoredAutomationConfig(', '\nfunction serializeStoredAutomationConfig(',
+         'a0e655f0396d44a13a92c06ccaa63c3dc35cc670bd9e9f557a5117f300d43aaa'),
+        DEPENDENCIES[1],
+    ),
+}
+
 
 def patch_component(source):
     """Canonical injector for a separately CAS-verified engine preparation.
@@ -81,22 +96,34 @@ def patch_component(source):
     """
     if not isinstance(source, str) or len(source.encode('utf8')) > MAX_BYTES:
         raise RuntimeError('Native routine source exceeds its bound')
-    for start, end, expected in DEPENDENCIES:
+    layouts = ({'start': START, 'old': OLD, 'new': NEW,
+                'before': BEFORE_BLOCK_SHA256, 'after': AFTER_BLOCK_SHA256,
+                'dependencies': DEPENDENCIES}, CURRENT_COMPONENT)
+    matching = [layout for layout in layouts if source.count(layout['start']) == 1]
+    if (len(matching) != 1 or source.count('function serializeStoredAutomationConfig(') != 1 or
+            source.count(END) != 1):
+        raise RuntimeError('Native routine serializer boundary changed')
+    layout = matching[0]
+    for start, end, expected in layout['dependencies']:
         if source.count(start) != 1 or source.count(end) != 1:
             raise RuntimeError('Native routine dependency boundary changed')
         a, b = source.index(start), source.index(end)
         if b <= a or sha256(source[a:b]) != expected:
             raise RuntimeError('Native routine dependency source changed')
-    block = serializer_block(source)
-    if sha256(block) == AFTER_BLOCK_SHA256:
-        if source.count(MARK) != 1 or source.count(NEW) != 1 or OLD in source:
+    start = source.index(layout['start'])
+    end = source.index(END)
+    if end <= start:
+        raise RuntimeError('Native routine serializer boundary order changed')
+    block = source[start:end]
+    if sha256(block) == layout['after']:
+        if source.count(MARK) != 1 or source.count(layout['new']) != 1 or layout['old'] in source:
             raise RuntimeError('Native routine preservation patch is incomplete')
         return source
-    if (sha256(block) != BEFORE_BLOCK_SHA256 or block.count(OLD) != 1 or
-            source.count(OLD) != 1 or MARK in source):
+    if (sha256(block) != layout['before'] or block.count(layout['old']) != 1 or
+            source.count(layout['old']) != 1 or MARK in source):
         raise RuntimeError('Native routine serializer source changed')
-    result = source.replace(OLD, NEW, 1)
-    if sha256(serializer_block(result)) != AFTER_BLOCK_SHA256:
+    result = source.replace(layout['old'], layout['new'], 1)
+    if sha256(result[start:result.index(END)]) != layout['after']:
         raise RuntimeError('Native routine preservation output differs from review')
     return result
 

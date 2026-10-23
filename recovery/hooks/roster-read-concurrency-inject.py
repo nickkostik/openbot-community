@@ -21,6 +21,8 @@ STOCK_SHA256 = 'befae3821d1c1d4ee0676b99575fc3bd8e4ca970634d3e519fccdeda4dd0de87
 PATCHED_SHA256 = '9a6df18673c85f8788a6fd593e28718bfda8ef8869006b8995c82c37bcfb17be'
 NATIVE_STOCK_SHA256 = 'e879c6304413940614bec292822431bf4124ec747cdcb2c935638f75fc5bc3f8'
 NATIVE_PATCHED_SHA256 = '49a62157bc319c99f7db639710e6a60220a2e673ef55ddc6e04edfe24dcfd4da'
+CURRENT_NATIVE_STOCK_SHA256 = '2ea4fd9957930cf3734a38a25037b709675ccbcf58ef4aff98939ca1aa75abb4'
+CURRENT_NATIVE_PATCHED_SHA256 = '8c748f8d27a9c17c2a68d0f620cb9ec9ef6813d60ac712788890f55c847d508e'
 
 ORIGINAL_OPEN = '''  const summaries = await Promise.all(
     entries.filter((entry) => entry.isDirectory()).map(async (entry) => {'''
@@ -83,6 +85,7 @@ def patch(source):
     reviewed = {
         STOCK_SHA256: (PATCHED_SHA256, ORIGINAL_OPEN, BOUNDED_OPEN),
         NATIVE_STOCK_SHA256: (NATIVE_PATCHED_SHA256, NATIVE_ORIGINAL_OPEN, NATIVE_BOUNDED_OPEN),
+        CURRENT_NATIVE_STOCK_SHA256: (CURRENT_NATIVE_PATCHED_SHA256, NATIVE_ORIGINAL_OPEN, NATIVE_BOUNDED_OPEN),
     }
     if MARK in source:
         if source.count(MARK) != 1 or fingerprint not in {value[0] for value in reviewed.values()}:

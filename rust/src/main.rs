@@ -15,6 +15,7 @@ mod reasoning;
 mod routing;
 mod server;
 mod service;
+mod skills;
 mod wire;
 
 use std::{
@@ -237,6 +238,10 @@ async fn serve(args: Args) -> io::Result<()> {
     let catalog = (status.serves_ui || enable_model_refresh)
         .then(|| aggregate::CatalogService::new(state.clone(), refresh))
         .transpose()?;
+    let skills = status
+        .serves_ui
+        .then(|| skills::Skills::new(state.root(), write_bot_settings, hop::version()))
+        .transpose()?;
     let _owner = managed_service
         .then(|| service::PublishedOwner::publish(state.root()))
         .transpose()?;
@@ -251,6 +256,7 @@ async fn serve(args: Args) -> io::Result<()> {
         panel,
         catalog.as_ref().map(aggregate::CatalogService::routes),
         (status.serves_ui || enable_request_logs).then(|| logs.clone().routes()),
+        skills.map(skills::Skills::routes),
     ];
     println!("OpenBot Rust listening on http://{authority}");
     let draining = catalog.clone();

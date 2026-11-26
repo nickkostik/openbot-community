@@ -484,7 +484,7 @@ fn stream_reply(
     response
 }
 
-fn version() -> String {
+pub(crate) fn version() -> String {
     if let Ok(commit) = std::env::var("OPENBOT_COMMIT")
         && !commit.trim().is_empty()
     {

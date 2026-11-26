@@ -189,6 +189,12 @@ Add `--ui-dir ui` to the disposable candidate command from the built source chec
 
 Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with `--enable-hop`, `--enable-accounts` or `--enable-model-refresh`. Use read-only `GET /api/model-catalog` with `--ui-dir` or `--enable-model-refresh`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. The remaining panel control routes are pending.
 
+##### Rust Grok Bot user skills
+
+On the native rehearsal panel with `--ui-dir`, use `GET /api/grok-skills` to inspect the copy status and `POST /api/grok-skills/install` with `{}` or `{"slug":"openbot-config"}` to install. The binary embeds the checkout's `skills/openbot-config/SKILL.md` and `reference.md`, so copying works offline. When set, `OPENBOT_COMMIT` supplies the reported `ref`. This native route accepts the `openbot-config` slug and rejects other slugs.
+
+Write access requires `--write-bot-settings`. Target the normal user workflows directory. `OPENBOT_WORKFLOWS` overrides `OPENBOT_AGENT_DATA/workflows`, which defaults to `/home/box/agent-data/workflows`. The installer rejects protected `plugins` and `managed-skills` paths and symlinks in the destination path or either target file. It replaces only the two bundled files under `workflows/openbot-config/` and preserves other user files. The copy needs no OpenBot service restart.
+
 #### Rust model catalog refresh
 
 Add `--enable-model-refresh` to the disposable candidate command. Copy the plan, any bot settings under test and the needed direct account credentials into that private state. Keep the account entries in `secrets.json` under their saved provider IDs. Discovery uses each account's matching credential and saved direct origin, including separate OpenCode Go accounts.

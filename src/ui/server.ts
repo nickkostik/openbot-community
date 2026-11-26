@@ -37,7 +37,9 @@ import {
   runTunnelWatchTick,
 } from "../supervisor/tunnel-watch.ts";
 import { completeOpenAIOAuth, startOpenAIOAuth } from "../supervisor/openai-oauth.ts";
-import { CredentialDrafts } from "../supervisor/credential-import.ts";
+import { ChatGPTPlanLogin, loadChatGPTPlanHostId } from "../supervisor/chatgpt-plan-login.ts";
+import { CredentialDrafts, normalizeProviderCredential } from "../supervisor/credential-import.ts";
+import { isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 import { handleBotModelsApi } from "./bot-models.ts";
 import { createLogReader } from "./log-reader.ts";
 import { isInjectionMode, parseInjectionLayers, readDeliverySettings, writeDeliverySettings } from "./delivery-settings.ts";
@@ -938,6 +940,56 @@ async function handleDeliverySettingsApi(req: http.IncomingMessage, res: http.Se
 }
 
 const credentialDrafts = new CredentialDrafts();
+const chatGPTPlanLogin = new ChatGPTPlanLogin();
+
+function loopbackCallback(req: http.IncomingMessage): string | undefined {
+  const host = req.headers.host;
+  const addr = req.socket.remoteAddress;
+  if (!host || !/^127\.0\.0\.1:[1-9]\d{0,4}$/.test(host) || (addr !== "127.0.0.1" && addr !== "::ffff:127.0.0.1") ||
+      (req.headers.origin !== undefined && req.headers.origin !== `http://${host}`)) return undefined;
+  return `http://${host}/auth/callback`;
+}
+
+async function handleChatGPTPlanSignIn(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<boolean> {
+  const callback = req.method === "GET" && url.pathname === "/auth/callback";
+  const start = req.method === "POST" && url.pathname === "/api/oauth/chatgpt/start";
+  const status = req.method === "POST" && url.pathname === "/api/oauth/chatgpt/status";
+  if (!callback && !start && !status) return false;
+  const redirectUri = loopbackCallback(req);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  if (!redirectUri) {
+    sendJson(res, 403, { error: "Open OpenBot at its 127.0.0.1 panel address to sign in with ChatGPT." });
+    return true;
+  }
+  if (callback) {
+    const ok = await chatGPTPlanLogin.callback(new URL(redirectUri + url.search),
+      (credential, providerId) => credentialDrafts.stage(credential, providerId).credentialId);
+    send(res, ok ? 200 : 400, ok ? "ChatGPT sign-in complete. Return to OpenBot to save the account." : "ChatGPT sign-in did not complete. Return to OpenBot.", "text/plain; charset=utf-8");
+    return true;
+  }
+  try {
+    const body = JSON.parse(await readBody(req)) as { providerId?: unknown; sessionId?: unknown };
+    if (status) {
+      if (typeof body.sessionId !== "string") throw new Error("A ChatGPT sign-in session is required.");
+      sendJson(res, 200, chatGPTPlanLogin.status(body.sessionId, redirectUri));
+    } else {
+      const current = deps();
+      let providerId: string | undefined;
+      let previous: ReturnType<typeof readChatGPTPlanCredential> = undefined;
+      if (body.providerId !== undefined) {
+        const provider = catalogFromPlanJson(current.fs.read(current.paths.plan)).providers.find(row => row.id === body.providerId);
+        if (!provider || !isDirectOrigin(provider.origin)) throw new Error("Select an existing direct OpenAI provider.");
+        providerId = provider.id;
+        previous = readChatGPTPlanCredential(loadSecrets(current.fs, current.paths.secrets).providers[provider.id]);
+      }
+      sendJson(res, 200, chatGPTPlanLogin.start(redirectUri, loadChatGPTPlanHostId(current.paths.sandData), providerId, previous));
+    }
+  } catch (error) {
+    sendJson(res, 400, { error: error instanceof Error ? error.message : "ChatGPT sign-in could not be started." });
+  }
+  return true;
+}
 
 async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
   const current = deps();
@@ -1033,19 +1085,31 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     await enqueueSave(async () => {
       let parsedBody: unknown = JSON.parse(await readBody(req));
       let credentialId: string | undefined;
+      const saved = catalogFromPlanJson(current.fs.read(current.paths.plan));
       if (parsedBody !== null && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
         const body = parsedBody as Record<string, unknown>;
         if (body.credentialId !== undefined) {
-          if (body.kind !== "add-provider" || body.familyId !== "openai" || typeof body.credentialId !== "string" || body.secret !== undefined) {
-            throw new Error("A login draft must be added as a new OpenAI account without another credential.");
-          }
+          if (typeof body.credentialId !== "string" || body.secret !== undefined) throw new Error("Use one completed login without another credential.");
           credentialId = body.credentialId;
-          parsedBody = { ...body, secret: credentialDrafts.read(credentialId) };
+          if (body.kind === "add-provider" && body.familyId === "openai") {
+            parsedBody = { ...body, secret: credentialDrafts.read(credentialId) };
+          } else if (body.kind === "set-secret" && typeof body.providerId === "string") {
+            const provider = saved.providers.find(row => row.id === body.providerId);
+            if (!provider || !isDirectOrigin(provider.origin)) throw new Error("ChatGPT plan login requires the direct OpenAI API.");
+            const draft = credentialDrafts.read(credentialId, provider.id);
+            const next = readChatGPTPlanCredential(draft);
+            const previous = readChatGPTPlanCredential(loadSecrets(current.fs, current.paths.secrets).providers[provider.id]);
+            if (!next || (previous && (next.clientId !== previous.clientId || next.subject !== previous.subject))) {
+              throw new Error("The selected provider account changed. Start ChatGPT sign-in again.");
+            }
+            parsedBody = { ...body, secret: normalizeProviderCredential(draft, provider.origin) };
+          } else {
+            throw new Error("Add the login as an OpenAI account or renew the provider that started this sign-in.");
+          }
         } else if (body.secret === "oauth" && (body.kind === "custom" || body.kind === "upsert-provider")) {
           throw new Error("Reload the page and add the account using its completed login draft.");
         }
       }
-      const saved = catalogFromPlanJson(current.fs.read(current.paths.plan));
       const parsed = parseUiProviderSave(parsedBody, current.paths, saved, {
         expose: readExposeFile(current.fs, current.paths.expose),
         mode: wrapMode(current.fs.read(current.paths.mode)),
@@ -1109,6 +1173,7 @@ function safeUiPath(urlPath: string): string | undefined {
 export async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   try {
     const url = new URL(req.url ?? "/", `http://${host}:${String(port)}`);
+    if (await handleChatGPTPlanSignIn(req, res, url)) return;
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
       return;

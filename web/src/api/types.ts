@@ -182,7 +182,7 @@ export type Command =
   | { kind: "use-model"; modelId: string; reasoning?: string }
   | { kind: "remove-provider"; providerId: string }
   | { kind: "remove-model"; modelId: string }
-  | { kind: "set-secret"; providerId: string; secret: string }
+  | ({ kind: "set-secret"; providerId: string } & ({ secret: string } | { credentialId: string }))
   | { kind: "update-provider"; providerId: string; name: string; origin: string; apiType?: "chat-completions" | "responses" | "anthropic"; secret?: string }
   | { kind: "set-expose"; expose: "cloudflare" | "off" };
 

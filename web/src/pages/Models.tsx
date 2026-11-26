@@ -39,7 +39,7 @@ import { useApp, useBoxState } from "../store";
 import { ImportModelsDialog } from "../components/ImportModelsDialog";
 import { ModelDialog } from "../components/ModelDialog";
 import { ConfirmDialog } from "../components/overlays";
-import { EditProviderDialog, ReplaceKeyDialog } from "../components/ProviderDialogs";
+import { ChatGPTProviderDialog, EditProviderDialog, ReplaceKeyDialog } from "../components/ProviderDialogs";
 import { Badge, Button, EmptyState, IconButton, ParamChip, Spinner } from "../components/ui";
 import { Listbox } from "../components/Listbox";
 import { modelSupportsChat } from "../../../src/domain/model.ts";
@@ -67,6 +67,7 @@ export function Models({ providerId }: { providerId?: string }) {
   const [selectedId, setSelectedId] = useState<string | null>(providerId ?? providers[0]?.id ?? null);
   const [editProvider, setEditProvider] = useState(false);
   const [replaceKey, setReplaceKey] = useState(false);
+  const [chatGPTProviderId, setChatGPTProviderId] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [confirmRemoveModel, setConfirmRemoveModel] = useState<Model | null>(null);
   const [modelDialog, setModelDialog] = useState<{ open: boolean; model: Model | null }>({ open: false, model: null });
@@ -95,6 +96,8 @@ export function Models({ providerId }: { providerId?: string }) {
   }, [providers, selectedId]);
 
   const selected: Provider | undefined = providers.find((p) => p.id === selectedId);
+  const chatGPTProvider = providers.find(p => p.id === chatGPTProviderId);
+  const canConnectChatGPT = /^https:\/\/api\.openai\.com(?:\/v1)?\/?$/.test(selected?.origin ?? "");
   const models = useMemo(() => state.models.filter((m) => m.providerId === selectedId), [state.models, selectedId]);
   const active = state.models.find((m) => m.id === state.activeModelId);
   const selectedHasKey = selected ? hasKey(state, selected.id) : false;
@@ -420,6 +423,7 @@ export function Models({ providerId }: { providerId?: string }) {
                 >
                   {selectedHasKey ? "Replace" : "Add key"}
                 </Button>
+                {canConnectChatGPT ? <Button variant="ghost" onClick={() => setChatGPTProviderId(selected.id)}>Connect ChatGPT</Button> : null}
                 <Button variant="ghost-danger" icon={Trash2} onClick={() => setConfirmRemove(true)}>
                   Remove
                 </Button>
@@ -604,6 +608,16 @@ export function Models({ providerId }: { providerId?: string }) {
         }}
       />
 
+      {chatGPTProvider ? <ChatGPTProviderDialog key={chatGPTProvider.id} provider={chatGPTProvider}
+        onClose={() => setChatGPTProviderId(null)} busy={busy === "chatgpt-login"}
+        onSave={async credentialId => {
+          const ok = await run("chatgpt-login", { kind: "set-secret", providerId: chatGPTProvider.id, credentialId }, { title: "ChatGPT connected" });
+          if (ok) {
+            setChatGPTProviderId(null);
+            await doFetch(chatGPTProvider);
+          }
+        }} /> : null}
+
       <ConfirmDialog
         open={confirmRemove}
         onClose={() => setConfirmRemove(false)}
@@ -669,6 +683,10 @@ export function Models({ providerId }: { providerId?: string }) {
           setImportOpen(false);
           setReplaceKey(true);
         }}
+        onConnectChatGPT={canConnectChatGPT && selected ? () => {
+          setImportOpen(false);
+          setChatGPTProviderId(selected.id);
+        } : undefined}
       />
     </>
   );

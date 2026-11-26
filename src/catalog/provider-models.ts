@@ -5,6 +5,7 @@ import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
 import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
+import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
  * Source A: fetch a provider's own model list from its base URL + /v1/models,
@@ -15,7 +16,7 @@ import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } fro
 /** Minimal fetch surface so tests can mock the outbound network. */
 export type FetchLike = (
   url: string,
-  init?: { readonly headers?: Record<string, string>; readonly signal?: AbortSignal },
+  init?: { readonly headers?: Record<string, string>; readonly signal?: AbortSignal; readonly redirect?: RequestRedirect },
 ) => Promise<{ readonly status: number; readonly ok: boolean; text(): Promise<string> }>;
 
 export const PROVIDER_MODELS_TOTAL_TIMEOUT_MS = 30_000;
@@ -296,6 +297,7 @@ async function fetchProviderModels(input: {
   headers?: Record<string, string>;
   fetchFn: FetchLike;
   totalTimeoutMs: number;
+  chatGPTPlan?: boolean;
 }): Promise<FetchProviderResult> {
   const directGo = isOpenCodeGoOrigin(input.url.replace(/\/v1\/models$/, ""));
   let oauthAccessToken: string | null = null;
@@ -320,12 +322,13 @@ async function fetchProviderModels(input: {
         ...(directGo || input.providerId.startsWith("opencode") ? { "x-opencode-session": opencodeModelsSession(input.providerId) } : {}),
       },
       signal: AbortSignal.timeout(input.totalTimeoutMs),
+      ...(input.chatGPTPlan ? { redirect: "error" as const } : {}),
     });
   } catch (err) {
     return { ok: false, errorKind: "unreachable", message: timeoutMessage(err) };
   }
   if (res.status === 401 || res.status === 403) {
-    return { ok: false, errorKind: "unauthorized", message: "provider rejected the API key", upstreamStatus: res.status };
+    return { ok: false, errorKind: "unauthorized", message: input.chatGPTPlan ? "OpenAI rejected the ChatGPT login. Sign in again." : "provider rejected the API key", upstreamStatus: res.status };
   }
   if (res.status === 404 || res.status === 405 || res.status === 501) {
     return {
@@ -349,6 +352,9 @@ async function fetchProviderModels(input: {
     parsed = JSON.parse(text);
   } catch {
     return { ok: false, errorKind: "parse-error", message: "provider returned a non-JSON body" };
+  }
+  if (input.chatGPTPlan && isRecord(parsed) && Array.isArray(parsed.models)) {
+    parsed = { models: parsed.models.filter(item => isRecord(item) && item.visibility === "list") };
   }
   const normalized = normalizeProviderModels(parsed, directGo);
   if (normalized === undefined) {
@@ -391,22 +397,36 @@ export async function fetchModelsForProvider(input: {
     return { status: 409, body: { error: { kind: "no-secret", message: "no API key stored for this provider" } } };
   }
   let result: FetchProviderResult;
+  let isChatGPTPlan = false;
   try {
     const isOpenAIOAuth = isOpenAIOAuthSecret(secret);
-    if (isOpenAIOAuth && input.refreshOAuth) {
+    let plan = readChatGPTPlanCredential(secret);
+    isChatGPTPlan = plan !== undefined;
+    if (plan && !isDirectOrigin(provider.origin)) {
+      return { status: 400, body: { error: { kind: "not-supported", message: "ChatGPT plan login requires the direct OpenAI API." } } };
+    }
+    if ((isOpenAIOAuth && input.refreshOAuth) || plan) {
       const credential = JSON.parse(secret) as Record<string, unknown>;
       if (!(Number(credential.expiresAt) > Date.now() / 1000 + 60)) {
         try {
+          if (!input.refreshOAuth) throw new Error("Refresh unavailable");
           secret = await input.refreshOAuth(provider.id) as SecretBytes;
-          if (!isOpenAIOAuthSecret(secret)) throw new Error("Refresh did not persist an OAuth credential");
+          if (plan) {
+            const refreshed = readChatGPTPlanCredential(secret);
+            if (!refreshed || refreshed.clientId !== plan.clientId || refreshed.subject !== plan.subject) throw new Error("Account changed");
+            plan = refreshed;
+          } else if (!isOpenAIOAuthSecret(secret)) {
+            throw new Error("Refresh did not persist an OAuth credential");
+          }
         } catch {
           return { status: 401, body: { error: { kind: "unauthorized", message: "OpenAI login could not be refreshed. Sign in again or import a current login file." } } };
         }
       }
     }
     result = await fetchProviderModels({
-      url: isOpenAIOAuth ? OPENAI_CODEX_MODELS_URL : modelsUrl(provider.origin),
-      secret: secret ?? "",
+      url: plan ? `${CHATGPT_PLAN_ORIGIN}/models` : isOpenAIOAuth ? OPENAI_CODEX_MODELS_URL : modelsUrl(provider.origin),
+      secret: plan?.accessToken ?? secret,
+      chatGPTPlan: isChatGPTPlan,
       providerId: provider.id,
       ...(isOpenAIOAuth
         ? {
@@ -440,11 +460,13 @@ export async function fetchModelsForProvider(input: {
   try { nativeOpenAI = new URL(provider.origin).hostname === "api.openai.com"; } catch { /* Reported during fetch above. */ }
   const models = nativeOpenAI ? result.models.map((model) => {
     const facts = documentedOpenAIModel(model.id);
-    return facts ? {
+    return {
       ...model,
-      contextLength: model.contextLength ?? facts.contextTokens,
-      reasoningLevels: [...facts.reasoningLevels],
-    } : model;
+      ...(isChatGPTPlan ? { apiType: "responses" as const } : {}),
+      ...(facts ? { contextLength: model.contextLength ?? facts.contextTokens,
+        maxOutputTokens: model.maxOutputTokens ?? facts.maxOutputTokens ?? null,
+        reasoningLevels: isChatGPTPlan && model.reasoningLevels.length > 1 ? model.reasoningLevels : [...facts.reasoningLevels] } : {}),
+    };
   }) : result.models;
   return {
     status: 200,

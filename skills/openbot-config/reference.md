@@ -153,7 +153,17 @@ With both flags active, inference can renew a due OpenAI login when its renewal 
 
 Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves. Successful account saves return the current panel state so the browser can show the saved account immediately.
 
-Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with either `--enable-hop` or `--enable-accounts`. With `--ui-dir`, the candidate loads `openbot-model-catalog.json` at startup and serves read-only `GET /api/model-catalog`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. Live public-source refresh and the remaining panel control routes are pending.
+Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with `--enable-hop`, `--enable-accounts` or `--enable-model-refresh`. Use read-only `GET /api/model-catalog` with `--ui-dir` or `--enable-model-refresh`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. The remaining panel control routes are pending.
+
+#### Rust model catalog refresh
+
+Add `--enable-model-refresh` to the disposable candidate command. Copy the plan, any bot settings under test and the needed direct account credentials into that private state. Keep the account entries in `secrets.json` under their saved provider IDs. Discovery uses each account's matching credential and saved direct origin, including separate OpenCode Go accounts.
+
+`POST /api/model-catalog/refresh` starts a manual run and returns HTTP 202. Manual requests and scheduled checks share an in-flight run. Poll `GET /api/model-catalog` for `autoRefresh` status. Auto refresh defaults to every six hours, with the first scheduler check after 15 seconds and later checks every minute. Set a numeric `intervalHours` in `openbot-model-refresh.json` to adjust the interval within 1–168 hours. Setting `"enabled": false` stops the scheduled runs and makes a manual run refresh only the public metadata.
+
+The candidate loads `openbot-model-catalog.json` at startup and persists public catalog updates from OpenRouter and models.dev. The managed `openbot-model-refresh-status.json` records timing, merge counts, held reasoning choices and provider outcomes. Edit the policy in `openbot-model-refresh.json`.
+
+When saved-provider refresh is enabled, it adds new routes under existing provider accounts and enriches existing rows while retaining model IDs, bindings, explicit protocols, custom context, and active and per-bot reasoning choices. A narrower published output limit can reduce the output cap. The merge reads current bot settings under the shared `.openbot-rust-bot-settings.lock` lease and serializes plan updates with bot settings saves. Use `--write-bot-settings` on the same candidate to rehearse both writes.
 
 ### Official controls without logging rewrap
 

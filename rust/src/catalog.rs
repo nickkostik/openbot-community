@@ -266,7 +266,7 @@ pub struct Provider {
 }
 
 impl Provider {
-    fn from_saved(row: &Value) -> Option<Self> {
+    pub(crate) fn from_saved(row: &Value) -> Option<Self> {
         Some(Self {
             id: row["id"].as_str()?.into(),
             origin: row["origin"].as_str().unwrap_or_default().into(),

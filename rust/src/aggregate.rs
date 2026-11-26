@@ -1,19 +1,17 @@
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+mod plans;
+mod public;
+mod runtime;
 
-use axum::{
-    Json, Router,
-    extract::{Query, State as AxumState},
-    http::StatusCode,
-    routing::get,
-};
-use serde::Deserialize;
+pub use runtime::CatalogService;
+
+use std::{collections::BTreeSet, path::Path};
+
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{AuthError, blocking},
     catalog::{Effort, discovery_facts, unversioned_slug},
     routing::{direct_go, parse_origin},
-    server::{State, read_json},
+    server::read_json,
 };
 
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
@@ -22,72 +20,9 @@ const SOURCES: [(&str, &str); 2] = [
     ("models.dev", "https://models.dev/api.json"),
 ];
 
-#[derive(Clone)]
-struct CatalogRead {
-    state: State,
-    inventory: Arc<Inventory>,
-}
-
 struct Inventory {
     data: Option<Value>,
     model_count: usize,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Lookup {
-    model_id: Option<String>,
-    provider_id: Option<String>,
-}
-
-pub fn routes(state: State) -> Router {
-    let inventory = Arc::new(Inventory::load(state.root()));
-    Router::new()
-        .route("/api/model-catalog", get(lookup))
-        .with_state(CatalogRead { state, inventory })
-}
-
-async fn lookup(
-    AxumState(catalog): AxumState<CatalogRead>,
-    Query(request): Query<Lookup>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let origin = if let Some(id) = request.provider_id {
-        let state = catalog.state;
-        let providers = blocking(move || {
-            state.catalog().map_err(|_| AuthError {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: "OpenBot could not read the provider catalog.".into(),
-                upstream: None,
-            })
-        })
-        .await
-        .map_err(|error| {
-            (
-                error.status,
-                Json(json!({"error":{"kind":"internal","message":error.message}})),
-            )
-        })?;
-        let selected = providers
-            .providers
-            .into_iter()
-            .find(|provider| provider.id == id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({
-                        "error":{"kind":"provider-not-found","message":"Provider not found."}
-                    })),
-                )
-            })?;
-        Some(selected.origin)
-    } else {
-        None
-    };
-    Ok(Json(
-        catalog
-            .inventory
-            .snapshot(request.model_id.as_deref(), origin.as_deref()),
-    ))
 }
 
 impl Inventory {
@@ -131,19 +66,7 @@ impl Inventory {
         let data = self.data.as_ref().unwrap_or(&Value::Null);
         let sources: Vec<_> = SOURCES
             .into_iter()
-            .map(|(name, url)| {
-                let cached = data["sources"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|entry| entry["name"] == name)
-                    .unwrap_or(&Value::Null);
-                json!({
-                    "name":name, "url":url,
-                    "modelCount":cached["modelCount"].as_u64().unwrap_or(0),
-                    "lastFetched":cached["lastFetched"].as_str()
-                })
-            })
+            .map(|(name, url)| public::source_row(data, name, url))
             .collect();
         let mut result = json!({
             "status":if self.data.is_some() { "ready" } else { "failed" },
@@ -294,48 +217,60 @@ fn global_model(data: &Value, id: &str) -> Option<Value> {
     });
     let (richest, others) = matches.split_first()?;
     let mut result = (*richest).clone();
-    if !others.is_empty()
-        && let Some(result) = result.as_object_mut()
-    {
-        for field in ["apiType", "providerKey", "sourceUrl", "outputModalities"] {
-            result.shift_remove(field);
-        }
-    }
     for incoming in others {
-        for field in ["name", "contextLength", "maxOutputTokens"] {
-            if result[field].is_null() {
-                result[field] = incoming[field].clone();
-            }
-        }
-        if result["modalities"].as_array().is_none_or(Vec::is_empty) {
-            result["modalities"] = incoming["modalities"].clone();
-        }
-        result["reasoning"] = json!(result["reasoning"] == true || incoming["reasoning"] == true);
-        let mut efforts: BTreeSet<_> = [&result["reasoningLevels"], &incoming["reasoningLevels"]]
-            .into_iter()
-            .filter_map(Value::as_array)
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter_map(Effort::parse)
-            .collect();
-        if !efforts.is_empty() {
-            efforts.insert(Effort::Default);
-        }
-        result["reasoningLevels"] = json!(efforts);
-        if result["pricing"].is_null() {
-            result["pricing"] = incoming["pricing"].clone();
-        } else if incoming["pricing"].is_object() {
-            for component in ["input", "output"] {
-                if result["pricing"][component].is_null() {
-                    result["pricing"][component] = incoming["pricing"][component].clone();
-                }
-            }
-        }
+        merge_metadata(&mut result, incoming, false);
     }
     if models.get(id).is_some_and(|model| model["id"] == id) {
         result["id"] = json!(id);
     }
     Some(result)
+}
+
+fn merge_metadata(model: &mut Value, incoming: &Value, prefer_incoming: bool) {
+    for field in ["name", "contextLength", "maxOutputTokens"] {
+        if model[field].is_null() || (prefer_incoming && !incoming[field].is_null()) {
+            model[field] = incoming[field].clone();
+        }
+    }
+    if model["modalities"].as_array().is_none_or(Vec::is_empty)
+        || (prefer_incoming
+            && incoming["modalities"]
+                .as_array()
+                .is_some_and(|list| !list.is_empty()))
+    {
+        model["modalities"] = incoming["modalities"].clone();
+    }
+    model["reasoning"] = json!(model["reasoning"] == true || incoming["reasoning"] == true);
+    let mut efforts: BTreeSet<_> = [&model["reasoningLevels"], &incoming["reasoningLevels"]]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(Effort::parse)
+        .collect();
+    if !efforts.is_empty() {
+        efforts.insert(Effort::Default);
+    }
+    model["reasoningLevels"] = json!(efforts);
+    if model["pricing"].is_null() {
+        model["pricing"] = incoming["pricing"].clone();
+    } else if incoming["pricing"].is_object() {
+        for component in ["input", "output"] {
+            if model["pricing"][component].is_null()
+                || (prefer_incoming && !incoming["pricing"][component].is_null())
+            {
+                model["pricing"][component] = incoming["pricing"][component].clone();
+            }
+        }
+        if prefer_incoming {
+            model["pricing"]["currency"] = incoming["pricing"]["currency"].clone();
+        }
+    }
+    if let Some(model) = model.as_object_mut() {
+        for field in ["apiType", "providerKey", "sourceUrl", "outputModalities"] {
+            model.shift_remove(field);
+        }
+    }
 }
 
 fn origin_key(raw: &str) -> Option<String> {

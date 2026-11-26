@@ -40,6 +40,9 @@ struct Args {
     /// Enable local OpenAI sign-in, credential writes, and renewal in disposable state.
     #[arg(long)]
     enable_accounts: bool,
+    /// Enable manual and scheduled catalog refresh writes in disposable state.
+    #[arg(long)]
+    enable_model_refresh: bool,
     /// Serve the built OpenBot web assets from this directory.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
@@ -103,6 +106,7 @@ fn main() -> io::Result<()> {
             args.write_bot_settings,
             args.enable_hop,
             args.enable_accounts,
+            args.enable_model_refresh,
             args.ui_dir,
         ))
 }
@@ -113,9 +117,10 @@ async fn serve(
     writable: bool,
     enable_hop: bool,
     enable_accounts: bool,
+    enable_model_refresh: bool,
     ui_dir: Option<PathBuf>,
 ) -> io::Result<()> {
-    let state = server::State::new(sand_data, writable)?;
+    let state = server::State::with_catalog_writer(sand_data, writable, enable_model_refresh)?;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?;
     let authority = if address.port() == 80 {
@@ -128,8 +133,8 @@ async fn serve(
         serves_ui: ui_dir.is_some(),
         serves_hop: enable_hop,
     };
-    let credentials = (enable_hop || enable_accounts || status.serves_ui)
-        .then(|| auth::CredentialStore::new(state.root(), enable_accounts))
+    let credentials = (enable_hop || enable_accounts || enable_model_refresh || status.serves_ui)
+        .then(|| auth::CredentialStore::new(state.root(), enable_accounts || enable_model_refresh))
         .transpose()?;
     let hop = credentials
         .clone()
@@ -143,29 +148,47 @@ async fn serve(
         .transpose()?;
     let discovery = credentials
         .clone()
-        .filter(|_| enable_hop || enable_accounts)
+        .filter(|_| enable_hop || enable_accounts || enable_model_refresh)
         .map(|store| discovery::Discovery::new(state.clone(), store))
         .transpose()?;
     let panel = ui_dir
         .zip(credentials.clone())
-        .map(|(directory, store)| {
-            panel::routes(directory, store, status)
-                .map(|panel| panel.merge(aggregate::routes(state.clone())))
-        })
+        .map(|(directory, store)| panel::routes(directory, store, status))
         .transpose()?;
+    let refresh = discovery
+        .clone()
+        .zip(credentials.clone())
+        .filter(|_| enable_model_refresh);
+    let catalog = (status.serves_ui || enable_model_refresh)
+        .then(|| aggregate::CatalogService::new(state.clone(), refresh))
+        .transpose()?;
+    if let Some(catalog) = &catalog {
+        catalog.start();
+    }
     let services = [
         hop.map(hop::Hop::routes),
         accounts.map(auth::Accounts::routes),
         discovery.map(discovery::Discovery::routes),
         panel,
+        catalog.as_ref().map(aggregate::CatalogService::routes),
     ];
     println!("OpenBot Rust listening on http://{authority}");
+    let draining = catalog.clone();
     let result = axum::serve(
         listener,
         server::router(state, authority, services.into_iter().flatten()),
     )
-    .with_graceful_shutdown(shutdown())
+    .with_graceful_shutdown(async move {
+        shutdown().await;
+        if let Some(catalog) = draining {
+            catalog.stop();
+        }
+    })
     .await;
+    if let Some(catalog) = catalog {
+        catalog.stop();
+        catalog.wait_idle().await;
+    }
     if let Some(credentials) = credentials {
         credentials.wait_for_renewals().await;
     }

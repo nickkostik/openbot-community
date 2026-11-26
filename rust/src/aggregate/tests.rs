@@ -2,11 +2,12 @@ use std::fs;
 
 use axum::{
     body::{Body, to_bytes},
-    http::{Request, header},
+    http::{Request, StatusCode, header},
 };
 use tower::ServiceExt;
 
 use super::*;
+use crate::server::State;
 
 const HOST: &str = "127.0.0.1:39080";
 const GO: &str = "https://opencode.ai/inference/go";
@@ -119,7 +120,8 @@ async fn model_catalog_endpoint_scopes_lookup_to_the_saved_provider() {
     )
     .unwrap();
     let state = State::new(root.path().to_owned(), false).unwrap();
-    let app = crate::server::router(state.clone(), HOST.into(), [routes(state)]);
+    let service = CatalogService::new(state.clone(), None).unwrap();
+    let app = crate::server::router(state, HOST.into(), [service.routes()]);
     for (id, status) in [
         ("opencode-2", StatusCode::OK),
         ("unknown", StatusCode::NOT_FOUND),

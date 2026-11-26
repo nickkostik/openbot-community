@@ -1,6 +1,6 @@
 # OpenBot Rust transition
 
-The Rust candidate implements bot settings, model routing, provider inference, OpenAI account handling, and on-demand provider discovery. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
+The Rust candidate implements bot settings, model routing, provider inference, OpenAI account handling, and catalog discovery and refresh. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
 
 ## Build and compare
 
@@ -41,11 +41,13 @@ Each successful refresh stores the replacement credentials atomically in the exi
 
 ## Compare provider discovery
 
-With either `--enable-hop` or `--enable-accounts`, send `POST /api/providers/{id}/fetch-models` to query a saved provider. The response preserves the listed model order, model types, recommended protocols, and reasoning capabilities. Each OpenCode Go account uses its own credential and catalog session at the direct Go endpoint. Existing OpenAI token formats select their corresponding model endpoints. The request leaves the saved catalog in place. [OpenCode model list API](https://opencode.ai/docs/console/api/models/) · [OpenAI models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+With `--enable-hop`, `--enable-accounts`, or `--enable-model-refresh`, send `POST /api/providers/{id}/fetch-models` to query a saved provider. The response preserves the listed model order, model types, recommended protocols, and reasoning capabilities. Each OpenCode Go account uses its own credential and catalog session at the direct Go endpoint. Existing OpenAI token formats select their corresponding model endpoints. The request leaves the saved catalog in place. [OpenCode model list API](https://opencode.ai/docs/console/api/models/) · [OpenAI models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+
+Add `--enable-model-refresh` in disposable state to run manual and scheduled refreshes. The Models page's catalog Refresh action calls `POST /api/model-catalog/refresh` and polls `GET /api/model-catalog`. The public sources refresh even when `openbot-model-refresh.json` disables scheduled discovery. When scheduling is enabled, the worker checks after 15 seconds and then once per minute. The interval defaults to six hours. The worker records the next due time in `openbot-model-refresh-status.json`, saves the aggregate cache in `openbot-model-catalog.json`, and merges eligible provider models into the latest plan. Existing IDs, bindings, and active and per-bot reasoning choices survive the merge. Use disposable credentials for staging. Live OpenAI renewal still needs authorized account credentials. [Models.dev catalog format](https://github.com/anomalyco/models.dev/blob/dev/README.md) · [OpenRouter model list](https://openrouter.ai/docs/api/api-reference/models/get-models)
 
 ## Open the panel in rehearsal
 
-Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads the saved catalog and listener status from Rust. The candidate loads `openbot-model-catalog.json` at startup and uses it for the aggregate count and provider-scoped metadata. Live catalog refresh, logs, and the remaining control routes are pending.
+Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads the saved catalog and listener status from Rust. The candidate loads `openbot-model-catalog.json` at startup and uses it for the aggregate count and provider-scoped metadata. Logs and the remaining control routes are pending.
 
 ## Cutover checklist
 
@@ -56,7 +58,8 @@ Build the existing panel with `npm run build`, then point `--ui-dir` at the gene
 - [x] Port on-demand provider discovery. Compare both Go and both NVIDIA accounts with the current service and verify OpenAI plan and OAuth descriptors with fixtures.
 - [x] Serve the existing built panel and state readback through Rust. Open Models in Chromium, exercise sign-in cancellation, and save and reload a disposable account key.
 - [x] Read the existing aggregate model catalog through Rust. Verify both global and provider-scoped lookups for the installed model IDs.
-- [ ] Port scheduled catalog refresh and complete account authorization with the live desktop browser.
+- [x] Port manual and scheduled catalog refresh. Compare the full aggregate cache and direct provider merge with the current worker. Test the browser action and restart schedule.
+- [ ] Complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [ ] Port log settings and retention, usage, compaction, and provider-specific cache identifiers. Replay representative long histories with structured tool results and compare content and cache counters.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.

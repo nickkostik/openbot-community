@@ -20,7 +20,7 @@ use crate::{
     catalog::Catalog,
     lease::Lease,
     routing::CredentialKind,
-    server::{PLAN_MAX_BYTES, read_json},
+    server::{PLAN_MAX_BYTES, read_bytes, read_json},
 };
 
 const STORE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -73,8 +73,57 @@ impl CredentialStore {
         Ok(public_fields(&self.plan()?, &self.load()?))
     }
 
+    pub fn refresh_plan<T>(
+        &self,
+        update: impl FnOnce(&mut Value) -> Result<(bool, T), AuthError>,
+    ) -> Result<Option<T>, AuthError> {
+        let _write = self.write_lock()?;
+        let path = self.root().join("openbot-plan.json");
+        let Some(before) = read_bytes(&path, PLAN_MAX_BYTES).map_err(|_| store_error())? else {
+            return Ok(None);
+        };
+        let mut plan = serde_json::from_slice(&before).map_err(|_| store_error())?;
+        let (changed, result) = update(&mut plan)?;
+        if changed {
+            let staged = stage(self.root(), &plan, PLAN_MAX_BYTES)?;
+            let latest = read_bytes(&path, PLAN_MAX_BYTES).map_err(|_| store_error())?;
+            if latest.as_deref() != Some(before.as_slice()) {
+                return Err(AuthError::conflict("Catalog changed during refresh."));
+            }
+            self.commit(staged, "openbot-plan.json")?;
+        }
+        Ok(Some(result))
+    }
+
+    pub fn save_cache(
+        &self,
+        filename: &str,
+        value: &Value,
+        max_bytes: u64,
+    ) -> Result<(), AuthError> {
+        let _write = self.write_lock()?;
+        self.commit(stage(self.root(), value, max_bytes)?, filename)
+    }
+
     pub async fn authorize(&self, provider: &str, origin: &str) -> Result<Authorized, AuthError> {
-        let (raw, credential) = self.read(provider, origin).await?;
+        self.authorize_inner(provider, origin, false).await
+    }
+
+    pub async fn authorize_configured(
+        &self,
+        provider: &str,
+        origin: &str,
+    ) -> Result<Authorized, AuthError> {
+        self.authorize_inner(provider, origin, true).await
+    }
+
+    async fn authorize_inner(
+        &self,
+        provider: &str,
+        origin: &str,
+        configured: bool,
+    ) -> Result<Authorized, AuthError> {
+        let (raw, credential) = self.read(provider, origin, configured).await?;
         let oauth = match credential {
             Credential::Key(token) => return Ok(Authorized::key(token)),
             Credential::OAuth(oauth) => oauth,
@@ -105,7 +154,7 @@ impl CredentialStore {
             .map_err(|_| AuthError::unavailable("OpenAI renewal did not finish."))?
             .clone()
             .ok_or_else(|| AuthError::unavailable("OpenAI renewal did not finish."))?;
-        let (_, current) = self.read(provider, origin).await?;
+        let (_, current) = self.read(provider, origin, configured).await?;
         match current {
             Credential::Key(token) => Ok(Authorized::key(token)),
             Credential::OAuth(oauth)
@@ -137,15 +186,40 @@ impl CredentialStore {
         }
     }
 
-    async fn read(&self, provider: &str, origin: &str) -> Result<(String, Credential), AuthError> {
+    async fn read(
+        &self,
+        provider: &str,
+        origin: &str,
+        configured: bool,
+    ) -> Result<(String, Credential), AuthError> {
         let store = self.clone();
         let provider = provider.to_owned();
+        let expected = configured.then(|| origin.to_owned());
         let raw = blocking(move || {
-            raw_secret(&store.load()?, &provider)
+            let _write = store.0.writes.lock().map_err(|_| store_error())?;
+            let verify = || -> Result<(), AuthError> {
+                if let Some(expected) = &expected
+                    && !store.plan()?["catalog"]["providers"]
+                        .as_array()
+                        .is_some_and(|rows| {
+                            rows.iter()
+                                .any(|row| row["id"] == provider && row["origin"] == *expected)
+                        })
+                {
+                    return Err(AuthError::conflict(
+                        "The provider changed before discovery.",
+                    ));
+                }
+                Ok(())
+            };
+            verify()?;
+            let raw = raw_secret(&store.load()?, &provider)
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     AuthError::new(StatusCode::NOT_FOUND, "No credential for this provider.")
-                })
+                })?;
+            verify()?;
+            Ok(raw)
         })
         .await?;
         let credential = Credential::parse(&raw)?;

@@ -167,7 +167,10 @@ fn field<'a>(row: &'a Value, primary: &str, alias: &str) -> &'a Value {
     }
 }
 
-fn positive<'a>(values: impl IntoIterator<Item = &'a Value>, ceiling: u64) -> Option<u64> {
+pub(crate) fn positive<'a>(
+    values: impl IntoIterator<Item = &'a Value>,
+    ceiling: u64,
+) -> Option<u64> {
     values.into_iter().find_map(|value| {
         let number = value
             .as_f64()
@@ -176,11 +179,11 @@ fn positive<'a>(values: impl IntoIterator<Item = &'a Value>, ceiling: u64) -> Op
     })
 }
 
-fn first_array<const N: usize>(values: [&Value; N]) -> Option<&Vec<Value>> {
+pub(crate) fn first_array<const N: usize>(values: [&Value; N]) -> Option<&Vec<Value>> {
     values.into_iter().find_map(Value::as_array)
 }
 
-fn modality_list(items: Option<&Vec<Value>>, mime: bool) -> Vec<String> {
+pub(crate) fn modality_list(items: Option<&Vec<Value>>, mime: bool) -> Vec<String> {
     let mut found = Vec::new();
     for item in items.into_iter().flatten().filter_map(Value::as_str) {
         let token = if mime {
@@ -230,61 +233,95 @@ fn go_reasoning(reasoning: &Value) -> Option<Vec<Effort>> {
 }
 
 fn vendor_reasoning(row: &Value) -> Vec<Effort> {
-    let reasoning = &row["reasoning"];
-    let mandatory = reasoning["mandatory"] == true;
-    let mut levels: BTreeSet<_> = first_array([
-        &row["reasoningLevels"],
-        &row["reasoning_levels"],
-        &row["supported_reasoning_levels"],
-        &row["supported_reasoning_efforts"],
-    ])
-    .into_iter()
-    .flatten()
-    .filter_map(|value| {
-        if value.is_object() {
-            vendor_effort(&value["effort"])
-        } else {
-            vendor_effort(value)
-        }
-    })
-    .collect();
-    levels.extend(
-        first_array([
-            &reasoning["supported_efforts"],
-            &reasoning["supportedEfforts"],
+    let facts = VendorReasoning::read(row);
+    if facts.supported(false) {
+        facts.allow_list(false, false)
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) struct VendorReasoning {
+    levels: BTreeSet<Effort>,
+    declared: bool,
+    mandatory: bool,
+    toggle: bool,
+}
+
+impl VendorReasoning {
+    pub(crate) fn read(row: &Value) -> Self {
+        let reasoning = &row["reasoning"];
+        let mandatory = reasoning["mandatory"] == true;
+        let mut levels: BTreeSet<_> = first_array([
+            &row["reasoningLevels"],
+            &row["reasoning_levels"],
+            &row["supported_reasoning_levels"],
+            &row["supported_reasoning_efforts"],
         ])
         .into_iter()
         .flatten()
-        .filter_map(vendor_effort),
-    );
-    let mut toggle = false;
-    for option in first_array([&row["reasoning_options"], &row["reasoningOptions"]])
-        .into_iter()
-        .flatten()
-    {
-        match option["type"].as_str() {
-            Some("toggle") => toggle = true,
-            Some("effort") => levels.extend(
-                option["values"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(vendor_effort),
-            ),
-            _ => {}
+        .filter_map(|value| {
+            if value.is_object() {
+                vendor_effort(&value["effort"])
+            } else {
+                vendor_effort(value)
+            }
+        })
+        .collect();
+        levels.extend(
+            first_array([
+                &reasoning["supported_efforts"],
+                &reasoning["supportedEfforts"],
+            ])
+            .into_iter()
+            .flatten()
+            .filter_map(vendor_effort),
+        );
+        let mut toggle = false;
+        for option in first_array([&row["reasoning_options"], &row["reasoningOptions"]])
+            .into_iter()
+            .flatten()
+        {
+            match option["type"].as_str() {
+                Some("toggle") => toggle = true,
+                Some("effort") => levels.extend(
+                    option["values"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(vendor_effort),
+                ),
+                _ => {}
+            }
+        }
+        Self {
+            levels,
+            declared: *reasoning == true || reasoning.is_object(),
+            mandatory,
+            toggle,
         }
     }
-    if levels.is_empty() && !toggle {
-        if *reasoning != true && !reasoning.is_object() {
-            return Vec::new();
+
+    pub(crate) fn supported(&self, hint: bool) -> bool {
+        self.declared || self.toggle || !self.levels.is_empty() || hint
+    }
+
+    pub(crate) fn allow_list(mut self, hint: bool, route_scoped: bool) -> Vec<Effort> {
+        if !self.supported(hint) {
+            return vec![Effort::Default];
         }
-        levels.insert(Effort::High);
+        let explicit = !self.levels.is_empty();
+        let optional = !self.mandatory
+            && (!route_scoped || self.toggle || !explicit || self.levels.contains(&Effort::None));
+        if !explicit && !self.toggle {
+            self.levels.insert(Effort::High);
+        }
+        self.levels.insert(Effort::Default);
+        if optional {
+            self.levels.insert(Effort::None);
+        } else {
+            self.levels.remove(&Effort::None);
+        }
+        self.levels.into_iter().collect()
     }
-    levels.insert(Effort::Default);
-    if mandatory {
-        levels.remove(&Effort::None);
-    } else {
-        levels.insert(Effort::None);
-    }
-    levels.into_iter().collect()
 }

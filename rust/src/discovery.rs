@@ -1,4 +1,4 @@
-mod models;
+pub(crate) mod models;
 
 use std::{io, time::Duration};
 
@@ -55,10 +55,10 @@ impl Discovery {
             .with_state(self)
     }
 
-    async fn list(&self, provider: &Provider) -> Result<Value, ListError> {
+    pub(crate) async fn list(&self, provider: &Provider) -> Result<Value, ListError> {
         let origin = parse_origin(&provider.origin).ok_or_else(invalid_origin)?;
         let go = direct_go(&origin);
-        if (provider.id == "opencode" || provider.id.starts_with("opencode-")) && !go {
+        if provider.id.to_ascii_lowercase().starts_with("opencode") && !go {
             return Err(ListError::new(
                 StatusCode::BAD_REQUEST,
                 "not-supported",
@@ -67,7 +67,7 @@ impl Discovery {
         }
         let authorized = self
             .credentials
-            .authorize(&provider.id, &provider.origin)
+            .authorize_configured(&provider.id, &provider.origin)
             .await
             .map_err(ListError::from_auth)?;
         let plan = authorized.kind == CredentialKind::ChatGptPlan;
@@ -233,7 +233,7 @@ async fn decode(mut response: reqwest::Response, plan: bool) -> Result<Value, Li
 }
 
 #[derive(Debug)]
-struct ListError {
+pub(crate) struct ListError {
     status: StatusCode,
     kind: &'static str,
     message: String,
@@ -241,6 +241,10 @@ struct ListError {
 }
 
 impl ListError {
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
     fn new(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
@@ -257,6 +261,9 @@ impl ListError {
     fn from_auth(error: AuthError) -> Self {
         let mut result = match error.status {
             StatusCode::NOT_FOUND => Self::new(StatusCode::CONFLICT, "no-secret", error.message),
+            StatusCode::CONFLICT => {
+                Self::new(StatusCode::CONFLICT, "provider-changed", error.message)
+            }
             _ => Self::new(StatusCode::UNAUTHORIZED, "unauthorized", error.message),
         };
         result.upstream = error.upstream;

@@ -39,7 +39,7 @@ impl AuthError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
-    fn unavailable(message: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 

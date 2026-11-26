@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use axum::{
@@ -23,19 +23,28 @@ use crate::{
 };
 
 pub const PLAN_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const BOT_MODELS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+pub const BOT_MODELS_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct State(Arc<Store>);
 
 struct Store {
     root: PathBuf,
-    writer: Option<Lease>,
+    _writer: Option<Lease>,
+    writable: bool,
     writes: Mutex<()>,
 }
 
 impl State {
     pub fn new(root: PathBuf, writable: bool) -> io::Result<Self> {
+        Self::with_catalog_writer(root, writable, false)
+    }
+
+    pub fn with_catalog_writer(
+        root: PathBuf,
+        writable: bool,
+        catalog_writer: bool,
+    ) -> io::Result<Self> {
         let root = root.canonicalize()?;
         if !root.is_dir() {
             return Err(io::Error::new(
@@ -43,12 +52,13 @@ impl State {
                 "expected an OpenBot state directory",
             ));
         }
-        let writer = writable
+        let writer = (writable || catalog_writer)
             .then(|| Lease::acquire(&root.join(".openbot-rust-bot-settings.lock")))
             .transpose()?;
         Ok(Self(Arc::new(Store {
             root,
-            writer,
+            _writer: writer,
+            writable,
             writes: Mutex::new(()),
         })))
     }
@@ -79,6 +89,13 @@ impl State {
 
     pub fn catalog(&self) -> io::Result<Catalog> {
         self.0.catalog()
+    }
+
+    pub fn lock_bot_settings(&self) -> io::Result<MutexGuard<'_, ()>> {
+        self.0
+            .writes
+            .lock()
+            .map_err(|_| io::Error::other("Bot settings writer is unavailable"))
     }
 }
 
@@ -123,6 +140,15 @@ impl Store {
 }
 
 pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
+    read_bytes(path, maximum)?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
+        .transpose()
+}
+
+pub fn read_bytes(path: &Path, maximum: u64) -> io::Result<Option<Vec<u8>>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -136,9 +162,7 @@ pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
     if (bytes.len() as u64) > maximum {
         return Err(io::ErrorKind::FileTooLarge.into());
     }
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    Ok(Some(bytes))
 }
 
 pub fn read_mode(root: &Path) -> io::Result<&'static str> {
@@ -226,7 +250,7 @@ async fn update_bot_models(
     AxumState(state): AxumState<State>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    if state.0.writer.is_none() {
+    if !state.0.writable {
         return error(
             StatusCode::METHOD_NOT_ALLOWED,
             "The comparison listener is read-only.",

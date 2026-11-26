@@ -4,8 +4,36 @@ import type { Provider } from "../api/types";
 import { Button } from "./ui";
 import { Field, Input, PasswordInput } from "./fields";
 import { Modal } from "./overlays";
+import { ChatGPTSignIn } from "./ChatGPTSignIn";
 
 type ApiType = "chat-completions" | "responses" | "anthropic";
+
+export function ChatGPTProviderDialog({ provider, onClose, onSave, busy }: {
+  provider: Provider;
+  onClose: () => void;
+  onSave: (credentialId: string) => Promise<void>;
+  busy: boolean;
+}) {
+  const [credentialId, setCredentialId] = useState<string | null>(null);
+  return <Modal open onClose={onClose} dismissable={!busy} labelledBy="chatgpt-provider-title">
+    <div className="dialog">
+      <div className="dialog__head">
+        <span className="dialog__icon dialog__icon--accent"><KeyRound aria-hidden="true" /></span>
+        <div>
+          <div className="dialog__title" id="chatgpt-provider-title">Connect ChatGPT</div>
+          <div className="dialog__desc">Use this ChatGPT plan for {provider.name}.</div>
+        </div>
+      </div>
+      <div className="dialog__body">
+        <ChatGPTSignIn providerId={provider.id} ready={credentialId !== null} onReady={setCredentialId} />
+      </div>
+      <div className="dialog__foot">
+        <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button variant="primary" loading={busy} disabled={!credentialId || busy} onClick={() => { if (credentialId) void onSave(credentialId); }}>Save login</Button>
+      </div>
+    </div>
+  </Modal>;
+}
 
 export function EditProviderDialog({
   open,

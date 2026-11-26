@@ -20,6 +20,7 @@ export const DEFAULT_SECRETS_PATH = "/home/box/sand-data/secrets.json" as const;
 export const SERVICE_PORT = 9280 as const;
 export const LOOPBACK = "127.0.0.1" as const;
 export const HIGH_AGENT_MAX_TOKENS = 65536 as const;
+export const ALIBABA_TOKEN_PLAN_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 /**
  * Outbound max_tokens safety ceiling.
  *
@@ -70,7 +71,7 @@ export type ProviderParameter = { readonly id: string; readonly value: string };
 export type ApiType = "chat-completions" | "responses" | "anthropic";
 
 /** default = omit thinking fields. none = send an explicit off. */
-export type ReasoningLevel = "default" | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningLevel = "default" | "none" | "on" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Modality = "text" | "image" | "video" | "audio";
 
@@ -97,8 +98,11 @@ export type Provider = {
   readonly apiType?: ApiType;
 };
 
+export type ModelType = "chat" | "embedding" | "decision" | "image" | "other";
+
 export type Model = {
   readonly apiType?: ApiType;
+  readonly modelType?: ModelType;
   readonly id: ModelId;
   readonly providerId: ProviderId;
   readonly slug: ModelSlug;

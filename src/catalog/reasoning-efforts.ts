@@ -2,8 +2,8 @@ import { keepReasoningOrder, parseReasoningLevel } from "../domain/model.ts";
 import { type ReasoningLevel } from "../domain/types.ts";
 
 /**
- * Vendor effort token → OpenBot reasoning level. `xhigh` and `max` stay distinct
- * chips; unknown tokens are dropped. Do not use `parseReasoningLevels` here —
+ * Vendor effort token → OpenBot reasoning level. Explicit `minimal`, `low`,
+ * `xhigh`, and `max` stay distinct. Do not use `parseReasoningLevels` here —
  * an empty list becomes DEFAULT_REASONING_LEVELS, which is wrong for catalog.
  */
 
@@ -12,8 +12,8 @@ const VENDOR_EFFORT_TO_LEVEL: { readonly [token: string]: ReasoningLevel } = {
   none: "none",
   off: "none",
   disabled: "none",
+  minimal: "minimal",
   low: "low",
-  minimal: "low",
   min: "low",
   medium: "medium",
   med: "medium",

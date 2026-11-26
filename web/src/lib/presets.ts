@@ -1,9 +1,13 @@
 /** Curated provider presets for setup and add-provider flows. */
 
+import { OPENCODE_GO_ORIGIN } from "../../../src/domain/opencode-go.ts";
+import { ALIBABA_TOKEN_PLAN_ORIGIN } from "../../../src/domain/types.ts";
+
 export type FreeModel = { id: string; name: string };
 
-/** Catalog provider id for the curated OpenCode Zen preset. */
-export const OPENCODE_ZEN_PROVIDER_ID = "opencode";
+export function hasOpenCodeZenFreeModels(provider: { id: string; origin: string }): boolean {
+  return provider.id === "opencode" && /^https:\/\/opencode\.ai\/zen(?:\/v1)?\/*$/.test(provider.origin);
+}
 
 /** $0 models listed by models.dev/providers/opencode. Ordered as display order. */
 export const OPENCODE_ZEN_FREE_MODELS: readonly FreeModel[] = [
@@ -35,9 +39,9 @@ export const PRESETS: readonly Preset[] = [
     docsUrl: "https://docs.api.nvidia.com/nim/reference/llm-apis",
   },
   {
-    id: "opencode-go", name: "OpenCode Go", origin: "https://opencode.ai/zen/go/v1", model: "",
+    id: "opencode-go", name: "OpenCode Go", origin: OPENCODE_GO_ORIGIN, model: "",
     hint: "Use your Go or Go Plus subscription key. Each account gets its own model family and direct connection.",
-    docsUrl: "https://docs.opencode.ai/docs/go/",
+    docsUrl: "https://opencode.ai/docs/console/go/",
   },
   {
     id: "openai",
@@ -57,7 +61,12 @@ export const PRESETS: readonly Preset[] = [
     hint: "One API key, many providers. OpenRouter receives the standard referer and title headers.",
   },
   {
-    id: "alibaba-token-plan", name: "Alibaba Coding Plan", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", model: "",
+    id: "alibaba-token-plan", name: "Alibaba Token Plan", origin: ALIBABA_TOKEN_PLAN_ORIGIN, model: "",
+    hint: "Use the sk-sp- key for your Singapore Token Plan. Add each subscription as a separate account.",
+    docsUrl: "https://www.alibabacloud.com/help/en/model-studio/base-url",
+  },
+  {
+    id: "alibaba-coding-plan", name: "Alibaba Coding Plan", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", model: "",
     hint: "Use your Coding Plan sk-sp- key. The international endpoint deducts Coding Plan quota.",
     docsUrl: "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/coding-plan",
   },

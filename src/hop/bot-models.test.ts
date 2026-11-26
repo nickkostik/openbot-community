@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -183,9 +185,32 @@ test("handleCompletions falls back to the wildcard when the body already carries
   });
 });
 
-const efforts = ["default", "none", "low", "medium", "high", "xhigh", "max"];
+const efforts = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const secondBot = "00000000-0000-4000-8000-0d23e78bd190";
 const otherMessages = [{ role: "system", content: `/home/box/agent-data/agents/${secondBot}/profile.json` }, { role: "user", content: "hello" }];
+
+test("the hop rejects non-chat requests before upstream and falls back from an older bot assignment", async () => {
+  const upstream = await captureUpstream();
+  const hop = await startHop({ upstreamPort: upstream.port, assignments: { [botId]: "zhipu:embedding" },
+    models: [
+      { id: "zhipu:chat", providerId: "zhipu", slug: "chat", parameters: [] },
+      { id: "zhipu:embedding", providerId: "zhipu", slug: "embedding", modelType: "embedding", parameters: [] },
+    ] });
+  try {
+    const rejected = await post(hop.port, { model: "zhipu:embedding", messages: otherMessages });
+    assert.equal(rejected.status, 400);
+    assert.deepEqual(rejected.json, { error: { message: "embedding does not support bot chat", code: "model_not_chat" } });
+    assert.equal(upstream.getBody(), undefined);
+    const fallback = await post(hop.port, { model: "zhipu:embedding", messages: botMessages });
+    assert.equal(fallback.status, 200);
+    assert.equal(upstream.getBody()?.model, "chat");
+  } finally {
+    hop.child.kill("SIGTERM");
+    upstream.server.close();
+    await new Promise<void>((resolve) => hop.child.once("exit", () => resolve()));
+    rmSync(hop.dir, { recursive: true, force: true });
+  }
+});
 
 async function withReasoningHop(
   apiType: string,
@@ -251,9 +276,9 @@ test("internal compaction requests retain their model and effort despite bot ove
   });
 });
 
-test("Responses sends selected max and Off effort in reasoning.effort", async () => {
+test("Responses sends each selected effort in reasoning.effort", async () => {
   await withReasoningHop("responses", async (hop, upstream) => {
-    for (const effort of ["max", "none"]) {
+    for (const effort of ["minimal", "low", "max", "none"]) {
       writeFileSync(hop.settingsFile, JSON.stringify({ reasoning: { [botId]: { "zhipu:a": effort } } }));
       assert.equal((await post(hop.port, { model: "gpt-6.1-sol", messages: botMessages })).status, 200);
       assert.match(upstream.getPath(), /\/responses$/);
@@ -282,4 +307,53 @@ test("per-bot GLM reasoning overrides a legacy fast parameter", async () => {
     assert.equal(upstream.getBody()?.reasoning_effort, "high");
     assert.deepEqual(upstream.getBody()?.thinking, { type: "enabled" });
   }, "glm-5.3-flash");
+});
+
+test("a per-bot GLM-5.3 effort preserves the direct Z.AI thinking history choice", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-zai-bot-reasoning-"));
+  const upstream = await captureUpstream();
+  const originalEnv = process.env;
+  process.env = {
+    ...originalEnv,
+    OPENBOT_SAND_DATA: dir,
+    OPENBOT_LOGS: path.join(dir, "logs.json"),
+    OPENBOT_PLAN: path.join(dir, "plan.json"),
+    OPENBOT_SECRETS: path.join(dir, "secrets.json"),
+    OPENBOT_BOT_MODELS: path.join(dir, "bot-models.json"),
+    OPENBOT_MAPS: fileURLToPath(new URL("../../payload/provider-maps.cjs", import.meta.url)),
+  };
+  t.after(() => {
+    upstream.server.close();
+    process.env = originalEnv;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const model = "z2:glm-5.3-flash";
+  writeFileSync(path.join(dir, "plan.json"), JSON.stringify({ kind: "custom", catalog: {
+    providers: [{ id: "z2", origin: "https://api.z.ai/api/coding/paas/v4", apiType: "chat-completions" }],
+    models: [{ id: model, providerId: "z2", slug: "glm-5.3-flash", parameters: [],
+      reasoningLevels: ["default", "low", "high", "max"], activeReasoning: "low" }],
+    bindings: [],
+  } }));
+  writeFileSync(path.join(dir, "secrets.json"), JSON.stringify({ providers: { z2: "fixture-key" } }));
+  writeFileSync(path.join(dir, "bot-models.json"), JSON.stringify({ reasoning: { [botId]: { [model]: "max" } } }));
+
+  t.mock.method(https, "request", (options: http.RequestOptions, onResponse: (response: http.IncomingMessage) => void) => {
+    assert.equal(options.hostname, "api.z.ai");
+    assert.equal(options.path, "/api/coding/paas/v4/chat/completions");
+    return http.request({ ...options, protocol: "http:", hostname: "127.0.0.1", port: upstream.port, agent: undefined }, onResponse);
+  });
+  const { handleHopRequest } = createRequire(import.meta.url)("../../payload/hop-handler.cjs") as { handleHopRequest: http.RequestListener };
+  const hop = await listen(handleHopRequest);
+  t.after(() => hop.server.close());
+
+  for (const clearThinking of [false, true, "false"]) {
+    const response = await post(hop.port, { model, messages: botMessages,
+      reasoning_effort: "low", thinking: { type: "disabled", clear_thinking: clearThinking } });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.getBody()?.reasoning_effort, "max");
+    assert.deepEqual(upstream.getBody()?.thinking, typeof clearThinking === "boolean"
+      ? { type: "enabled", clear_thinking: clearThinking }
+      : { type: "enabled" });
+  }
 });

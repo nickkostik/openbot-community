@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
-import { type Catalog, type SecretBytes, MAX_OUTPUT_TOKENS_CEILING } from "../domain/types.ts";
-import { keepReasoningOrder } from "../domain/model.ts";
+import { type ApiType, type Catalog, type ModelType, type SecretBytes, MAX_OUTPUT_TOKENS_CEILING } from "../domain/types.ts";
+import { keepReasoningOrder, parseModelType } from "../domain/model.ts";
 import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
+import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
+import { DEEPSEEK_ORIGIN, documentedReasoningPolicy, isDirectDeepSeekOrigin } from "../../payload/provider-maps.cjs";
+import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
  * Source A: fetch a provider's own model list from its base URL + /v1/models,
@@ -14,7 +17,7 @@ import { documentedOpenAIModel } from "../domain/openai-models.ts";
 /** Minimal fetch surface so tests can mock the outbound network. */
 export type FetchLike = (
   url: string,
-  init?: { readonly headers?: Record<string, string>; readonly signal?: AbortSignal },
+  init?: { readonly headers?: Record<string, string>; readonly signal?: AbortSignal; readonly redirect?: RequestRedirect },
 ) => Promise<{ readonly status: number; readonly ok: boolean; text(): Promise<string> }>;
 
 export const PROVIDER_MODELS_TOTAL_TIMEOUT_MS = 30_000;
@@ -33,6 +36,9 @@ export type FetchedModel = {
   readonly maxOutputTokens: number | null;
   readonly modalities: string[];
   readonly reasoningLevels: string[];
+  readonly apiType?: ApiType;
+  readonly modelType?: ModelType;
+  readonly providerMetadata?: "opencode-go";
 };
 
 export type FetchErrorKind = "unauthorized" | "unreachable" | "not-supported" | "parse-error" | "internal";
@@ -143,21 +149,48 @@ function modelIdFrom(item: Record<string, unknown>): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function normalizeEntry(item: Record<string, unknown>, id: string): FetchedModel {
+function goRecommendedProtocol(value: unknown): ApiType | undefined {
+  if (value === "messages") return "anthropic";
+  if (value === "responses" || value === "chat-completions") return value;
+  return undefined;
+}
+
+function goReasoningLevels(reasoning: Record<string, unknown> | undefined): string[] | undefined {
+  if (reasoning?.supported === false) return ["default"];
+  if (reasoning?.supported !== true) return undefined;
+  const levels = new Set(["default", ...filterReasoningLevels(reasoning.effort)]);
+  if (reasoning.toggle === true) levels.add("none");
+  return keepReasoningOrder(levels);
+}
+
+function normalizeEntry(item: Record<string, unknown>, id: string, directGo: boolean): FetchedModel {
   const architecture = nestedRecord(item, "architecture");
   const topProvider = nestedRecord(item, "top_provider");
+  const modelType = directGo && typeof item.type === "string" && item.type.trim()
+    ? parseModelType(item.type) ?? "other" : undefined;
+  const goChat = modelType === "chat";
+  const limit = goChat ? nestedRecord(item, "limit") : undefined;
+  const capabilities = goChat ? nestedRecord(item, "capabilities") : undefined;
+  const apiType = goChat ? goRecommendedProtocol(item.recommended_api) : undefined;
+  const mimeTypes = goChat ? firstArray(nestedRecord(item, "modalities")?.input) : undefined;
+  const goModalities = filterModalities(mimeTypes?.map(value => typeof value === "string" ? value.split("/", 1)[0] : value));
+  const reasoningLevels = goReasoningLevels(nestedRecord(capabilities, "reasoning"));
   return {
     id,
     name: stringOrNull(item.name ?? item.display_name),
-    contextLength: firstPositiveInt(item.context_length, item.contextLength, item.context_window, item.contextWindow, architecture?.context_length),
-    maxOutputTokens: firstSaneOutputTokens(
+    contextLength: firstPositiveInt(limit?.context, item.context_length, item.contextLength, item.context_window, item.contextWindow, architecture?.context_length),
+    // The native limit.output is published capacity. Model import applies the
+    // existing generation budget, including when the published limit is larger.
+    maxOutputTokens: firstPositiveInt(limit?.output) ?? firstSaneOutputTokens(
       topProvider?.max_completion_tokens,
       item.max_completion_tokens,
       item.maxOutputTokens,
       item.max_tokens,
     ),
-    modalities: filterModalities(firstArray(item.input_modalities, architecture?.input_modalities, item.modalities)),
-    reasoningLevels: [...fetchedReasoningLevels(item)],
+    modalities: goModalities.length ? goModalities : filterModalities(firstArray(item.input_modalities, architecture?.input_modalities, item.modalities)),
+    reasoningLevels: modelType && !goChat ? [] : reasoningLevels ?? [...fetchedReasoningLevels(item)],
+    ...(apiType ? { apiType } : {}),
+    ...(modelType ? { modelType, providerMetadata: "opencode-go" } : {}),
   };
 }
 
@@ -167,6 +200,7 @@ function normalizeEntry(item: Record<string, unknown>, id: string): FetchedModel
  */
 export function normalizeProviderModels(
   raw: unknown,
+  directGo = false,
 ): { models: FetchedModel[]; skipped: number; skippedReasons: string[] } | undefined {
   const list = modelListFrom(raw);
   if (list === undefined) {
@@ -190,7 +224,7 @@ export function normalizeProviderModels(
       continue;
     }
     seen.add(id);
-    models.push(normalizeEntry(item, id));
+    models.push(normalizeEntry(item, id, directGo));
   }
   return { models, skipped: skippedReasons.length, skippedReasons };
 }
@@ -200,6 +234,10 @@ export function modelsUrl(origin: string): string {
   const base = origin.replace(/\/+$/, "");
   if (!base) {
     throw new Error("openbot: provider origin is empty");
+  }
+  if (isDirectDeepSeekOrigin(base)) return `${DEEPSEEK_ORIGIN}/v1/models`;
+  if (isOpenCodeGoOrigin(base)) {
+    return `${OPENCODE_GO_ORIGIN}/v1/models`;
   }
   if (
     /\/v1$/i.test(base) ||
@@ -261,7 +299,9 @@ async function fetchProviderModels(input: {
   headers?: Record<string, string>;
   fetchFn: FetchLike;
   totalTimeoutMs: number;
+  chatGPTPlan?: boolean;
 }): Promise<FetchProviderResult> {
+  const directGo = isOpenCodeGoOrigin(input.url.replace(/\/v1\/models$/, ""));
   let oauthAccessToken: string | null = null;
   if (isOpenAIOAuthSecret(input.secret)) {
     try {
@@ -280,15 +320,17 @@ async function fetchProviderModels(input: {
         ...(input.headers ?? {}),
         ...((oauthAccessToken ?? input.secret) ? { Authorization: "Bearer " + (oauthAccessToken ?? input.secret) } : {}),
         Accept: "application/json",
-        ...(input.providerId.startsWith("opencode") ? { "x-opencode-session": opencodeModelsSession(input.providerId) } : {}),
+        ...(directGo ? { "User-Agent": "OpenBot/catalog" } : {}),
+        ...(directGo || input.providerId.startsWith("opencode") ? { "x-opencode-session": opencodeModelsSession(input.providerId) } : {}),
       },
       signal: AbortSignal.timeout(input.totalTimeoutMs),
+      ...(input.chatGPTPlan ? { redirect: "error" as const } : {}),
     });
   } catch (err) {
     return { ok: false, errorKind: "unreachable", message: timeoutMessage(err) };
   }
   if (res.status === 401 || res.status === 403) {
-    return { ok: false, errorKind: "unauthorized", message: "provider rejected the API key", upstreamStatus: res.status };
+    return { ok: false, errorKind: "unauthorized", message: input.chatGPTPlan ? "OpenAI rejected the ChatGPT login. Sign in again." : "provider rejected the API key", upstreamStatus: res.status };
   }
   if (res.status === 404 || res.status === 405 || res.status === 501) {
     return {
@@ -313,7 +355,10 @@ async function fetchProviderModels(input: {
   } catch {
     return { ok: false, errorKind: "parse-error", message: "provider returned a non-JSON body" };
   }
-  const normalized = normalizeProviderModels(parsed);
+  if (input.chatGPTPlan && isRecord(parsed) && Array.isArray(parsed.models)) {
+    parsed = { models: parsed.models.filter(item => isRecord(item) && item.visibility === "list") };
+  }
+  const normalized = normalizeProviderModels(parsed, directGo);
   if (normalized === undefined) {
     return { ok: false, errorKind: "parse-error", message: "provider response is not a model list" };
   }
@@ -354,22 +399,36 @@ export async function fetchModelsForProvider(input: {
     return { status: 409, body: { error: { kind: "no-secret", message: "no API key stored for this provider" } } };
   }
   let result: FetchProviderResult;
+  let isChatGPTPlan = false;
   try {
     const isOpenAIOAuth = isOpenAIOAuthSecret(secret);
-    if (isOpenAIOAuth && input.refreshOAuth) {
+    let plan = readChatGPTPlanCredential(secret);
+    isChatGPTPlan = plan !== undefined;
+    if (plan && !isDirectOrigin(provider.origin)) {
+      return { status: 400, body: { error: { kind: "not-supported", message: "ChatGPT plan login requires the direct OpenAI API." } } };
+    }
+    if ((isOpenAIOAuth && input.refreshOAuth) || plan) {
       const credential = JSON.parse(secret) as Record<string, unknown>;
       if (!(Number(credential.expiresAt) > Date.now() / 1000 + 60)) {
         try {
+          if (!input.refreshOAuth) throw new Error("Refresh unavailable");
           secret = await input.refreshOAuth(provider.id) as SecretBytes;
-          if (!isOpenAIOAuthSecret(secret)) throw new Error("Refresh did not persist an OAuth credential");
+          if (plan) {
+            const refreshed = readChatGPTPlanCredential(secret);
+            if (!refreshed || refreshed.clientId !== plan.clientId || refreshed.subject !== plan.subject) throw new Error("Account changed");
+            plan = refreshed;
+          } else if (!isOpenAIOAuthSecret(secret)) {
+            throw new Error("Refresh did not persist an OAuth credential");
+          }
         } catch {
           return { status: 401, body: { error: { kind: "unauthorized", message: "OpenAI login could not be refreshed. Sign in again or import a current login file." } } };
         }
       }
     }
     result = await fetchProviderModels({
-      url: isOpenAIOAuth ? OPENAI_CODEX_MODELS_URL : modelsUrl(provider.origin),
-      secret: secret ?? "",
+      url: plan ? `${CHATGPT_PLAN_ORIGIN}/models` : isOpenAIOAuth ? OPENAI_CODEX_MODELS_URL : modelsUrl(provider.origin),
+      secret: plan?.accessToken ?? secret,
+      chatGPTPlan: isChatGPTPlan,
       providerId: provider.id,
       ...(isOpenAIOAuth
         ? {
@@ -401,14 +460,24 @@ export async function fetchModelsForProvider(input: {
   // independently advertised route limits. Codex's supplied context wins.
   let nativeOpenAI = false;
   try { nativeOpenAI = new URL(provider.origin).hostname === "api.openai.com"; } catch { /* Reported during fetch above. */ }
-  const models = nativeOpenAI ? result.models.map((model) => {
-    const facts = documentedOpenAIModel(model.id);
-    return facts ? {
+  const models = result.models.map((model) => {
+    const policy = documentedReasoningPolicy(model.id, provider.origin);
+    if (policy) return {
       ...model,
-      contextLength: model.contextLength ?? facts.contextTokens,
-      reasoningLevels: [...facts.reasoningLevels],
-    } : model;
-  }) : result.models;
+      reasoningLevels: [...policy.levels],
+      ...(policy.maxOutputTokens ? { maxOutputTokens: Math.min(model.maxOutputTokens ?? Infinity, policy.maxOutputTokens) } : {}),
+      ...(policy.apiType ? { apiType: policy.apiType } : {}),
+    };
+    if (!nativeOpenAI) return model;
+    const facts = documentedOpenAIModel(model.id);
+    return {
+      ...model,
+      ...(isChatGPTPlan ? { apiType: "responses" as const } : {}),
+      ...(facts ? { contextLength: model.contextLength ?? facts.contextTokens,
+        maxOutputTokens: model.maxOutputTokens ?? facts.maxOutputTokens ?? null,
+        reasoningLevels: isChatGPTPlan && model.reasoningLevels.length > 1 ? model.reasoningLevels : [...facts.reasoningLevels] } : {}),
+    };
+  });
   return {
     status: 200,
     body: {

@@ -172,7 +172,7 @@ function AppInner() {
   if (route.kind === "bots") {
     page = <Bots />;
   } else if (route.kind === "models") {
-    page = <Models providerId={route.providerId} />;
+    page = <Models key={signature} providerId={route.providerId} />;
   } else if (route.kind === "setup") {
     page = <Setup />;
   } else if (route.kind === "settings") {

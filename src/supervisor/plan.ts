@@ -9,7 +9,8 @@ import {
   type ModelId,
   type ModelSlug,
 } from "../domain/types.ts";
-import { normalizeModel } from "../domain/model.ts";
+import { makeModel, normalizeModel } from "../domain/model.ts";
+import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 
 export type CompiledAgent = {
   readonly modelId: ModelSlug;
@@ -73,12 +74,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function normalizeCatalog(catalog: Catalog): Catalog {
+  const origins = new Map(catalog.providers.map((provider) => [provider.id, provider.origin]));
   const models: Model[] = [];
   for (const row of catalog.models) {
     const model = normalizeModel(row);
-    if (model) {
-      models.push(model);
-    }
+    if (!model) continue;
+    const policy = documentedReasoningPolicy(model.slug, origins.get(model.providerId) ?? "");
+    // The normalizer has already interpreted legacy "none" as provider default.
+    const requestedEffort = row.activeReasoning === "none" ? model.activeReasoning : row.activeReasoning;
+    models.push(policy ? makeModel({ ...model, reasoningLevels: policy.levels,
+      maxOutputTokens: Math.min(model.maxOutputTokens, policy.maxOutputTokens ?? Infinity),
+      activeReasoning: documentedReasoningEffort(policy, requestedEffort) ?? "default" }) : model);
   }
   return {
     providers: catalog.providers.map((provider) => ({
@@ -102,19 +108,9 @@ export function catalogFromPlanJson(raw: string | undefined): Catalog {
   if (!Array.isArray(catalog.providers) || !Array.isArray(catalog.models) || !Array.isArray(catalog.bindings)) {
     return { providers: [], models: [], bindings: [] };
   }
-  const models: Model[] = [];
-  for (const row of catalog.models) {
-    const model = normalizeModel(row);
-    if (model) {
-      models.push(model);
-    }
-  }
-  return {
-    providers: (catalog.providers as Catalog["providers"]).map((provider) => ({
-      ...provider,
-      apiType: provider.apiType === "responses" || provider.apiType === "anthropic" ? provider.apiType : "chat-completions",
-    })),
-    models,
+  return normalizeCatalog({
+    providers: catalog.providers as Catalog["providers"],
+    models: catalog.models,
     bindings: catalog.bindings as Catalog["bindings"],
-  };
+  });
 }

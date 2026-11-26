@@ -19,8 +19,10 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
+var { DEEPSEEK_ORIGIN, documentedReasoningEffort, documentedReasoningPolicy, isDirectDeepSeekOrigin, isZaiGlm53Route } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
+var chatGPTPlan = require("./chatgpt-plan.cjs");
 
 var TIMEOUT_MS = Number(process.env.OPENBOT_HOP_TIMEOUT || "1800000");
 var HIGH_AGENT_MAX_TOKENS = 65536;
@@ -429,6 +431,13 @@ function completionsUrl(origin) {
 function upstreamUrl(origin, apiType) {
   var b = String(origin || "").replace(/\/+$/, "");
   if (!b) throw new Error("openbot-hop: missing origin");
+  if (isDirectDeepSeekOrigin(b)) {
+    if (apiType === "responses") return DEEPSEEK_ORIGIN + "/responses";
+    b = DEEPSEEK_ORIGIN + (apiType === "anthropic" ? "/anthropic/v1" : "/v1");
+  }
+  if (/^https:\/\/opencode\.ai\/(?:inference\/go(?:\/(?:openai|anthropic)\/v1)?|zen\/go(?:\/v1)?)$/.test(b)) {
+    b = "https://opencode.ai/inference/go" + (apiType === "anthropic" ? "/anthropic/v1" : "/openai/v1");
+  }
   if (apiType === "responses") return /\/responses$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/responses" : b + "/v1/responses");
   if (apiType === "anthropic") return /\/messages$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/messages" : b + "/v1/messages");
   return completionsUrl(b);
@@ -526,17 +535,24 @@ function openAIOAuthAccountId(credential) {
 
 function readOpenAIOAuthCredential(providerId) {
   var raw = loadStoredSecret(providerId);
+  var plan = chatGPTPlan.readCredential(raw);
+  if (plan) return plan;
   try {
     var parsed = JSON.parse(raw);
     return isRecord(parsed) && parsed.kind === "openai-oauth" ? parsed : null;
   } catch (err) { return null; }
 }
 
-function requestOAuthRefresh(refreshToken) {
+function requestOAuthRefresh(credential) {
   return new Promise(function (resolve, reject) {
-    var payload = Buffer.from("grant_type=refresh_token&client_id=app_EMoamEEZ73f0CkXaXp7hrann&refresh_token=" + encodeURIComponent(refreshToken), "utf8");
+    var plan = credential.kind === "chatgpt-plan";
+    var endpoint = new URL(plan ? chatGPTPlan.TOKEN_ENDPOINT : "https://auth.openai.com/oauth/token");
+    var refresh = new URLSearchParams({ grant_type: "refresh_token", refresh_token: credential.refreshToken,
+      client_id: plan ? credential.clientId : "app_EMoamEEZ73f0CkXaXp7hrann" });
+    if (plan) refresh.set("resource", chatGPTPlan.ORIGIN);
+    var payload = Buffer.from(refresh.toString(), "utf8");
     var req = https.request({
-      hostname: "auth.openai.com", path: "/oauth/token", method: "POST",
+      hostname: endpoint.hostname, path: endpoint.pathname, method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(payload.length), Accept: "application/json" },
     }, function (res) {
       collectResponse(res).then(function (out) {
@@ -558,18 +574,20 @@ function requestOAuthRefresh(refreshToken) {
 // Persist a rotated OAuth credential. Returns true when the new value is on
 // disk; a false return means the caller must treat the refresh as failed so a
 // later request never proceeds with an access token that was not persisted.
-function saveStoredSecret(providerId, value) {
+function saveStoredSecret(providerId, value, expected) {
+  var tmp = "";
   try {
     var file = secretsPath();
     var store = readJson(file) || { providers: {} };
     if (!isRecord(store.providers)) store.providers = {};
+    if (store.providers[providerId] !== expected) return false;
     store.providers[providerId] = value;
-    var tmp = file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    tmp = file + "." + nodeCrypto.randomUUID() + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, file);
     return true;
-  } catch (err) { /* refresh persistence is best-effort; the request still uses the new token */ }
-  return false;
+  } catch (err) { return false; }
+  finally { if (tmp) try { fs.unlinkSync(tmp); } catch (err) { /* renamed or never created */ } }
 }
 
 // Per-provider single-flight refresh. Concurrent requests share one token
@@ -577,18 +595,23 @@ function saveStoredSecret(providerId, value) {
 // writer can overwrite it with credentials minted from the now-consumed token.
 var oauthRefreshFlights = {};
 
-function refreshOpenAIOAuthCredential(providerId, parsed) {
+function refreshOpenAIOAuthCredential(providerId, parsed, raw) {
   if (oauthRefreshFlights[providerId]) return oauthRefreshFlights[providerId];
-  var flight = requestOAuthRefresh(parsed.refreshToken)
+  var flight = requestOAuthRefresh(parsed)
     .then(function (refreshed) {
       var next = Object.assign({}, parsed, {
         accessToken: refreshed.access_token,
         refreshToken: refreshed.refresh_token || parsed.refreshToken,
         expiresAt: Math.floor(Date.now() / 1000) + Math.max(1, Number(refreshed.expires_in) || 3600),
       });
-      var refreshedAccountId = openAIOAuthAccountId({ idToken: refreshed.id_token, accessToken: refreshed.access_token });
-      if (refreshedAccountId) next.chatgptAccountId = refreshedAccountId;
-      if (!saveStoredSecret(providerId, JSON.stringify(next))) {
+      if (parsed.kind === "chatgpt-plan") {
+        if (refreshed.scope !== undefined) next.scopes = typeof refreshed.scope === "string" ? refreshed.scope.split(/\s+/).filter(Boolean) : [];
+        if (!chatGPTPlan.hasPlanScopes(next.scopes)) throw new Error("ChatGPT plan usage permission was not retained. Sign in again.");
+      } else {
+        var refreshedAccountId = openAIOAuthAccountId({ idToken: refreshed.id_token, accessToken: refreshed.access_token });
+        if (refreshedAccountId) next.chatgptAccountId = refreshedAccountId;
+      }
+      if (!saveStoredSecret(providerId, JSON.stringify(next), raw)) {
         throw new Error("openbot-hop: OpenAI OAuth credential was not persisted");
       }
       return next.accessToken;
@@ -600,19 +623,28 @@ function refreshOpenAIOAuthCredential(providerId, parsed) {
   return flight;
 }
 
-async function loadKey(providerId, provider) {
+async function loadKey(providerId, provider, expectedCredentialKind) {
   var raw = loadStoredSecret(providerId);
   if (!raw) return "";
-  var parsed;
-  try { parsed = JSON.parse(raw); } catch (err) { return raw; }
-  if (!isRecord(parsed) || parsed.kind !== "openai-oauth" || typeof parsed.accessToken !== "string") return raw;
+  var plan = chatGPTPlan.readCredential(raw);
+  var parsed = plan;
+  if (!parsed) {
+    try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
+  }
+  var legacyOAuth = isRecord(parsed) && parsed.kind === "openai-oauth" && typeof parsed.accessToken === "string";
+  var kind = plan ? plan.kind : (legacyOAuth ? "openai-oauth" : "api-key");
+  if (expectedCredentialKind !== undefined && expectedCredentialKind !== kind) {
+    throw new Error("Provider login changed while preparing the request. Retry the turn.");
+  }
+  if (kind === "api-key") return raw;
+  if (plan && !chatGPTPlan.isDirectOrigin(provider && provider.origin)) throw new Error("ChatGPT plan login requires the direct OpenAI API.");
   var expiresAt = Number(parsed.expiresAt || 0);
   if (expiresAt > Math.floor(Date.now() / 1000) + 60) return parsed.accessToken;
   if (typeof parsed.refreshToken !== "string" || !parsed.refreshToken) {
     throw new Error("openbot-hop: OpenAI OAuth credential is expired with no refresh token");
   }
   try {
-    return await refreshOpenAIOAuthCredential(providerId, parsed);
+    return await refreshOpenAIOAuthCredential(providerId, parsed, raw);
   } catch (err) {
     throw new Error("openbot-hop: OpenAI OAuth refresh failed (" + err.message + ")");
   }
@@ -689,6 +721,20 @@ function applyMaps(body, ctx) {
   if (maps && typeof maps.applyProviderReasoningControls === "function") {
     maps.applyProviderReasoningControls(body, ctx);
   }
+}
+
+function encodeUpstreamBody(body, route, apiType) {
+  var origin = route.provider.origin;
+  applyMaps(body, {
+    modelId: route.model.slug,
+    baseUrl: origin,
+    apiType: apiType,
+    maxMode: false,
+    parameters: hopParameters(route.model),
+  });
+  if (apiType === "responses") return protocolConverters.chatToResponses(body, isDirectDeepSeekOrigin(origin));
+  if (apiType === "anthropic") return protocolConverters.chatToAnthropic(body);
+  return body;
 }
 
 // Serialized size of the outbound body WITHOUT its messages: tools, model,
@@ -788,6 +834,10 @@ function openUpstream(urlStr, body, key, inbound, apiType) {
   delete outboundBody.epochId;
   delete outboundBody.epoch_id;
   if (inbound && inbound.openaiOAuth === true) outboundBody = protocolConverters.prepareCodexResponses(outboundBody);
+  if (inbound && inbound.chatGPTPlan === true) {
+    outboundBody.store = false;
+    outboundBody.stream = true;
+  }
   var payload = Buffer.from(JSON.stringify(outboundBody), "utf8");
   var wantStream = outboundBody.stream === true;
   var headers = {
@@ -1633,8 +1683,7 @@ function buildInjectionOutbound(baseBody, messages, route, apiType, maxCompletio
     else next.max_tokens = maxCompletionTokens;
   }
   applyMaxTokens(next, route.model, apiType);
-  applyMaps(next, { modelId: route.model.slug, baseUrl: route.provider.origin, maxMode: false, parameters: hopParameters(route.model) });
-  var outbound = apiType === "responses" ? protocolConverters.chatToResponses(next) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(next) : next;
+  var outbound = encodeUpstreamBody(next, route, apiType);
   outbound.__openbot_api_type = apiType;
   noteWireBytes(outbound);
   return outbound;
@@ -1947,7 +1996,7 @@ async function handleCompletionsInner(req, res) {
       appendEventSafe({
         type: "bot-models.stale",
         severity: "WARN",
-        message: "Bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is no longer in the catalog; using the global model.",
+        message: "Bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is unavailable for chat; using the global model.",
         metadata: { botId: assignment.botId, modelId: assignment.modelId },
       });
       if (requested === assignment.modelId) {
@@ -1964,10 +2013,26 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 400, unknown);
       return;
     }
+    if (!botModels.modelSupportsChat(route.model)) {
+      var unsupported = { error: { message: route.model.slug + " does not support bot chat", code: "model_not_chat" } };
+      fields.model = route.model.slug;
+      fields.providerId = route.provider.id;
+      fields.providerName = route.provider.name;
+      record({ status: 400, error: unsupported.error.message, responseBody: unsupported });
+      sendJson(res, 400, unsupported);
+      return;
+    }
+    var reasoningPolicy = documentedReasoningPolicy(route.model.slug, route.provider.origin);
     var botReasoning = botSettings && botModels.resolveReasoning(body && body.messages, route.model, botSettings);
+    if (botReasoning && reasoningPolicy) {
+      var effectiveEffort = documentedReasoningEffort(reasoningPolicy, botReasoning.reasoningEffort);
+      if (effectiveEffort) botReasoning.reasoningEffort = effectiveEffort;
+      botReasoning.stale = !effectiveEffort;
+    }
     if (botReasoning && !botReasoning.stale) {
       route = Object.assign({}, route, { model: Object.assign({}, route.model, {
         activeReasoning: botReasoning.reasoningEffort,
+        reasoningLevels: reasoningPolicy ? reasoningPolicy.levels : route.model.reasoningLevels,
         // Legacy fast mode disables thinking before the effort map runs.
         // An explicit bot effort must win over that model-wide shortcut.
         parameters: Array.isArray(route.model.parameters) ? route.model.parameters.filter(function (p) { return p && p.id !== "fast"; }) : [],
@@ -1976,8 +2041,20 @@ async function handleCompletionsInner(req, res) {
       // normal provider maps and protocol converter then serialize it.
       delete body.reasoning_effort;
       delete body.reasoning;
-      delete body.thinking;
+      if (isZaiGlm53Route(route.model.slug, route.provider.origin) && isRecord(body.thinking)
+          && typeof body.thinking.clear_thinking === "boolean") {
+        // This setting controls prior reasoning history independently of effort.
+        body.thinking = { clear_thinking: body.thinking.clear_thinking };
+      } else {
+        delete body.thinking;
+      }
       delete body.enable_thinking;
+      if ((reasoningPolicy?.kind === "nvidia-nemotron-toggle" || reasoningPolicy?.kind === "nvidia-super-vl") && isRecord(body.chat_template_kwargs)) {
+        body.chat_template_kwargs = Object.assign({}, body.chat_template_kwargs);
+        delete body.chat_template_kwargs.enable_thinking;
+        delete body.chat_template_kwargs.reasoning_effort;
+        if (!Object.keys(body.chat_template_kwargs).length) delete body.chat_template_kwargs;
+      }
       if (isRecord(body.output_config)) {
         body.output_config = Object.assign({}, body.output_config);
         delete body.output_config.effort;
@@ -1987,8 +2064,9 @@ async function handleCompletionsInner(req, res) {
     fields.providerId = route.provider.id;
     fields.providerName = route.provider.name;
     var oauthCredential = readOpenAIOAuthCredential(route.provider.id);
-    var isOpenAIOAuth = oauthCredential !== null;
-    var apiType = protocolConverters.resolveApiType(route.model, route.provider, isOpenAIOAuth);
+    var isOpenAIOAuth = oauthCredential && oauthCredential.kind === "openai-oauth";
+    var isChatGPTPlan = oauthCredential && oauthCredential.kind === "chatgpt-plan";
+    var apiType = protocolConverters.resolveApiType(route.model, route.provider, Boolean(isOpenAIOAuth || isChatGPTPlan));
     body.model = route.model.slug;
     if (Array.isArray(body.messages)) {
       body.messages = toOpenAIMessages(body.messages);
@@ -2053,13 +2131,7 @@ async function handleCompletionsInner(req, res) {
     }
     var canonicalBody = Object.assign({}, body, { messages: Array.isArray(body.messages) ? body.messages.slice() : [] });
     applyMaxTokens(body, route.model, apiType);
-    applyMaps(body, {
-      modelId: route.model.slug,
-      baseUrl: route.provider.origin,
-      maxMode: false,
-      parameters: hopParameters(route.model),
-    });
-    var outboundBody = apiType === "responses" ? protocolConverters.chatToResponses(body) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(body) : body;
+    var outboundBody = encodeUpstreamBody(body, route, apiType);
     var __cacheOrigin = String((route.provider && route.provider.origin) || "");
     var __cacheScope = conversationId || (injectionContext && injectionContext.observed && injectionContext.observed.botId) || "";
     if (__cacheScope && body.openbot_internal_auxiliary === true) __cacheScope += "\u0000auxiliary";
@@ -2088,6 +2160,7 @@ async function handleCompletionsInner(req, res) {
       providerId: route.provider.id,
       providerOrigin: route.provider.origin,
       openaiOAuth: isOpenAIOAuth,
+      chatGPTPlan: isChatGPTPlan,
       chatgptAccountId: isOpenAIOAuth ? openAIOAuthAccountId(oauthCredential) : "",
       openaiSessionKey: isOpenAIOAuth && __cacheScope ? stableCacheKey(route.provider.id, __cacheScope, "") : "",
       opencodeSession: String(route.provider.id).indexOf("opencode") === 0
@@ -2096,7 +2169,7 @@ async function handleCompletionsInner(req, res) {
     };
     var key;
     try {
-      key = await loadKey(route.provider.id, route.provider);
+      key = await loadKey(route.provider.id, route.provider, oauthCredential ? oauthCredential.kind : "api-key");
     } catch (keyErr) {
       var refreshFailure = { error: { message: keyErr.message } };
       record({ status: 503, error: keyErr.message, responseBody: refreshFailure });
@@ -2109,7 +2182,7 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 503, noSecret);
       return;
     }
-    var upstream = resolveUpstreamUrl(route.provider, isOpenAIOAuth, apiType);
+    var upstream = isChatGPTPlan ? chatGPTPlan.ORIGIN + "/responses" : resolveUpstreamUrl(route.provider, isOpenAIOAuth, apiType);
     fields.upstreamEndpoint = upstream;
     var out;
     if (body.stream === true) {

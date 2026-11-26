@@ -3,6 +3,7 @@ import {
   MAX_OUTPUT_TOKENS_CEILING,
   type Model,
   type ModelId,
+  type ModelType,
   type Modality,
   type ProviderId,
   type ProviderParameter,
@@ -16,6 +17,8 @@ export const MAX_TOKEN_CAP = 10_000_000 as const;
 export const REASONING_LEVELS: readonly ReasoningLevel[] = [
   "default",
   "none",
+  "on",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -137,6 +140,15 @@ export function pickActiveReasoning(
   return levels[0] ?? "default";
 }
 
+export function parseModelType(value: unknown): ModelType | undefined {
+  return value === "chat" || value === "embedding" || value === "decision" ||
+    value === "image" || value === "other" ? value : undefined;
+}
+
+export function modelSupportsChat(model: Pick<Model, "modelType">): boolean {
+  return model.modelType === undefined || model.modelType === "chat";
+}
+
 export function makeModel(input: {
   id: ModelId;
   providerId: ProviderId;
@@ -147,12 +159,14 @@ export function makeModel(input: {
   activeReasoning?: unknown;
   modalities?: unknown;
   apiType?: unknown;
+  modelType?: unknown;
   parameters?: readonly ProviderParameter[];
   catalogLimits?: unknown;
 }): Model {
   const facts = input.providerId === "openai" ? documentedOpenAIModel(input.slug) : undefined;
   const reasoningLevels = parseReasoningLevels(facts?.reasoningLevels ?? input.reasoningLevels);
   const catalogLimits = parseCatalogLimits(input.catalogLimits);
+  const modelType = parseModelType(input.modelType);
   return {
     id: input.id,
     providerId: input.providerId,
@@ -165,6 +179,7 @@ export function makeModel(input: {
     modalities: parseModalities(input.modalities),
     parameters: input.parameters ?? [],
     ...(catalogLimits ? { catalogLimits } : {}),
+    ...(modelType ? { modelType } : {}),
     ...(input.apiType === "responses" || input.apiType === "anthropic" || input.apiType === "chat-completions" ? { apiType: input.apiType } : {}),
   };
 }
@@ -215,6 +230,7 @@ export function normalizeModel(raw: unknown): Model | undefined {
   return makeModel({
     id: row.id as ModelId,
     providerId: row.providerId as ProviderId,
+    modelType: row.modelType,
     slug: row.slug as Model["slug"],
     contextTokens: row.contextTokens,
     maxOutputTokens: row.maxOutputTokens,

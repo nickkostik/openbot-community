@@ -1,4 +1,6 @@
 import { type AbsPath } from "../domain/types.ts";
+import { isOpenCodeGoOrigin } from "../domain/opencode-go.ts";
+import { documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 import { defaultFetch, filterModalities, type FetchLike } from "./provider-models.ts";
 import { documentedRouteModel } from "./documented-route-models.ts";
 import {
@@ -415,6 +417,9 @@ function routeOrigin(value: string): string | undefined {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return undefined;
+    // Share Go metadata across its old and new direct paths and keep offline caches readable.
+    if (isOpenCodeGoOrigin(value)) return "opencode.ai/zen/go";
+    if (url.hostname === "opencode.ai" && url.port) return undefined;
     // The native DeepSeek list omits /v1. Kimi's published .ai and its .com
     // coding endpoint are aliases; this does not mix in the Moonshot PAYG API.
     const host = url.hostname === "api.kimi.com" ? "api.kimi.ai" : url.hostname;
@@ -518,9 +523,14 @@ export function createCatalogManager(deps: {
     if (providerOrigin !== undefined) {
       const origin = routeOrigin(providerOrigin);
       if (!origin) return undefined;
-      return routes.get(origin + "\0" + modelId)
+      const model = routes.get(origin + "\0" + modelId)
         ?? routes.get(origin + "\0" + modelId.replace(/-\d{4}-\d{2}-\d{2}$/, ""))
         ?? documentedRouteModel(providerOrigin, modelId);
+      const policy = documentedReasoningPolicy(modelId, providerOrigin);
+      return model && policy ? {
+        ...model, reasoning: true, reasoningLevels: policy.levels,
+        ...(policy.maxOutputTokens ? { maxOutputTokens: Math.min(model.maxOutputTokens ?? Infinity, policy.maxOutputTokens) } : {}),
+      } : model;
     }
     const bare = bareModelId(modelId);
     const matches = modelsSharingBareId(bare);

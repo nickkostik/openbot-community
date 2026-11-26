@@ -23,3 +23,11 @@ test("Re-enable Custom preserves saved active model rather than first catalog en
   assert.equal(customActivationModel(state)?.id, "saved");
   assert.equal(customActivationModel({ ...state, activeModelId: null })?.id, "first");
 });
+
+test("Re-enable Custom only uses a chat-capable saved model", () => {
+  const embedding = { ...state.models[0]!, id: "embedding", modelType: "embedding" } as const;
+  const decision = { ...state.models[1]!, id: "decision", modelType: "decision" } as const;
+  assert.equal(customActivationModel({ ...state, activeModelId: embedding.id,
+    models: [embedding, decision, ...state.models] })?.id, "first");
+  assert.equal(customActivationModel({ ...state, activeModelId: null, models: [embedding, decision] }), undefined);
+});

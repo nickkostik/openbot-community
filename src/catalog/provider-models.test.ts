@@ -51,6 +51,29 @@ test("normalizeProviderModels rejects a body that is not a model list", () => {
   assert.equal(normalizeProviderModels("nope"), undefined);
 });
 
+test("direct Kimi Code discovery applies the documented K3.1 Pro efforts", async () => {
+  const entries = ["k3.1-pro", "k3.1-pro-highspeed", "k3"].map(id => ({
+    id, reasoning_levels: ["none", "low", "high", "max"],
+  }));
+  for (const origin of ["https://api.kimi.com/coding/v1", "https://api.kimi.ai/coding/", "https://example.test/coding/v1"]) {
+    const catalog = makeCatalog([{ id: "fixture", name: "Fixture", origin }]);
+    const result = await fetchModelsForProvider({
+      providerId: "fixture",
+      catalog,
+      secretStore: makeSecrets({ fixture: "fixture-key" }),
+      fetchFn: async (url) => {
+        assert.equal(url, modelsUrl(origin));
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(result.status, 200);
+    const models = (result.body as { models: { id: string; reasoningLevels: string[] }[] }).models;
+    const generic = ["default", "none", "low", "high", "max"];
+    const pro = origin.includes("example.test") ? generic : ["default", "low", "high", "max"];
+    assert.deepEqual(models.map(row => row.reasoningLevels), [pro, pro, generic]);
+  }
+});
+
 test("normalizeProviderModels drops entries without an id as skipped", () => {
   const result = normalizeProviderModels({
     data: [

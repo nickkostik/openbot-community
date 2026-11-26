@@ -4,6 +4,7 @@ import type http from "node:http";
 import { DEFAULT_REASONING_LEVELS, modelSupportsChat, REASONING_LEVELS } from "../domain/model.ts";
 import type { Catalog, ReasoningLevel } from "../domain/types.ts";
 import type { SupervisorDeps } from "../supervisor/observe.ts";
+import { canonicalKimiCodeProEffort, kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
 
 const EFFORTS: readonly string[] = REASONING_LEVELS;
 type Settings = { assignments: Record<string, string>; reasoning: Record<string, Record<string, ReasoningLevel>>; raw: Record<string, unknown> };
@@ -39,6 +40,20 @@ function writeSettings(current: SupervisorDeps, settings: Settings): void {
   fs.renameSync(temp, target);
 }
 
+function visibleReasoning(reasoning: Settings["reasoning"], catalog: Catalog): Settings["reasoning"] {
+  const origins = new Map(catalog.providers.map(provider => [provider.id, provider.origin]));
+  const kimiIds = new Set<string>(catalog.models
+    .filter(model => kimiCodeProReasoningLevels(model.slug, origins.get(model.providerId) ?? ""))
+    .map(model => model.id));
+  if (kimiIds.size === 0) return reasoning;
+  return Object.fromEntries(Object.entries(reasoning).map(([botId, choices]) => {
+    const effective = Object.entries(choices).map(([modelId, effort]) => {
+      return [modelId, kimiIds.has(modelId) ? canonicalKimiCodeProEffort(effort) ?? effort : effort];
+    });
+    return [botId, Object.fromEntries(effective)];
+  }));
+}
+
 export async function handleBotModelsApi(
   req: http.IncomingMessage, res: http.ServerResponse, url: URL, current: SupervisorDeps,
   readBody: (req: http.IncomingMessage) => Promise<string>,
@@ -48,8 +63,9 @@ export async function handleBotModelsApi(
   if (url.pathname !== "/api/bot-models" || (req.method !== "GET" && req.method !== "PUT")) return false;
   if (req.method === "GET") {
     const settings = readSettings(current);
-    const available = catalogFromPlan(current.fs.read(current.paths.plan)).models.filter(modelSupportsChat).map((model) => String(model.id));
-    sendJson(res, 200, { assignments: settings.assignments, reasoning: settings.reasoning, available });
+    const catalog = catalogFromPlan(current.fs.read(current.paths.plan));
+    const available = catalog.models.filter(modelSupportsChat).map((model) => String(model.id));
+    sendJson(res, 200, { assignments: settings.assignments, reasoning: visibleReasoning(settings.reasoning, catalog), available });
     return true;
   }
   let body: unknown;
@@ -107,6 +123,6 @@ export async function handleBotModelsApi(
   }
   try { writeSettings(current, next); }
   catch (err) { sendJson(res, 500, { error: err instanceof Error ? err.message : "could not save bot settings" }); return true; }
-  sendJson(res, 200, { assignments: next.assignments, reasoning: next.reasoning, available });
+  sendJson(res, 200, { assignments: next.assignments, reasoning: visibleReasoning(next.reasoning, catalog), available });
   return true;
 }

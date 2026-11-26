@@ -18,6 +18,25 @@ var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
 var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
+var KIMI_CODE_PRO_LEVELS = Object.freeze(["default", "low", "high", "max"]);
+var KIMI_CODE_PRO_EFFORTS = Object.freeze({
+  low: "low", minimum: "low", light: "low",
+  high: "high", medium: "high",
+  max: "max", xhigh: "max", ultra: "max",
+});
+
+function canonicalKimiCodeProEffort(value) {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(KIMI_CODE_PRO_EFFORTS, value)
+    ? KIMI_CODE_PRO_EFFORTS[value] : undefined;
+}
+
+function kimiCodeProReasoningLevels(modelId, baseUrl) {
+  if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(String(baseUrl || ""))
+      && /^k3\.1-pro(?:-highspeed)?$/.test(String(modelId || ""))) {
+    return KIMI_CODE_PRO_LEVELS;
+  }
+  return undefined;
+}
 
 function isGlmRoute(modelId, baseUrl) {
   return GLM_MODEL_RE.test(String(modelId || "")) || GLM_BASE_RE.test(String(baseUrl || ""));
@@ -33,6 +52,29 @@ function isGrokRoute(modelId, baseUrl) {
 
 function thinkingOff(body) {
   body.thinking = { type: "disabled" };
+}
+
+function applyKimiCodePro(body, parameters) {
+  var effort = canonicalKimiCodeProEffort(param(parameters, "effort")) || canonicalKimiCodeProEffort(body.reasoning_effort);
+  if (effort) body.reasoning_effort = effort;
+  else delete body.reasoning_effort;
+
+  // Both variants require thinking. Removing an unsupported control lets
+  // Kimi apply its default without changing the saved preference.
+  if (body.thinking && body.thinking.type === "disabled") delete body.thinking;
+  if (body.enable_thinking === false) delete body.enable_thinking;
+  if (body.output_config && typeof body.output_config === "object" && !Array.isArray(body.output_config)) {
+    var outputEffort = canonicalKimiCodeProEffort(body.output_config.effort);
+    var output = body.output_config;
+    if (outputEffort !== body.output_config.effort) {
+      output = Object.assign({}, body.output_config);
+      if (outputEffort) output.effort = outputEffort;
+      else delete output.effort;
+    }
+    if (Object.keys(output).length) body.output_config = output;
+    else delete body.output_config;
+  }
+  return body.reasoning_effort === undefined ? "kimi-code-pro-default" : "kimi-code-pro-effort";
 }
 
 function applyZaiGlm53(body, parameters) {
@@ -135,6 +177,9 @@ function applyProviderReasoningControls(body, ctx) {
   ctx = ctx || {};
   var modelId = String(ctx.modelId || "");
   var baseUrl = String(ctx.baseUrl || "");
+  if (kimiCodeProReasoningLevels(modelId, baseUrl)) {
+    return applyKimiCodePro(body, ctx.parameters);
+  }
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
@@ -151,6 +196,8 @@ function applyProviderReasoningControls(body, ctx) {
 }
 
 module.exports = {
+  canonicalKimiCodeProEffort: canonicalKimiCodeProEffort,
+  kimiCodeProReasoningLevels: kimiCodeProReasoningLevels,
   applyProviderReasoningControls: applyProviderReasoningControls,
   isGlmRoute: isGlmRoute,
   isZaiGlm53Route: isZaiGlm53Route,

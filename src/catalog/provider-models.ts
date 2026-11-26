@@ -5,6 +5,7 @@ import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
 import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
+import { kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
 import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
@@ -458,7 +459,10 @@ export async function fetchModelsForProvider(input: {
   // independently advertised route limits. Codex's supplied context wins.
   let nativeOpenAI = false;
   try { nativeOpenAI = new URL(provider.origin).hostname === "api.openai.com"; } catch { /* Reported during fetch above. */ }
-  const models = nativeOpenAI ? result.models.map((model) => {
+  const models = result.models.map((model) => {
+    const kimiLevels = kimiCodeProReasoningLevels(model.id, provider.origin);
+    if (kimiLevels) return { ...model, reasoningLevels: [...kimiLevels] };
+    if (!nativeOpenAI) return model;
     const facts = documentedOpenAIModel(model.id);
     return {
       ...model,
@@ -467,7 +471,7 @@ export async function fetchModelsForProvider(input: {
         maxOutputTokens: model.maxOutputTokens ?? facts.maxOutputTokens ?? null,
         reasoningLevels: isChatGPTPlan && model.reasoningLevels.length > 1 ? model.reasoningLevels : [...facts.reasoningLevels] } : {}),
     };
-  }) : result.models;
+  });
   return {
     status: 200,
     body: {

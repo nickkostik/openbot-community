@@ -74,10 +74,11 @@ async function withReasoningApi(run: (api: {
   const previous = process.env.OPENBOT_BOT_MODELS;
   process.env.OPENBOT_BOT_MODELS = file;
   const current = { paths: { sandData: root, plan: path.join(root, "plan.json") }, fs: { read: () => undefined } } as any;
-  const catalog = { models: [
+  const catalog = { providers: [{ id: "kimi", origin: "https://api.kimi.com/coding/v1" }], models: [
     { id: "one:full", reasoningLevels: ["default", "none", "minimal", "low", "high", "xhigh", "max"] },
     { id: "two:limited", reasoningLevels: ["default", "none", "low", "high"] },
     { id: "three:plain", reasoningLevels: ["default"] },
+    { id: "kimi:k3.1-pro", providerId: "kimi", slug: "k3.1-pro", reasoningLevels: ["default", "low", "high", "max"] },
   ] } as any;
   const invoke = async (method: string, body?: unknown, read?: () => Promise<string>) => {
     const out = response();
@@ -92,6 +93,20 @@ async function withReasoningApi(run: (api: {
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("Kimi Code per-bot aliases display as the effective effort without changing stored choices", async () => {
+  await withReasoningApi(async ({ file, put, get }) => {
+    const previous = JSON.stringify({ reasoning: { a: { "kimi:k3.1-pro": "xhigh", "one:full": "xhigh" } } });
+    fs.writeFileSync(file, previous);
+    assert.deepEqual((await get()).reasoning, { a: { "kimi:k3.1-pro": "max", "one:full": "xhigh" } });
+    assert.equal((await put({ botId: "a", reasoningModelId: "kimi:k3.1-pro", reasoningEffort: "none" })).status, 400);
+    assert.equal(fs.readFileSync(file, "utf8"), previous);
+    const updated = await put({ botId: "b", reasoningModelId: "kimi:k3.1-pro", reasoningEffort: "low" });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.body.reasoning.a["kimi:k3.1-pro"], "max");
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).reasoning.a["kimi:k3.1-pro"], "xhigh");
+  });
+});
 
 test("bot reasoning batch persists selected models without changing pins or unrelated choices", async () => {
   await withReasoningApi(async ({ file, put, get }) => {

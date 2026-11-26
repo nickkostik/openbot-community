@@ -4,6 +4,24 @@ import { catalogFromPlanJson } from "./plan.ts";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_REASONING_LEVELS } from "../domain/model.ts";
 import { HIGH_AGENT_MAX_TOKENS } from "../domain/types.ts";
 
+test("saved Kimi Code Pro routes display documented efforts and keep valid choices", () => {
+  const entries = [
+    ["kimi", "https://api.kimi.com/coding/v1", "k3.1-pro", "none"],
+    ["kimi-2", "https://api.kimi.ai/coding/v1", "k3.1-pro-highspeed", "xhigh"],
+    ["other", "https://example.test/v1", "k3.1-pro", "none"],
+  ];
+  const providers = entries.map(([id, origin]) => ({ id, name: id, origin }));
+  const models = entries.map(([providerId, , slug, activeReasoning]) => ({
+    id: providerId + ":" + slug, providerId, slug, reasoningLevels: ["default", "none", "high", "max"],
+    activeReasoning, contextTokens: 262144, maxOutputTokens: 8192,
+  }));
+  const raw = JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } });
+  const read = catalogFromPlanJson(raw);
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["default", "max", "none"]);
+  assert.deepEqual(read.models.map(row => row.reasoningLevels.includes("none")), [false, false, true]);
+  assert.ok(read.models.every(row => row.contextTokens === 262144 && row.maxOutputTokens === 8192));
+});
+
 test("catalogFromPlanJson fills model limits on old plan JSON", () => {
   const catalog = catalogFromPlanJson(
     JSON.stringify({

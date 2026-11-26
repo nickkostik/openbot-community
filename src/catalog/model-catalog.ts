@@ -1,5 +1,6 @@
 import { type AbsPath } from "../domain/types.ts";
 import { isOpenCodeGoOrigin } from "../domain/opencode-go.ts";
+import { kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
 import { defaultFetch, filterModalities, type FetchLike } from "./provider-models.ts";
 import { documentedRouteModel } from "./documented-route-models.ts";
 import {
@@ -522,9 +523,11 @@ export function createCatalogManager(deps: {
     if (providerOrigin !== undefined) {
       const origin = routeOrigin(providerOrigin);
       if (!origin) return undefined;
-      return routes.get(origin + "\0" + modelId)
+      const model = routes.get(origin + "\0" + modelId)
         ?? routes.get(origin + "\0" + modelId.replace(/-\d{4}-\d{2}-\d{2}$/, ""))
         ?? documentedRouteModel(providerOrigin, modelId);
+      const kimiLevels = kimiCodeProReasoningLevels(modelId, providerOrigin);
+      return model && kimiLevels ? { ...model, reasoning: true, reasoningLevels: [...kimiLevels] } : model;
     }
     const bare = bareModelId(modelId);
     const matches = modelsSharingBareId(bare);

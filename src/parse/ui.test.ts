@@ -50,6 +50,21 @@ function twoProviderCatalog(): Catalog {
   };
 }
 
+test("manual Kimi Code imports use the required-thinking choices in Official", () => {
+  const origin = "https://api.kimi.com/coding/v1";
+  const account = parseUiProviderSave({ kind: "add-provider", familyId: "kimi", name: "Kimi", origin, secret: "fixture" }, paths());
+  assert.ok(account.catalogWrite);
+  const imported = parseUiProviderSave({
+    kind: "upsert-model", providerId: "kimi", slug: "k3.1-pro",
+    reasoningLevels: ["none", "high"], activeReasoning: "none", contextTokens: 262144,
+  }, paths(), account.catalogWrite, { mode: "official" });
+  assert.equal(imported.desired.kind, "official");
+  const row = imported.catalogWrite?.models[0];
+  assert.equal(row?.contextTokens, 262144);
+  assert.deepEqual(row?.reasoningLevels, ["default", "low", "high", "max"]);
+  assert.equal(row?.activeReasoning, "default");
+});
+
 test("UI custom save keeps the secret off DesiredState", () => {
   const parsed = parseUiProviderSave(
     {

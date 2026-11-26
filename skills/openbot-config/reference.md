@@ -359,6 +359,14 @@ Off sends `reasoning_effort: "none"`. An explicit effort sends the selected valu
 
 Alibaba treats `none` as Off for these models and makes `reasoning_effort` and `thinking_budget` mutually exclusive. The provider can map compatible effort values to the same model-specific level. [Alibaba Cloud Chat Completions parameters](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions).
 
+### Direct Kimi Code K3.1 Pro reasoning
+
+This policy applies to the model IDs `k3.1-pro` and `k3.1-pro-highspeed` on `https://api.kimi.com/coding` or `https://api.kimi.ai/coding`, including their `/coding/v1` forms and optional trailing slashes. Their native efforts are `low`, `high` and `max`. Kimi uses High by default and rejects disabled thinking on these two models. [Kimi Code model configuration](https://www.kimi.com/code/docs/en/kimi-code/models).
+
+OpenBot offers Default, Low, High and Max. The same allow-list applies to direct discovery, provider-scoped catalog lookups for the route, effective choices read from an older saved plan, and manual model imports. This takes priority when a catalog advertises Off. Existing supported selections are retained. An unsupported active effort in an older row resolves to Default when OpenBot reads the catalog.
+
+On the matching route, a selected Low, High or Max supplies the outgoing `reasoning_effort`. If there is no selected supported effort, a supported incoming value can still apply. The hop drops unsupported values from `reasoning_effort` and `output_config.effort`, removes `thinking.type: "disabled"` or `enable_thinking: false`, and keeps other output configuration. With no supported effort left, Kimi applies its default. K3 and routes at other origins use their existing provider behavior.
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.

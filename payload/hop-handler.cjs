@@ -19,7 +19,7 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
-var { isZaiGlm53Route } = require("./provider-maps.cjs");
+var { canonicalKimiCodeProEffort, isZaiGlm53Route, kimiCodeProReasoningLevels } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
 var chatGPTPlan = require("./chatgpt-plan.cjs");
@@ -2006,6 +2006,11 @@ async function handleCompletionsInner(req, res) {
       return;
     }
     var botReasoning = botSettings && botModels.resolveReasoning(body && body.messages, route.model, botSettings);
+    if (botReasoning && kimiCodeProReasoningLevels(route.model.slug, route.provider.origin)) {
+      var kimiBotEffort = canonicalKimiCodeProEffort(botReasoning.reasoningEffort);
+      if (kimiBotEffort) botReasoning.reasoningEffort = kimiBotEffort;
+      botReasoning.stale = !kimiBotEffort && botReasoning.reasoningEffort !== "default";
+    }
     if (botReasoning && !botReasoning.stale) {
       route = Object.assign({}, route, { model: Object.assign({}, route.model, {
         activeReasoning: botReasoning.reasoningEffort,

@@ -13,6 +13,31 @@ const maps = require(mapsPath) as {
   ) => string;
 };
 
+test("Kimi Code Pro drops inherited Off and maps explicit allowed reasoning", () => {
+  const output = { effort: "none", format: { type: "json_schema" } };
+  const body = {
+    model: "k3.1-pro-highspeed", reasoning_effort: "none", thinking: { type: "disabled" },
+    enable_thinking: false, output_config: output,
+  };
+  for (const baseUrl of ["https://api.kimi.com/coding/v1", "https://api.kimi.ai/coding/"]) {
+    const ctx = { modelId: body.model, baseUrl, parameters: [{ id: "thinking", value: "false" }] };
+    const fallback = { ...body };
+    maps.applyProviderReasoningControls(fallback, ctx);
+    assert.deepEqual(fallback, { model: body.model, output_config: { format: output.format } });
+    const selected = { ...body };
+    maps.applyProviderReasoningControls(selected, { ...ctx, parameters: [{ id: "effort", value: "xhigh" }] });
+    assert.equal(selected.reasoning_effort, "max");
+    assert.equal(selected.thinking, undefined);
+    assert.equal(selected.enable_thinking, undefined);
+    assert.equal(output.effort, "none");
+  }
+  for (const [modelId, baseUrl] of [["k3", "https://api.kimi.com/coding/v1"], [body.model, "https://other.example/v1"]] as const) {
+    const other = { model: modelId, thinking: { type: "enabled" } };
+    maps.applyProviderReasoningControls(other, { modelId, baseUrl, parameters: [{ id: "thinking", value: "false" }] });
+    assert.deepEqual(other.thinking, { type: "disabled" });
+  }
+});
+
 const zaiCodingPlan = "https://api.z.ai/api/coding/paas/v4";
 
 test("direct Z.AI GLM-5.3 uses the selected effort and enables thinking after a switch", () => {

@@ -640,6 +640,29 @@ test("official legacy OpenAI limits remain scoped to the native endpoint", () =>
   assert.equal(manager.snapshot("gpt-3.5-turbo-0125", "https://another.example/v1").lookup?.found, false);
 });
 
+test("a stale route catalog cannot offer Off for direct Kimi Code K3.1 Pro", async () => {
+  const fs = memFs();
+  const fixture = {
+    kimi: { api: "https://api.kimi.ai/coding/v1", models: {
+      pro: { id: "k3.1-pro", reasoning: true, reasoning_options: ["none", "high"], limit: { context: 262144, output: 8192 } },
+    } },
+    other: { api: "https://example.test/v1", models: {
+      pro: { id: "k3.1-pro", reasoning: true, reasoning_options: ["none", "high"] },
+    } },
+  };
+  const fetchFn: FetchLike = async (url) => url.includes("models.dev") ? jsonResponse(200, fixture) : jsonResponse(503, {});
+  const first = createCatalogManager({ fs, cachePath, fetchFn });
+  await first.start();
+  const afterRestart = createCatalogManager({ fs, cachePath, fetchFn: async () => jsonResponse(503, {}) });
+  await afterRestart.start();
+  const lookup = afterRestart.snapshot("k3.1-pro", "https://api.kimi.com/coding/v1").lookup;
+  assert.ok(lookup?.found);
+  assert.equal(lookup.model.contextLength, 262144);
+  assert.deepEqual(lookup.model.reasoningLevels, ["default", "low", "high", "max"]);
+  const other = afterRestart.snapshot("k3.1-pro", "https://example.test/v1").lookup;
+  assert.ok(other?.found && other.model.reasoningLevels.includes("none"));
+});
+
 test("per-model SDK protocols stay scoped to the provider route and survive an offline restart", async () => {
   const fs = memFs();
   const manager = createCatalogManager({ fs, cachePath, fetchFn: async url => jsonResponse(200,

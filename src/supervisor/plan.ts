@@ -9,7 +9,8 @@ import {
   type ModelId,
   type ModelSlug,
 } from "../domain/types.ts";
-import { normalizeModel } from "../domain/model.ts";
+import { makeModel, normalizeModel } from "../domain/model.ts";
+import { canonicalKimiCodeProEffort, kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
 
 export type CompiledAgent = {
   readonly modelId: ModelSlug;
@@ -73,12 +74,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function normalizeCatalog(catalog: Catalog): Catalog {
+  const origins = new Map(catalog.providers.map((provider) => [provider.id, provider.origin]));
   const models: Model[] = [];
   for (const row of catalog.models) {
     const model = normalizeModel(row);
-    if (model) {
-      models.push(model);
-    }
+    if (!model) continue;
+    const reasoningLevels = kimiCodeProReasoningLevels(model.slug, origins.get(model.providerId) ?? "");
+    models.push(reasoningLevels ? makeModel({ ...model, reasoningLevels,
+      activeReasoning: canonicalKimiCodeProEffort(row.activeReasoning) ?? "default" }) : model);
   }
   return {
     providers: catalog.providers.map((provider) => ({
@@ -102,19 +105,9 @@ export function catalogFromPlanJson(raw: string | undefined): Catalog {
   if (!Array.isArray(catalog.providers) || !Array.isArray(catalog.models) || !Array.isArray(catalog.bindings)) {
     return { providers: [], models: [], bindings: [] };
   }
-  const models: Model[] = [];
-  for (const row of catalog.models) {
-    const model = normalizeModel(row);
-    if (model) {
-      models.push(model);
-    }
-  }
-  return {
-    providers: (catalog.providers as Catalog["providers"]).map((provider) => ({
-      ...provider,
-      apiType: provider.apiType === "responses" || provider.apiType === "anthropic" ? provider.apiType : "chat-completions",
-    })),
-    models,
+  return normalizeCatalog({
+    providers: catalog.providers as Catalog["providers"],
+    models: catalog.models,
     bindings: catalog.bindings as Catalog["bindings"],
-  };
+  });
 }

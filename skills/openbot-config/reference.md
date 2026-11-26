@@ -166,13 +166,13 @@ The provider editor prompts for a credential when a keyed account changes URL sc
 
 OpenCode accounts use their own direct Go credentials and the direct Go base `https://opencode.ai/inference/go` or a supported saved Go form. Alibaba Token Plan accounts require the Singapore base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and the matching `sk-sp-` subscription key. The Rust hop rejects retired N5, MetaKey and ModelHub routes already present in the catalog before dispatch.
 
-Use managed host controls for Official/Custom mode or tunnel changes. The legacy `upsert-provider` and `custom` save kinds require the candidate to be in Custom already.
+Use the [managed Rust Computer host](#rust-computer-host-management) for candidate Official/Custom transitions and the existing ingress controls for tunnel changes. The legacy `upsert-provider` and `custom` save kinds require the candidate to be in Custom already.
 
 #### Rust model selection and pauses
 
 Start the disposable candidate with `--enable-accounts` to use `POST /api/save` for a global model selection. Submit `{"kind":"use-model","modelId":"opencode-2:fixture-model","reasoning":"high"}` with an installed direct chat model and supported effort. Omit `reasoning` or send null to keep that model's saved effort. A successful save returns `activeModelId` and current panel state.
 
-Separate direct OpenCode Go accounts keep their own model IDs, protocols and credentials. `opencode:fixture-model` and `opencode-2:fixture-model` select independent routes. The save updates the global wildcard and preserves explicit conversation bindings, bot pins and per-bot efforts. A supported per-bot effort for the routed model still takes priority. With a saved plan in Official, this operation returns HTTP 409. Use the managed host controls for a mode change.
+Separate direct OpenCode Go accounts keep their own model IDs, protocols and credentials. `opencode:fixture-model` and `opencode-2:fixture-model` select independent routes. The save updates the global wildcard and preserves explicit conversation bindings, bot pins and per-bot efforts. A supported per-bot effort for the routed model still takes priority. In Official, a candidate without explicit host management returns HTTP 409. The [managed Rust Computer host](#rust-computer-host-management) can activate Custom.
 
 The candidate exposes both GET routes for pause readback. Add `--write-bot-settings` for atomic PUT writes in the disposable directory.
 
@@ -248,6 +248,25 @@ The candidate stores private 0600 `<key>.rust.json` checkpoints and `<key>.<job-
 The initial outgoing brief can use local excerpts while an eligible background summary runs. Summary jobs use the selected canonical route and effort when eligible, processing up to 65,536 estimated transcript tokens per chunk within the route's budget. Candidate routes must fit the estimated prompt and output allowance. Once a summary request is sent, advancing to another route requires a recognized context overflow. Approved alternates come from configured direct DeepSeek V4.1 or V4 Flash, GPT-6.1 Sol and Muse 1.3 Contributor routes. The route policy excludes Kimi K3 as a summarizer and excludes retired intermediary endpoints. If there is no eligible summary route, the local excerpt remains available.
 
 With request logging enabled, the chat record's `compaction` fields show estimated input and retained sizes, target, configured context, covered messages and summary source when available. Summary requests appear in separate records with `purpose: "compaction"` for usage reporting. Provider-reported usage is measured separately from the compaction estimates.
+
+#### Rust Computer host management
+
+To observe the Computer host from the panel, supply an absolute `--host-main` path or set `OPENBOT_HOST_MAIN` as its fallback. Observation reports the entrypoint shape and a matching Node process or known Desktop PID in the panel snapshot.
+
+For a separate Linux management rehearsal, use an owned, supervised Node host and disposable state. Supply the explicit `--host-main` and installed `--host-adapter` paths along with `--managed-service`, `--enable-hop`, `--enable-accounts`, the built UI and a fixed loopback port. `--host-node` optionally selects the Node executable for syntax checks and defaults to `node`.
+
+```bash
+openbot-runtime --sand-data /tmp/openbot-host-fixture/data --port 42880 \
+  --ui-dir /tmp/openbot-host-fixture/ui --managed-service --enable-hop --enable-accounts \
+  --host-main /tmp/openbot-host-fixture/host-main.cjs \
+  --host-adapter /tmp/openbot-host-fixture/payload/runtime.cjs
+```
+
+On this listener, `POST /api/save` with `kind: "use-model"` checks the installed direct chat route, its saved credential record and any selected effort. The reconciler validates staged source changes with Node, saves the selected model and `http://127.0.0.1:<port>/v1` hop URL in the retained plan, and then selects Custom. `kind: "official"` retains the plan and credentials. It restores stock source when logging is off and keeps the stock logging tap when enabled. Source edits require a recognized entrypoint shape and retain the first stock copy at `host-main.cjs.pre-openbot`.
+
+The deferred reload receipt `.openbot-rust-host-reload.json` holds the expected source digest and Node process identities. Only the exact Node entrypoint with a still-matching PID and start time is eligible for a deferred SIGTERM and supervised restart. The Desktop PID is for observation. The reload waits at least 120 seconds from arming and respects native in-flight turns and `openbot-turn-lease.json`. Quiet time is 90 seconds when the legacy lease records `stop` and 300 seconds otherwise. An existing `openbot-pending-bounce.json` halts native reconciliation until the prior managed reload is resolved.
+
+The panel's HTTPS `OPENBOT_PUBLIC_URL` or observed quick tunnel status is advisory. Ingress mutations and wiring host management into the native install are separate work. Continue to use the current Node production path and Official/Temporal delivery.
 
 #### Linux managed Rust service
 

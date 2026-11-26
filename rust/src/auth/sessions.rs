@@ -41,6 +41,7 @@ struct AccountsInner {
     store: CredentialStore,
     callback: Url,
     status: ListenerStatus,
+    host: Option<crate::host::Host>,
     sessions: Mutex<Sessions>,
 }
 
@@ -97,6 +98,7 @@ impl Accounts {
         store: CredentialStore,
         authority: &str,
         status: ListenerStatus,
+        host: Option<crate::host::Host>,
     ) -> io::Result<Self> {
         let callback =
             Url::parse(&format!("http://{authority}/auth/callback")).map_err(io::Error::other)?;
@@ -110,6 +112,7 @@ impl Accounts {
             store,
             callback,
             status,
+            host,
             sessions: Mutex::default(),
         })))
     }
@@ -499,8 +502,16 @@ async fn save(
                         .ok_or_else(|| AuthError::input("Select a supported reasoning effort."))
                 })
                 .transpose()?;
-            let mut reply = store.save_active_model(required(&body, "modelId")?, choice)?;
-            accounts.0.status.add_to(store.root(), &mut reply);
+            let mut reply = store.save_active_model(
+                required(&body, "modelId")?,
+                choice,
+                accounts.0.host.as_ref(),
+                accounts.0.status.port,
+            )?;
+            accounts
+                .0
+                .status
+                .add_to(store.root(), &mut reply, accounts.0.host.as_ref());
             return Ok(reply);
         }
         let store = &accounts.0.store;
@@ -513,7 +524,14 @@ async fn save(
                 ),
                 None => None,
             };
-            let mut reply = if body["kind"] == "set-secret" {
+            let mut reply = if body["kind"] == "official" {
+                if secret.is_some() {
+                    return Err(AuthError::input(
+                        "Send the mode change without a credential.",
+                    ));
+                }
+                store.save_official(accounts.0.host.as_ref())?
+            } else if body["kind"] == "set-secret" {
                 store.save_secret(
                     required(&body, "providerId")?,
                     required(&body, "secret")?,
@@ -526,7 +544,10 @@ async fn save(
                     accounts.0.status.port,
                 )?
             };
-            accounts.0.status.add_to(store.root(), &mut reply);
+            accounts
+                .0
+                .status
+                .add_to(store.root(), &mut reply, accounts.0.host.as_ref());
             return Ok(reply);
         };
         if body.get("secret").is_some() {
@@ -564,7 +585,10 @@ async fn save(
         if let Some(draft) = sessions.drafts.remove(id) {
             sessions.attempts.remove(&draft.session);
         }
-        accounts.0.status.add_to(store.root(), &mut reply);
+        accounts
+            .0
+            .status
+            .add_to(store.root(), &mut reply, accounts.0.host.as_ref());
         Ok(reply)
     })
     .await

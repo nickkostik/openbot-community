@@ -782,6 +782,7 @@ dependencies = [
  "httpdate",
  "reqwest",
  "ring",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -47,7 +47,7 @@ The deployment receipt in `.openbot-rust-deployment.json` records the previous s
 "$native" --sand-data "$fixture" --port "$port" service --unit "$unit" rollback --original
 ~~~
 
-The first command restores the preceding release. Use `--original` to restore the service that originally owned the port, even after several native upgrades. Both operations reuse the saved state directory. Keep its existing backup and the original service's code until the recovery rehearsal has passed. The managed runtime reads the selected mode and applies the saved refresh and log-retention policies when it runs. Complete mode and host control parity and verify the authenticated panel routes before promoting the production unit.
+The first command restores the preceding release. Use `--original` to restore the service that originally owned the port, even after several native upgrades. Both operations reuse the saved state directory. Keep its existing backup and the original service's code until the recovery rehearsal has passed. The managed runtime reads the selected mode and applies the saved refresh and log-retention policies when it runs. The installer still needs wiring for the Computer adapter and authenticated ingress before promoting the production unit.
 
 ## Rehearse inference
 
@@ -73,19 +73,35 @@ Add `--enable-model-refresh` in disposable state to run manual and scheduled ref
 
 Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads the saved catalog and listener status from Rust. The candidate loads `openbot-model-catalog.json` at startup and uses it for the aggregate count and provider-scoped metadata. Set `OPENBOT_AGENT_DATA` to a copied agent data directory to display the saved bot names and the corresponding log sources.
 
-In disposable Custom state, Models and Dashboard can save an active model and reasoning effort with `--enable-accounts`. The selection writes the wildcard binding and leaves explicit conversation bindings and per-bot overrides intact. The two OpenCode Go accounts keep separate selections and credentials. The stock adapter reads the current plan on the next turn. Official activation returns a conflict until the managed host controls complete the mode change.
+In disposable Custom state, Models and Dashboard can save an active model and reasoning effort with `--enable-accounts`. The selection writes the wildcard binding and leaves explicit conversation bindings and per-bot overrides intact. The two OpenCode Go accounts keep separate selections and credentials. The stock adapter reads the current plan on the next turn. Activation from Official requires the managed host controls below.
 
 The native `/api/save` routes also support adding and renaming provider accounts, editing endpoints, replacing credentials, and importing, editing, and removing models. A keyed account needs a credential for a different network origin. Its previous key is withdrawn before the endpoint changes, and the replacement is published after the new endpoint is saved. The private receipt `.openbot-rust-provider-move.json` lets the service finish an interrupted change. Manual and scheduled catalog changes use the same write lock. The hop checks the saved endpoint before taking a credential for a turn.
 
-New OpenCode accounts use the direct Go endpoints. Alibaba Token Plan accounts use their Singapore endpoint and dedicated key. Removing an active model chooses the next eligible chat model from the same provider, then checks other direct providers. Removing a provider preserves its reserved credential ID and unrelated conversation bindings. Catalog edits use the existing mode. The managed host controls handle mode and exposure changes and provider removal that would leave Custom without a direct chat model. [OpenCode Go API](https://opencode.ai/docs/console/api/models/) · [Alibaba Token Plan authentication](https://www.alibabacloud.com/help/en/model-studio/token-plan-faq)
+New OpenCode accounts use the direct Go endpoints. Alibaba Token Plan accounts use their Singapore endpoint and dedicated key. Removing an active model chooses the next eligible chat model from the same provider, then checks other direct providers. Removing a provider preserves its reserved credential ID and unrelated conversation bindings. Catalog edits use the existing mode. Switch to Official before removing the last direct chat model from Custom. [OpenCode Go API](https://opencode.ai/docs/console/api/models/) · [Alibaba Token Plan authentication](https://www.alibabacloud.com/help/en/model-studio/token-plan-faq)
 
 With `--write-bot-settings`, the dashboard can pause and resume the gateway and the Bots page can save individual or batch pause settings. The candidate uses the existing pause files. The stock adapter honors a pause on the next turn of an attached session. Terminal hop refusals return their original HTTP status to the adapter without a replay.
+
+## Rehearse managed host changes
+
+Set `--host-main` or `OPENBOT_HOST_MAIN` to observe the host entrypoint. The snapshot shows its wrap shape and identifies the matching Node process or the detected Grok Bot desktop process. The configured tunnel URL is advisory. Desktop process detection is read-only.
+
+Use a supervised fixture Node host and the installed adapter from the same release to rehearse changes.
+
+~~~sh
+"$native" --sand-data "$fixture" --port "$port" --ui-dir "$PWD/ui" \
+  --managed-service --enable-hop --enable-accounts --enable-request-logs \
+  --host-main "$fixture_host" --host-adapter "$fixture_payload/runtime.cjs"
+~~~
+
+Choose a model in the panel or send `POST /api/save` with `kind` set to `use-model`. The service verifies a configured direct chat model and credential, syntax-checks changes with Node, and publishes the plan with the managed loopback endpoint before selecting Custom. Use `--host-node` to select a particular Node executable. Switching to Official preserves the plan and credentials. The host keeps its stock logging adapter while logging is enabled and returns to its original bytes when logging is disabled.
+
+The watcher repairs the supported wrapper after a compatible host update. It records a pending restart in `.openbot-rust-host-reload.json`, waits for the native hop and legacy lease to show no active requests and reach the quiet window, then signals only the matching Node process. The fixture or Computer supervisor starts the replacement. A pending reload from the legacy service takes precedence. The staged installer does not yet activate this controller or configure public ingress.
 
 ## Rehearse request recording
 
 Open `/#/logs` with `--ui-dir` to browse saved records, captured bodies, events, and usage. In disposable Custom state, add `--enable-hop --enable-request-logs` and set `loggingEnabled` in `openbot-logs.json` to record new requests. The writer uses `openbot-requests.jsonl` and its matching body files. It records retry attempts and streamed outcomes under one request. Usage counts the provider once per turn and distinguishes a zero cache count from missing telemetry. Capture uses the saved body policy, redacts credentials, and caps each stored body.
 
-The same opt-in enables log settings saves, cleanup, Strip Bodies, and Clear in the disposable directory. The first retention pass runs after one minute and repeats every 30 minutes. Clear keeps event history. The candidate uses the existing append lock and keeps unknown rows during retention. The current service still handles lifecycle and mode changes and the Official host tap.
+The same opt-in enables log settings saves, cleanup, Strip Bodies, and Clear in the disposable directory. The first retention pass runs after one minute and repeats every 30 minutes. Clear keeps event history. The candidate uses the existing append lock and keeps unknown rows during retention. The verified stock adapter handles Official host logging.
 
 ## Rehearse compaction
 
@@ -113,7 +129,8 @@ With request logging enabled, chat records show the estimated input, estimated r
 - [x] Port active model and effort saves and gateway and bot pauses. Verify the next turn through one attached stock adapter session in disposable state.
 - [x] Port provider and model management. Verify an endpoint change and key replacement, imported model settings, active-model fallback, and removal through the existing panel.
 - [x] Stage and select the native panel and hop as one existing Linux user service. Verify ownership, a failed restart, an interrupted install, and rollback to the prior and original service.
-- [ ] Finish mode and host lifecycle commands. Verify watcher recovery and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
+- [x] Observe the Computer and rehearse Official and Custom switching, lease-aware Node reload, and host drift repair with the stock adapter.
+- [ ] Finish managed adapter installation and authenticated ingress. Verify the original public URLs through the prepared service.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.
 

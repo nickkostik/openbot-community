@@ -46,6 +46,7 @@ pub struct Hop {
     version: String,
     logs: Option<Logs>,
     compactor: Option<Compactor>,
+    host: Option<crate::host::Host>,
     #[cfg(test)]
     test_go_base: Option<String>,
 }
@@ -78,6 +79,7 @@ impl Hop {
             version: version(),
             logs: None,
             compactor: None,
+            host: None,
             #[cfg(test)]
             test_go_base: None,
         })
@@ -90,6 +92,11 @@ impl Hop {
 
     pub fn with_compactor(mut self, compactor: Option<Compactor>) -> Self {
         self.compactor = compactor;
+        self
+    }
+
+    pub(crate) fn with_host(mut self, host: Option<crate::host::Host>) -> Self {
+        self.host = host.filter(crate::host::Host::managed);
         self
     }
 
@@ -292,6 +299,7 @@ async fn completions(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, Failure> {
+    let turn = hop.host.as_ref().and_then(crate::host::Host::begin_turn);
     let mut trace = match &hop.logs {
         Some(logs) => logs.begin().await,
         None => None,
@@ -338,7 +346,11 @@ async fn completions(
             {
                 service.launch(job, hop.clone());
             }
-            hop.dispatch(&prepared, trace).await
+            let result = hop.dispatch(&prepared, trace).await?;
+            Ok(match turn {
+                Some(turn) => turn.wrap_response(result),
+                None => result,
+            })
         }
         Err(failure) => {
             if let Some(trace) = trace {

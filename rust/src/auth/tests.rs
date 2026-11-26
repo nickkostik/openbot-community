@@ -189,7 +189,7 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
         serves_ui: true,
         serves_hop: false,
     };
-    let accounts = Accounts::new(store, HOST, status).unwrap();
+    let accounts = Accounts::new(store, HOST, status, None).unwrap();
     router(state, HOST.into(), [accounts.routes()])
 }
 

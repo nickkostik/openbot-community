@@ -63,6 +63,10 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub(crate) fn logging_enabled(&self) -> bool {
+        self.logging_enabled
+    }
+
     pub fn load(root: &Path) -> Self {
         let raw = read_json(&root.join(SETTINGS), 4096)
             .ok()

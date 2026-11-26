@@ -5,6 +5,7 @@ mod catalog;
 mod compaction;
 mod discovery;
 mod hop;
+mod host;
 mod lease;
 mod logs;
 mod panel;
@@ -58,6 +59,15 @@ struct Args {
     /// Publish ownership after binding the configured loopback port.
     #[arg(long, requires = "ui_dir")]
     managed_service: bool,
+    /// Observe this Computer's Node host entrypoint. Defaults to OPENBOT_HOST_MAIN.
+    #[arg(long)]
+    host_main: Option<PathBuf>,
+    /// Manage the host using this installed runtime.cjs and a validated reload.
+    #[arg(long, requires_all = ["host_main", "managed_service", "enable_hop", "enable_accounts"])]
+    host_adapter: Option<PathBuf>,
+    /// Node executable used to validate staged host source.
+    #[arg(long, default_value = "node")]
+    host_node: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -147,6 +157,9 @@ async fn serve(args: Args) -> io::Result<()> {
         enable_compaction,
         ui_dir,
         managed_service,
+        host_main,
+        host_adapter,
+        host_node,
         ..
     } = args;
     if managed_service && port == 0 {
@@ -169,6 +182,14 @@ async fn serve(args: Args) -> io::Result<()> {
         serves_ui: ui_dir.is_some(),
         serves_hop: enable_hop,
     };
+    let host = host_main
+        .or_else(|| {
+            std::env::var_os("OPENBOT_HOST_MAIN")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+        .map(|path| host::Host::new(state.root(), path, host_adapter, host_node))
+        .transpose()?;
     let credentials = (enable_hop || enable_accounts || enable_model_refresh || status.serves_ui)
         .then(|| auth::CredentialStore::new(state.root(), enable_accounts || enable_model_refresh))
         .transpose()?;
@@ -183,13 +204,14 @@ async fn serve(args: Args) -> io::Result<()> {
             hop::Hop::new(state.clone(), store).map(|hop| {
                 hop.with_logs(logs.clone())
                     .with_compactor(compactor.clone())
+                    .with_host(host.clone())
             })
         })
         .transpose()?;
     let accounts = credentials
         .clone()
         .filter(|_| enable_accounts)
-        .map(|store| auth::Accounts::new(store, &authority, status))
+        .map(|store| auth::Accounts::new(store, &authority, status, host.clone()))
         .transpose()?;
     let discovery = credentials
         .clone()
@@ -198,7 +220,7 @@ async fn serve(args: Args) -> io::Result<()> {
         .transpose()?;
     let panel = ui_dir
         .zip(credentials.clone())
-        .map(|(directory, store)| panel::routes(directory, store, status))
+        .map(|(directory, store)| panel::routes(directory, store, status, host.clone()))
         .transpose()?;
     let refresh = discovery
         .clone()
@@ -210,6 +232,7 @@ async fn serve(args: Args) -> io::Result<()> {
     let _owner = managed_service
         .then(|| service::PublishedOwner::publish(state.root()))
         .transpose()?;
+    let host_watch = host.as_ref().and_then(host::Host::watch);
     if let Some(catalog) = &catalog {
         catalog.start();
     }
@@ -231,6 +254,10 @@ async fn serve(args: Args) -> io::Result<()> {
     )
     .with_graceful_shutdown(async move {
         shutdown().await;
+        if let Some(task) = host_watch {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = log_cleanup {
             task.abort();
             let _ = task.await;

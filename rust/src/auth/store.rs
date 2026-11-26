@@ -18,6 +18,7 @@ use super::{
 };
 use crate::{
     catalog::{Catalog, Effort},
+    host::{Host, Transition},
     lease::Lease,
     routing::{CredentialKind, is_direct_provider},
     server::{PLAN_MAX_BYTES, read_bytes, read_json, read_mode},
@@ -115,55 +116,99 @@ impl CredentialStore {
         &self,
         model_id: &str,
         reasoning: Option<Effort>,
+        host: Option<&Host>,
+        port: u16,
     ) -> Result<Value, AuthError> {
-        self.refresh_plan(|plan| {
-            if read_mode(self.root()).map_err(|_| store_error())? != "custom" {
-                return Err(AuthError::conflict(
-                    "Switch to Custom through the managed host controls before activating a model.",
+        let _write = self.write_lock()?;
+        let host = host.filter(|host| host.managed());
+        if host.is_none() && read_mode(self.root()).map_err(|_| store_error())? != "custom" {
+            return Err(AuthError::conflict(
+                "Switch to Custom through the managed host controls before activating a model.",
+            ));
+        }
+        let path = self.root().join("openbot-plan.json");
+        let before = read_bytes(&path, PLAN_MAX_BYTES)
+            .map_err(|_| store_error())?
+            .ok_or_else(|| AuthError::input("Set up a model catalog before selecting a model."))?;
+        let saved: Value = serde_json::from_slice(&before).map_err(|_| store_error())?;
+        let mut plan = saved.clone();
+        let catalog = Catalog::from_plan(&plan);
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == model_id && model.wire_chat)
+            .ok_or_else(|| AuthError::input("Select an installed chat model."))?;
+        if !catalog
+            .providers
+            .iter()
+            .any(|provider| provider.id == model.provider_id && is_direct_provider(provider))
+        {
+            return Err(AuthError::input(
+                "Select a configured direct model provider.",
+            ));
+        }
+        let store = self.load()?;
+        if host.is_some() && raw_secret(&store, &model.provider_id).is_none() {
+            return Err(AuthError::input(
+                "Save a credential for the selected provider.",
+            ));
+        }
+        if let Some(choice) = reasoning {
+            let effort = model.effective_override(choice).ok_or_else(|| {
+                AuthError::input("The model does not support that reasoning effort.")
+            })?;
+            let entry = plan["catalog"]["models"]
+                .as_array_mut()
+                .ok_or_else(store_error)?
+                .iter_mut()
+                .find(|entry| entry["id"] == model_id)
+                .ok_or_else(store_error)?;
+            entry["activeReasoning"] = json!(effort);
+        }
+        edits::set_wildcard(&mut plan, model)?;
+        if host.is_some() {
+            plan["hop"] = json!({"host":"127.0.0.1","port":port});
+            plan["hopBaseUrl"] = json!(format!("http://127.0.0.1:{port}/v1"));
+        }
+        let staged = (plan != saved)
+            .then(|| stage(self.root(), &plan, PLAN_MAX_BYTES))
+            .transpose()?;
+        let commit = || -> io::Result<()> {
+            if read_bytes(&path, PLAN_MAX_BYTES)?.as_deref() != Some(&before) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "the saved catalog changed before activation",
                 ));
             }
-            let catalog = Catalog::from_plan(plan);
-            let model = catalog
-                .models
-                .iter()
-                .find(|model| model.id == model_id && model.wire_chat)
-                .ok_or_else(|| AuthError::input("Select an installed chat model."))?;
-            if !catalog
-                .providers
-                .iter()
-                .any(|provider| provider.id == model.provider_id && is_direct_provider(provider))
-            {
-                return Err(AuthError::input(
-                    "Select a configured direct model provider.",
-                ));
+            if let Some(staged) = staged {
+                self.commit(staged, "openbot-plan.json")
+                    .map_err(|error| io::Error::other(error.message))?;
             }
-            let store = self.load()?;
-            let effort = reasoning
-                .map(|choice| {
-                    model.effective_override(choice).ok_or_else(|| {
-                        AuthError::input("The model does not support that reasoning effort.")
-                    })
-                })
-                .transpose()?;
-            let mut changed = false;
-            if let Some(effort) = effort {
-                let models = plan["catalog"]["models"]
-                    .as_array_mut()
-                    .ok_or_else(store_error)?;
-                let entry = models
-                    .iter_mut()
-                    .find(|entry| entry["id"] == model_id)
-                    .ok_or_else(store_error)?;
-                let value = json!(effort);
-                if entry["activeReasoning"] != value {
-                    entry["activeReasoning"] = value;
-                    changed = true;
-                }
-            }
-            changed |= edits::set_wildcard(plan, model)?;
-            Ok((changed, save_reply(plan, &store, None)))
-        })?
-        .ok_or_else(|| AuthError::input("Set up a model catalog before selecting a model."))
+            Ok(())
+        };
+        let mut reply = save_reply(&plan, &store, None);
+        if let Some(host) = host {
+            add_transition(
+                &mut reply,
+                host.reconcile("custom", commit).map_err(host_error)?,
+            );
+        } else {
+            commit().map_err(host_error)?;
+        }
+        Ok(reply)
+    }
+
+    pub(super) fn save_official(&self, host: Option<&Host>) -> Result<Value, AuthError> {
+        let host = host.filter(|host| host.managed()).ok_or_else(|| {
+            AuthError::conflict("Switch modes through the managed host controls.")
+        })?;
+        let _write = self.write_lock()?;
+        let mut reply = save_reply(&self.plan()?, &self.load()?, None);
+        add_transition(
+            &mut reply,
+            host.reconcile("official", || Ok(())).map_err(host_error)?,
+        );
+        Ok(reply)
     }
 
     #[cfg(test)]
@@ -567,6 +612,24 @@ fn save_reply(plan: &Value, store: &Value, created: Option<String>) -> Value {
         reply["createdProviderId"] = json!(id);
     }
     reply
+}
+
+fn add_transition(reply: &mut Value, transition: Transition) {
+    reply["wrapBytesChanged"] = json!(transition.changed);
+    reply["hostBounce"] = json!(if transition.deferred {
+        "deferred"
+    } else {
+        "none"
+    });
+}
+
+fn host_error(error: io::Error) -> AuthError {
+    match error.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => {
+            AuthError::conflict(format!("OpenBot could not apply the host change. {error}."))
+        }
+        _ => AuthError::unavailable("OpenBot could not apply the host change."),
+    }
 }
 
 fn store_error() -> AuthError {

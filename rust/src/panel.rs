@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::{
     auth::{AuthError, CredentialStore},
+    host::{self, Host},
     logs,
 };
 
@@ -42,6 +43,7 @@ struct PanelReadback {
     credentials: CredentialStore,
     status: ListenerStatus,
     agent_data: PathBuf,
+    host: Option<Host>,
 }
 
 #[derive(Clone, Copy)]
@@ -55,6 +57,7 @@ pub fn routes(
     assets: PathBuf,
     credentials: CredentialStore,
     status: ListenerStatus,
+    host: Option<Host>,
 ) -> io::Result<Router> {
     let asset_root = assets.canonicalize()?;
     let mut router = Router::new()
@@ -64,6 +67,7 @@ pub fn routes(
         .with_state(PanelReadback {
             credentials,
             status,
+            host,
             agent_data: std::env::var_os("OPENBOT_AGENT_DATA")
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
@@ -92,7 +96,9 @@ pub fn routes(
 async fn state(State(panel): State<PanelReadback>) -> Result<Json<Value>, AuthError> {
     crate::auth::blocking(move || {
         let mut view = panel.credentials.public_view()?;
-        panel.status.add_to(panel.credentials.root(), &mut view);
+        panel
+            .status
+            .add_to(panel.credentials.root(), &mut view, panel.host.as_ref());
         Ok(Json(view))
     })
     .await
@@ -109,7 +115,7 @@ async fn bots(State(panel): State<PanelReadback>) -> Result<Json<Vec<roster::Bot
 }
 
 impl ListenerStatus {
-    pub fn add_to(&self, root: &Path, state: &mut Value) {
+    pub fn add_to(&self, root: &Path, state: &mut Value, host: Option<&Host>) {
         let mode = crate::server::read_mode(root).unwrap_or("official");
         let listen = |served| {
             if served {
@@ -118,15 +124,24 @@ impl ListenerStatus {
                 json!({"kind":"absent"})
             }
         };
-        let alignment = if mode == "official" {
-            json!({"kind":"ok","desired":"official","wrap":"stock-unmarked"})
+        let (wrap, process) = host
+            .map(Host::wrap_and_process)
+            .unwrap_or_else(|| (json!({"kind":"stock-unmarked"}), json!({"kind":"absent"})));
+        let stage = if mode == "custom" && wrap["kind"] == "stock-unmarked" {
+            "needs-reinstall"
         } else {
-            json!({"kind":"needs-reinstall","desired":"custom","wrap":"stock-unmarked"})
+            "ok"
         };
+        let alignment = json!({"kind":stage,"desired":mode,"wrap":wrap["kind"]});
+        let tunnel = host::tunnel(
+            root,
+            self.port,
+            std::env::var("OPENBOT_PUBLIC_URL").ok().as_deref(),
+        );
         state["snapshot"] = json!({
-            "wrap":{"kind":"stock-unmarked"},
-            "host":{"kind":"absent"},
-            "tunnel":{"kind":"off"},
+            "wrap":wrap,
+            "host":process,
+            "tunnel":tunnel,
             "uiListen":listen(self.serves_ui), "hopListen":listen(self.serves_hop),
             "alignment":alignment
         });

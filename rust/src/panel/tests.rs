@@ -19,7 +19,7 @@ const STATUS: ListenerStatus = ListenerStatus {
 fn app(root: &Path) -> Router {
     let state = State::new(root.to_path_buf(), false).unwrap();
     let credential = CredentialStore::new(root, false).unwrap();
-    let panel = routes(root.join("ui"), credential, STATUS).unwrap();
+    let panel = routes(root.join("ui"), credential, STATUS, None).unwrap();
     server::router(state, HOST.into(), [panel])
 }
 
@@ -96,7 +96,7 @@ async fn panel_serves_only_the_built_assets_and_never_credential_files() {
         fs::remove_file(&file).unwrap();
         std::os::unix::fs::symlink(state.path().join("secrets.json"), file).unwrap();
         let credential = CredentialStore::new(state.path(), false).unwrap();
-        assert!(routes(state.path().join("ui"), credential, STATUS).is_err());
+        assert!(routes(state.path().join("ui"), credential, STATUS, None).is_err());
     }
 }
 

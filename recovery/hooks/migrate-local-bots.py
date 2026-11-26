@@ -5,6 +5,7 @@ import contextlib
 import copy
 import fcntl
 import importlib.util
+import itertools
 import json
 import os
 import pathlib
@@ -21,6 +22,7 @@ JOURNAL = SD / 'openbot-local-migration.json'
 routing = None
 H = None
 UNSPECIFIED = object()
+MAX_TRANSCRIPT_TIMESTAMP_MS = 8_640_000_000_000_000
 
 
 def read(path, default=None):
@@ -319,24 +321,35 @@ def copy_agent(old, new, mapping, journal):
         automation_states[str(file.relative_to(temp))] = automation.get('enabled', False)
         automation['enabled'] = False
         write(file, automation)
-    remote = fetch_transcript(old, journal['backup'])
-    conn = sqlite3.connect(temp / 'store.db')
-    local = [json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
-    cloud = [json.loads(base64.b64decode(row['body'], validate=True)) for row in remote]
-    merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping)
-    ordered = [(record['entry']['id'], json.dumps(record['entry'], ensure_ascii=False, separators=(',', ':')))
-               for record in merged]
+    try:
+        remote = fetch_transcript(old, journal['backup'])
+        with contextlib.closing(sqlite3.connect(temp / 'store.db')) as conn:
+            local = [json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
+            cloud = [json.loads(base64.b64decode(row['body'], validate=True)) for row in remote]
+            for entry in itertools.chain(local, cloud):
+                if isinstance(entry, dict):
+                    # Missing dates keep the merge's existing fallback order.
+                    timestamp = entry.get('timestampMs', 0)
+                    if (type(timestamp) not in (int, float) or
+                            not -MAX_TRANSCRIPT_TIMESTAMP_MS <= timestamp <= MAX_TRANSCRIPT_TIMESTAMP_MS):
+                        raise ValueError('Invalid timestampMs in transcript entry ' + repr(entry.get('id')))
+            merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping)
+            ordered = [(record['entry']['id'], json.dumps(record['entry'], ensure_ascii=False, separators=(',', ':')))
+                       for record in merged]
+            with conn:
+                conn.execute('DELETE FROM transcript_entries')
+                conn.executemany('INSERT INTO transcript_entries(seq,id,entry) VALUES(?,?,?)',
+                                 [(i + 1, entry_id, entry) for i, (entry_id, entry) in enumerate(ordered)])
+                if conn.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                    raise RuntimeError('Transcript store integrity check failed')
+    except ValueError:
+        # Keep the source and its backup available for a corrected retry.
+        shutil.rmtree(temp)
+        raise
     # Same-ID divergent payloads are preserved, but their opaque SDK roots and
     # references need an explicit review before this staged copy becomes live.
     write(pathlib.Path(journal['backup']) / 'history-merge' / (new + '.json'),
           {'entries': merged, 'idConflicts': collisions, 'liveApplied': False})
-    conn.execute('DELETE FROM transcript_entries')
-    conn.executemany('INSERT INTO transcript_entries(seq,id,entry) VALUES(?,?,?)',
-                     [(i + 1, entry_id, entry) for i, (entry_id, entry) in enumerate(ordered)])
-    conn.commit()
-    if conn.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-        raise RuntimeError('Transcript store integrity check failed')
-    conn.close()
     # A new id does not share the old cloud state, identity, or running turn.
     (temp / '.openbot-local-copy').write_text(old + '\n')
     temp.rename(dst)

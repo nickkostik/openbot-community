@@ -1,4 +1,5 @@
 """Room recovery and migration verification must preserve existing identities."""
+import base64
 import copy
 import contextlib
 import importlib.util
@@ -502,6 +503,61 @@ class RoomRecoveryTests(unittest.TestCase):
         self.save(self.journal_path, self.journal)
         with self.assertRaisesRegex(ValueError, 'one-to-one'):
             MODULE.restore_room_members(self.journal)
+
+
+class MigrationTranscriptTests(unittest.TestCase):
+    def test_invalid_timestamp_does_not_stage_copy_and_allows_corrected_retry(self):
+        for source, value in (('local', 8_640_000_000_000_001),
+                              ('platform', -8_640_000_000_000_001),
+                              ('platform', None), ('local', True)):
+            with self.subTest(source=source, value=value), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                old = root / 'agents' / OLD_MEMBER
+                target = root / 'agents' / MEMBER
+                backup = root / 'backup'
+                cloud_path = backup / 'cloud-transcripts' / (OLD_MEMBER + '.json')
+                save = RoomRecoveryTests.save
+                save(old / 'profile.json', {'harness': 'temporal'})
+                local = {'id': 'local-message', 'kind': 'message', 'content': 'Local'}
+                cloud = {'id': 'cloud-message', 'kind': 'send-message',
+                         'message': {'type': 'text', 'content': 'Cloud'},
+                         'timestampMs': 8_640_000_000_000_000}
+                (local if source == 'local' else cloud)['timestampMs'] = value
+
+                def save_cloud():
+                    body = base64.b64encode(json.dumps(cloud).encode()).decode()
+                    save(cloud_path, {'entries': [{'seq': '2', 'body': body}]})
+
+                with contextlib.closing(sqlite3.connect(old / 'store.db')) as conn, conn:
+                    conn.execute('CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)')
+                    conn.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+                    conn.execute('INSERT INTO transcript_entries VALUES(1, ?, ?)',
+                                 (local['id'], json.dumps(local)))
+                save_cloud()
+                original_store = (old / 'store.db').read_bytes()
+                original_cloud = cloud_path.read_bytes()
+                with mock.patch.object(MODULE, 'SD', root), \
+                        mock.patch.object(MODULE, 'rpc', side_effect=AssertionError('Unexpected remote call')):
+                    with self.assertRaisesRegex(ValueError, 'Invalid timestampMs'):
+                        MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+                    self.assertFalse(target.exists())
+                    self.assertFalse((root / ('local-copy-' + MEMBER)).exists())
+                    self.assertFalse((backup / 'history-merge').exists())
+                    self.assertEqual((old / 'store.db').read_bytes(), original_store)
+                    self.assertEqual(cloud_path.read_bytes(), original_cloud)
+
+                    # The corrected input can preserve an undated message and a valid boundary date.
+                    local.pop('timestampMs', None)
+                    cloud['timestampMs'] = 8_640_000_000_000_000
+                    with contextlib.closing(sqlite3.connect(old / 'store.db')) as conn, conn:
+                        conn.execute('UPDATE transcript_entries SET entry=?', (json.dumps(local),))
+                    save_cloud()
+                    result = MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER},
+                                               {'backup': str(backup)})
+                self.assertEqual(result['transcriptEntries'], 2)
+                with contextlib.closing(sqlite3.connect(target / 'store.db')) as conn:
+                    staged = conn.execute('SELECT seq, entry FROM transcript_entries ORDER BY seq').fetchall()
+                self.assertEqual([(seq, json.loads(entry)) for seq, entry in staged], [(1, local), (2, cloud)])
 
 
 class MigrationVerificationTests(unittest.TestCase):

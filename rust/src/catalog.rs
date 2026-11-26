@@ -199,6 +199,35 @@ pub fn discovery_facts(slug: &str, origin: &str) -> Option<DiscoveryFacts> {
     None
 }
 
+// NVIDIA's model list does not classify these retrieval endpoints.
+pub(crate) fn nvidia_embedding_inputs(slug: &str, origin: &str) -> Option<&'static [&'static str]> {
+    let base = Url::parse(origin).ok()?;
+    if base.scheme() != "https"
+        || base.host_str() != Some("integrate.api.nvidia.com")
+        || base.port().is_some()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+        || !matches!(base.path().trim_end_matches('/'), "" | "/v1")
+    {
+        return None;
+    }
+    match slug {
+        "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1"
+        | "nvidia/llama-nemotron-embed-vl-1b-v2"
+        | "nvidia/nemotron-3.5-embed-1b"
+        | "nvidia/nemotron-3.5-embed-8b"
+        | "nvidia/nvclip" => Some(&["text", "image"]),
+        "nvidia/embed-qa-4"
+        | "nvidia/llama-3.2-nv-embedqa-1b-v1"
+        | "nvidia/nemotron-3-embed-1b"
+        | "nvidia/nv-embedqa-mistral-7b-v2"
+        | "snowflake/arctic-embed-l" => Some(&["text"]),
+        _ => None,
+    }
+}
+
 fn parsed_levels(value: &Value) -> Vec<Effort> {
     let normalize = |value: &str| Effort::parse(&value.trim().to_ascii_lowercase());
     let mut levels: Vec<_> = match value {
@@ -230,6 +259,7 @@ pub struct Model {
     pub slug: String,
     pub chat: bool,
     pub wire_chat: bool,
+    embedding_inputs: Option<&'static [&'static str]>,
     pub protocol: Option<Protocol>,
     pub levels: Vec<Effort>,
     pub context_tokens: usize,
@@ -305,6 +335,7 @@ impl Model {
             .map(|provider| provider.origin.as_str())
             .unwrap_or_default();
         let policy = Policy::for_route(slug, origin);
+        let embedding_inputs = nvidia_embedding_inputs(slug, origin);
         let levels = policy
             .map(|policy| policy.levels)
             .or_else(|| {
@@ -332,11 +363,14 @@ impl Model {
             id: id.into(),
             provider_id: provider_id.into(),
             slug: slug.into(),
-            chat: !matches!(
-                row["modelType"].as_str(),
-                Some("embedding" | "decision" | "image" | "other")
-            ),
-            wire_chat: row.get("modelType").is_none_or(|kind| kind == "chat"),
+            chat: embedding_inputs.is_none()
+                && !matches!(
+                    row["modelType"].as_str(),
+                    Some("embedding" | "decision" | "image" | "other")
+                ),
+            wire_chat: embedding_inputs.is_none()
+                && row.get("modelType").is_none_or(|kind| kind == "chat"),
+            embedding_inputs,
             protocol,
             levels,
             context_tokens: row["contextTokens"]
@@ -358,6 +392,17 @@ impl Model {
             saved_effort,
             policy,
         })
+    }
+
+    pub(crate) fn apply_embedding_metadata(&self, row: &mut Value) {
+        if let Some(inputs) = self.embedding_inputs {
+            row["modelType"] = serde_json::json!("embedding");
+            row["modalities"] = serde_json::json!(inputs);
+        }
+    }
+
+    pub(crate) fn has_documented_embedding_inputs(&self) -> bool {
+        self.embedding_inputs.is_some()
     }
 
     pub fn display_effort(&self, effort: Effort) -> Effort {

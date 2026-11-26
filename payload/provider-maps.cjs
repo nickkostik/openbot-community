@@ -40,6 +40,7 @@ var NVIDIA_NEMOTRON_TOGGLE = Object.freeze({
   aliases: Object.freeze({ minimal: "on", low: "on", medium: "on", high: "on", xhigh: "on", max: "on" }),
 });
 var NVIDIA_LIGHTNING = Object.freeze(Object.assign({}, NVIDIA_NEMOTRON_TOGGLE, { maxOutputTokens: 32768 }));
+var NVIDIA_DIRECT = /^https:\/\/integrate\.api\.nvidia\.com(?:\/v1)?\/*$/i;
 var NVIDIA_SUPER_VL = Object.freeze({
   kind: "nvidia-super-vl",
   apiType: "chat-completions",
@@ -57,12 +58,31 @@ function isDirectDeepSeekOrigin(baseUrl) {
   return /^https:\/\/api\.deepseek\.com(?::443)?(?:\/(?:v1(?:\/(?:chat\/completions|responses))?|chat\/completions|responses|anthropic(?:\/v1(?:\/messages)?)?))?\/*$/i.test(baseUrl);
 }
 
+// Source: NVIDIA's retrieval API reference and model cards.
+function nvidiaEmbeddingInputs(modelId, baseUrl) {
+  if (!NVIDIA_DIRECT.test(baseUrl)) return undefined;
+  switch (modelId) {
+    case "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1":
+    case "nvidia/llama-nemotron-embed-vl-1b-v2":
+    case "nvidia/nemotron-3.5-embed-1b":
+    case "nvidia/nemotron-3.5-embed-8b":
+    case "nvidia/nvclip":
+      return ["text", "image"];
+    case "nvidia/embed-qa-4":
+    case "nvidia/llama-3.2-nv-embedqa-1b-v1":
+    case "nvidia/nemotron-3-embed-1b":
+    case "nvidia/nv-embedqa-mistral-7b-v2":
+    case "snowflake/arctic-embed-l":
+      return ["text"];
+  }
+}
+
 function documentedReasoningPolicy(modelId, baseUrl) {
   if (isDirectDeepSeekOrigin(baseUrl) && DEEPSEEK_V4_RE.test(modelId)) return DEEPSEEK_V4;
   if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(baseUrl) && /^k3\.1-pro(?:-highspeed)?$/.test(modelId)) {
     return KIMI_CODE_PRO;
   }
-  if (!/^https:\/\/integrate\.api\.nvidia\.com(?:\/v1)?\/*$/i.test(baseUrl)) return undefined;
+  if (!NVIDIA_DIRECT.test(baseUrl)) return undefined;
   if (modelId === "nvidia/nemotron-3.5-super-vl-120b-a12b") return NVIDIA_SUPER_VL;
   if (modelId === "nvidia/nemotron-3.5-lightning-30b-a3b") return NVIDIA_LIGHTNING;
   if (modelId === "nvidia/nemotron-3.5-bolt-e4b") return NVIDIA_NEMOTRON_TOGGLE;
@@ -301,6 +321,7 @@ function applyProviderReasoningControls(body, ctx) {
 module.exports = {
   DEEPSEEK_ORIGIN: DEEPSEEK_ORIGIN,
   isDirectDeepSeekOrigin: isDirectDeepSeekOrigin,
+  nvidiaEmbeddingInputs: nvidiaEmbeddingInputs,
   documentedReasoningPolicy: documentedReasoningPolicy,
   documentedReasoningEffort: documentedReasoningEffort,
   applyProviderReasoningControls: applyProviderReasoningControls,

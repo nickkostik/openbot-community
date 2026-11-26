@@ -92,6 +92,7 @@ pub(super) fn upsert(
         row["reasoningLevels"] = value.clone();
     }
     let model = Model::from_saved(&row, &catalog.providers).ok_or_else(store_error)?;
+    model.apply_embedding_metadata(&mut row);
     let levels = facts
         .as_ref()
         .map_or(model.levels.as_slice(), |facts| facts.levels);

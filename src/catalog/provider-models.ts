@@ -5,7 +5,7 @@ import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
 import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
-import { DEEPSEEK_ORIGIN, documentedReasoningPolicy, isDirectDeepSeekOrigin } from "../../payload/provider-maps.cjs";
+import { DEEPSEEK_ORIGIN, documentedReasoningPolicy, isDirectDeepSeekOrigin, nvidiaEmbeddingInputs } from "../../payload/provider-maps.cjs";
 import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
@@ -461,6 +461,8 @@ export async function fetchModelsForProvider(input: {
   let nativeOpenAI = false;
   try { nativeOpenAI = new URL(provider.origin).hostname === "api.openai.com"; } catch { /* Reported during fetch above. */ }
   const models = result.models.map((model) => {
+    const embeddingInputs = nvidiaEmbeddingInputs(model.id, provider.origin);
+    if (embeddingInputs) return { ...model, modelType: "embedding" as const, modalities: embeddingInputs, reasoningLevels: [] };
     const policy = documentedReasoningPolicy(model.id, provider.origin);
     if (policy) return {
       ...model,

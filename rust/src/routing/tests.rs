@@ -65,6 +65,49 @@ fn exact_ids_keep_go_accounts_separate_and_prefer_the_active_family_for_a_slug()
 }
 
 #[test]
+fn legacy_nvidia_embeddings_are_excluded_from_chat_for_each_direct_account() {
+    let slug = "nvidia/nemotron-3.5-embed-1b";
+    let mut plan = json!({
+        "kind":"custom",
+        "agents":{"*":{"providerId":"primary","modelId":"chat-model"}},
+        "catalog":{
+            "providers":[
+                {"id":"primary","origin":"https://integrate.api.nvidia.com/v1"},
+                {"id":"secondary","origin":"https://integrate.api.nvidia.com"},
+                {"id":"proxy","origin":"https://proxy.example.test/v1"}
+            ],
+            "models":[{"id":"primary:chat-model","providerId":"primary","slug":"chat-model"}],
+            "bindings":[{"conversation":{"kind":"wildcard"},"modelId":"primary:chat-model"}]
+        }
+    });
+    for provider in ["primary", "secondary", "proxy"] {
+        plan["catalog"]["models"].as_array_mut().unwrap().push(json!({
+            "id":format!("{provider}:{slug}"), "providerId":provider, "slug":slug, "modelType":"chat"
+        }));
+    }
+    let catalog = Catalog::from_plan(&plan);
+    let settings = Settings::default();
+    for provider in ["primary", "secondary"] {
+        let model = format!("{provider}:{slug}");
+        assert!(catalog.chat_model(&model).is_none());
+        assert!(matches!(
+            resolve(&catalog, &settings, &model, None, CredentialKind::ApiKey),
+            Err(RouteError::NonChatModel)
+        ));
+    }
+    assert!(
+        resolve(
+            &catalog,
+            &settings,
+            &format!("proxy:{slug}"),
+            None,
+            CredentialKind::ApiKey
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn bot_pin_precedes_slug_and_reasoning_remains_scoped_to_the_effective_model() {
     let selected = plan("opencode:demo", Some("Bot-Example"), CredentialKind::ApiKey);
     assert_eq!(selected["modelId"], "opencode-2:demo");

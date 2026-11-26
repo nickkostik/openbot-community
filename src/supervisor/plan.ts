@@ -10,7 +10,7 @@ import {
   type ModelSlug,
 } from "../domain/types.ts";
 import { makeModel, normalizeModel } from "../domain/model.ts";
-import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
+import { documentedReasoningEffort, documentedReasoningPolicy, nvidiaEmbeddingInputs } from "../../payload/provider-maps.cjs";
 
 export type CompiledAgent = {
   readonly modelId: ModelSlug;
@@ -79,7 +79,13 @@ export function normalizeCatalog(catalog: Catalog): Catalog {
   for (const row of catalog.models) {
     const model = normalizeModel(row);
     if (!model) continue;
-    const policy = documentedReasoningPolicy(model.slug, origins.get(model.providerId) ?? "");
+    const origin = origins.get(model.providerId) ?? "";
+    const embeddingInputs = nvidiaEmbeddingInputs(model.slug, origin);
+    if (embeddingInputs) {
+      models.push(makeModel({ ...model, modelType: "embedding", modalities: embeddingInputs }));
+      continue;
+    }
+    const policy = documentedReasoningPolicy(model.slug, origin);
     // The normalizer has already interpreted legacy "none" as provider default.
     const requestedEffort = row.activeReasoning === "none" ? model.activeReasoning : row.activeReasoning;
     models.push(policy ? makeModel({ ...model, reasoningLevels: policy.levels,

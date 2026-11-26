@@ -4,6 +4,7 @@ var fs = require("fs");
 var path = require("path");
 var requestLog = require("./request-log.cjs");
 var { managedService } = require("./version.cjs");
+var { nvidiaEmbeddingInputs } = require("./provider-maps.cjs");
 
 function botModelsPath() {
   if (managedService) return path.join(managedService.sandData, "openbot-bot-models.json");
@@ -46,16 +47,20 @@ function extractBotId(messages) {
   return context && typeof context.botId === "string" && context.botId ? context.botId : undefined;
 }
 
-function modelSupportsChat(model) {
-  return model.modelType === undefined || model.modelType === "chat";
+function modelSupportsChat(model, origin) {
+  return (model.modelType === undefined || model.modelType === "chat") && !nvidiaEmbeddingInputs(model.slug, origin);
 }
 
 function modelInPlan(plan, modelId) {
-  var models = plan && plan.catalog && plan.catalog.models;
+  var catalog = plan && plan.catalog;
+  var models = catalog && catalog.models;
+  var providers = catalog && Array.isArray(catalog.providers) ? catalog.providers : [];
   if (!Array.isArray(models)) return false;
   for (var i = 0; i < models.length; i++) {
     var row = models[i];
-    if (row && (row.id === modelId || row.slug === modelId) && modelSupportsChat(row)) return true;
+    if (!row || (row.id !== modelId && row.slug !== modelId)) continue;
+    var provider = providers.find(function (p) { return p && p.id === row.providerId; });
+    if (modelSupportsChat(row, provider && provider.origin)) return true;
   }
   return false;
 }

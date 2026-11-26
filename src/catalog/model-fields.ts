@@ -23,8 +23,8 @@ export type ModelMetadataInput = {
  * - contextTokens: provider value, else route catalog value, else omitted.
  * - maxOutputTokens: bounded agent budget; catalogLimits holds the published
  *   output maximum separately, including modern limits above 128k.
- * - modalities: direct Go MIME categories first, otherwise the catalog's
- *   non-empty list and then the fetch list.
+ * - modalities: direct Go and known embedding inputs first, then the
+ *   catalog's non-empty list and the provider's other fetched inputs.
  * - reasoningLevels:
  *   0. direct Go advertised levels → use those account-scoped capabilities
  *   1. catalog `reasoningLevels` nonempty → use that ordered allow-list
@@ -84,7 +84,7 @@ export function modelImportFields(
   const reasoningLevels = importReasoningLevels(fetched, catalog);
   const apiType = fetched.apiType ?? catalog?.apiType;
 
-  const directModalities = fetched.providerMetadata === "opencode-go" ? fetched.modalities : undefined;
+  const directModalities = fetched.providerMetadata === "opencode-go" || fetched.modelType === "embedding" ? fetched.modalities : undefined;
   const modalities = [directModalities, catalog?.modalities, fetched.modalities].find(values => values?.length);
 
   return {

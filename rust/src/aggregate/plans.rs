@@ -295,7 +295,11 @@ fn refresh_model(
                     || (!protected.unreadable && !protected.selected.contains(model.id.as_str()))
             }
         });
-    if public.is_none() && direct_levels.is_none() && model_type.is_none() {
+    if public.is_none()
+        && direct_levels.is_none()
+        && model_type.is_none()
+        && !model.has_documented_embedding_inputs()
+    {
         return None;
     }
     let mut updated = original.clone();
@@ -340,6 +344,7 @@ fn refresh_model(
             updated["reasoningLevels"] = levels;
         }
     }
+    model.apply_embedding_metadata(&mut updated);
     Some(updated)
 }
 
@@ -362,7 +367,7 @@ fn import_model(
     let output = number(&fetched["maxOutputTokens"])
         .or_else(|| number(&public["maxOutputTokens"]))
         .map_or(OUTPUT_BUDGET, |n| n.min(OUTPUT_BUDGET));
-    let modes = if go {
+    let modes = if go || fetched["modelType"] == "embedding" {
         nonempty(&fetched["modalities"])
     } else {
         None

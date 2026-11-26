@@ -140,6 +140,43 @@ fn openai_listing_scopes_tokens_and_keeps_only_visible_plan_descriptors() {
     assert_eq!(list[1]["reasoningLevels"], json!([]));
 }
 
+#[test]
+fn nvidia_embeddings_keep_their_input_modalities_even_when_the_list_omits_them() {
+    let raw = json!({"data":[
+        {"id":"nvidia/nemotron-3.5-embed-1b","object":"model","supports_thinking":true},
+        {"id":"nvidia/nemotron-3.5-embed-8b","object":"model"},
+        {"id":"snowflake/arctic-embed-l","object":"model"},
+        {"id":"nvidia/nemotron-3.5-lightning-30b-a3b","object":"model"}
+    ]});
+    let direct = json!(
+        models::normalize(&raw, "https://integrate.api.nvidia.com/v1", false, false)
+            .unwrap()
+            .models
+    );
+    for index in 0..2 {
+        assert_eq!(direct[index]["modelType"], "embedding");
+        assert_eq!(direct[index]["modalities"], json!(["text", "image"]));
+        assert_eq!(direct[index]["reasoningLevels"], json!([]));
+        assert!(direct[index].get("apiType").is_none());
+    }
+    assert_eq!(direct[2]["modelType"], "embedding");
+    assert_eq!(direct[2]["modalities"], json!(["text"]));
+    assert_eq!(direct[3]["apiType"], "chat-completions");
+    assert!(direct[3].get("modelType").is_none());
+    let other = json!(
+        models::normalize(&raw, "https://proxy.example.test/v1", false, false)
+            .unwrap()
+            .models
+    );
+    assert!(
+        other
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("modelType").is_none())
+    );
+}
+
 #[tokio::test]
 async fn discovery_reads_only_the_selected_account_and_does_not_follow_redirects() {
     let requests = Arc::new(AtomicUsize::new(0));

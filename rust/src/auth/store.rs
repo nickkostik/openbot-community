@@ -595,6 +595,7 @@ fn public_fields(plan: &Value, store: &Value) -> Value {
             {
                 row["catalogLimits"]["outputModalities"] = json!([]);
             }
+            model.apply_embedding_metadata(&mut row);
             Some(row)
         })
         .collect();

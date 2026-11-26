@@ -10,5 +10,6 @@ type ReasoningPolicy = {
 
 export const DEEPSEEK_ORIGIN: string;
 export function isDirectDeepSeekOrigin(baseUrl: string): boolean;
+export function nvidiaEmbeddingInputs(modelId: string, baseUrl: string): ("text" | "image")[] | undefined;
 export function documentedReasoningPolicy(modelId: string, baseUrl: string): ReasoningPolicy | undefined;
 export function documentedReasoningEffort(policy: ReasoningPolicy, value: unknown): ReasoningLevel | undefined;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type Catalog, type SecretBytes } from "../domain/types.ts";
 import { type SecretStore } from "../supervisor/secrets.ts";
-import { fetchModelsForProvider, modelsUrl, normalizeProviderModels, OPENAI_CODEX_MODELS_URL, type FetchLike } from "./provider-models.ts";
+import { fetchModelsForProvider, modelsUrl, normalizeProviderModels, OPENAI_CODEX_MODELS_URL, type FetchedModel, type FetchLike } from "./provider-models.ts";
 import { ORIGIN, SCOPES } from "../../payload/chatgpt-plan.cjs";
 
 type ResponseStub = { readonly status: number; readonly ok: boolean; text(): Promise<string> };
@@ -35,6 +35,35 @@ function makeSecrets(entries: Record<string, string>): SecretStore {
   }
   return { providers };
 }
+
+test("NVIDIA discovery classifies sparse embedding rows only on direct accounts", async () => {
+  const origin = "https://integrate.api.nvidia.com/v1";
+  const slug = "nvidia/nemotron-3.5-embed-8b";
+  const catalog = makeCatalog([
+    { id: "nvidia", name: "Primary", origin },
+    { id: "nvidia-2", name: "Secondary", origin },
+    { id: "proxy", name: "Proxy", origin: "https://proxy.example.test/v1" },
+  ]);
+  const secretStore = makeSecrets({ nvidia: "fixture-nvidia", "nvidia-2": "fixture-nvidia-2", proxy: "fixture-proxy" });
+  for (const providerId of ["nvidia", "nvidia-2", "proxy"]) {
+    const result = await fetchModelsForProvider({
+      providerId, catalog, secretStore, fetchFn: async (url, init) => {
+        assert.equal(init?.headers?.Authorization, `Bearer fixture-${providerId}`);
+        assert.equal(url, (providerId === "proxy" ? "https://proxy.example.test/v1" : origin) + "/models");
+        return jsonResponse(200, { data: [{ id: slug, object: "model", reasoning_levels: ["high"] }] });
+      },
+    });
+    assert.equal(result.status, 200);
+    const [model] = (result.body as { models: FetchedModel[] }).models;
+    if (providerId === "proxy") {
+      assert.equal(model?.modelType, undefined);
+    } else {
+      assert.equal(model?.modelType, "embedding");
+      assert.deepEqual(model?.modalities, ["text", "image"]);
+      assert.deepEqual(model?.reasoningLevels, []);
+    }
+  }
+});
 
 test("modelsUrl reuses the hop base-URL normalization", () => {
   assert.equal(modelsUrl("https://api.openai.com/v1"), "https://api.openai.com/v1/models");

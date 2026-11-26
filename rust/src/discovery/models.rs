@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::catalog::{Effort, Protocol, discovery_facts};
+use crate::catalog::{Effort, Protocol, discovery_facts, nvidia_embedding_inputs};
 
 const MAX_OUTPUT_TOKENS: u64 = 131_072;
 
@@ -61,6 +61,7 @@ pub fn normalize(raw: &Value, origin: &str, go: bool, plan: bool) -> Option<Inve
 }
 
 fn model(row: &Value, id: &str, origin: &str, go: bool, plan: bool) -> Model {
+    let embedding_inputs = nvidia_embedding_inputs(id, origin);
     let model_type = go
         .then(|| row["type"].as_str().filter(|kind| !kind.trim().is_empty()))
         .flatten()
@@ -70,7 +71,8 @@ fn model(row: &Value, id: &str, origin: &str, go: bool, plan: bool) -> Model {
             "decision" => "decision",
             "image" => "image",
             _ => "other",
-        });
+        })
+        .or_else(|| embedding_inputs.map(|_| "embedding"));
     let chat = model_type == Some("chat");
     let native = if chat { &row["limit"] } else { &Value::Null };
     let architecture = &row["architecture"];
@@ -88,6 +90,9 @@ fn model(row: &Value, id: &str, origin: &str, go: bool, plan: bool) -> Model {
             ]),
             false,
         );
+    }
+    if let Some(inputs) = embedding_inputs {
+        modalities = inputs.iter().map(|input| (*input).to_owned()).collect();
     }
     let reasoning = if model_type.is_some() && !chat {
         Vec::new()
@@ -140,7 +145,7 @@ fn model(row: &Value, id: &str, origin: &str, go: bool, plan: bool) -> Model {
         reasoning_levels: reasoning,
         api_type: api,
         model_type,
-        provider_metadata: model_type.map(|_| "opencode-go"),
+        provider_metadata: model_type.filter(|_| go).map(|_| "opencode-go"),
     };
     if let Some(facts) = discovery_facts(id, origin) {
         if !plan || model.reasoning_levels.len() <= 1 {

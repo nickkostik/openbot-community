@@ -2013,7 +2013,7 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 400, unknown);
       return;
     }
-    if (!botModels.modelSupportsChat(route.model)) {
+    if (!botModels.modelSupportsChat(route.model, route.provider.origin)) {
       var unsupported = { error: { message: route.model.slug + " does not support bot chat", code: "model_not_chat" } };
       fields.model = route.model.slug;
       fields.providerId = route.provider.id;

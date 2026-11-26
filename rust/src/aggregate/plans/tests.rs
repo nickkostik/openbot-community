@@ -95,6 +95,34 @@ fn merge_preserves_referenced_models_and_keeps_account_specific_capabilities() {
 }
 
 #[test]
+fn nvidia_refresh_keeps_documented_embeddings_that_the_provider_no_longer_lists() {
+    let (mut plan, _) = setup();
+    let provider = json!({"id":"direct-nvidia","origin":"https://integrate.api.nvidia.com/v1"});
+    let original = json!({
+        "id":"saved-embedding","providerId":"direct-nvidia","slug":"nvidia/llama-nemotron-embed-vl-1b-v2",
+        "modalities":["text"],"maxOutputTokens":8192
+    });
+    plan["catalog"]["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(provider.clone());
+    plan["catalog"]["models"]
+        .as_array_mut()
+        .unwrap()
+        .push(original.clone());
+    let lists = [listing(&provider, Ok(Vec::new()))];
+    let inventory = Inventory::new(None);
+    let changes = merge(&mut plan, &inventory, &lists, &Value::Null, false).unwrap();
+    assert_eq!((changes.added, changes.updated), (0, 1));
+    let mut expected = original;
+    expected["modelType"] = json!("embedding");
+    expected["modalities"] = json!(["text", "image"]);
+    assert_eq!(plan["catalog"]["models"][2], expected);
+    let repeated = merge(&mut plan, &inventory, &lists, &Value::Null, false).unwrap();
+    assert_eq!((repeated.added, repeated.updated), (0, 0));
+}
+
+#[test]
 fn provider_changes_and_retired_routes_do_not_apply_stale_results() {
     let (mut plan, inventory) = setup();
     let go = listing(

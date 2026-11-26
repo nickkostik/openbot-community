@@ -563,10 +563,33 @@ For a direct Go chat entry, `POST /api/providers/:id/fetch-models` returns norma
 | `modalities.input` | Recognized MIME categories become deduplicated `text`, `image`, `video` and `audio` values. |
 | `capabilities.reasoning` | Explicitly unsupported reasoning gives Default. Supported reasoning adds the advertised effort values in order, and a supported toggle adds Off. |
 
-An explicit provider type is saved as optional `modelType`. Recognized values are `chat`, `embedding`, `decision`, `image` and `other`. A reported unrecognized type becomes `other`. Older rows without a type keep chat eligibility. The Models inventory still lists non-chat rows, while the global picker, bot bindings and compaction use chat-capable models. Importing an explicitly typed non-chat row in Official keeps Official. A request for a known non-chat model at the chat hop returns HTTP 400 with `model_not_chat`.
+An explicit provider type is saved as optional `modelType`. Recognized values are `chat`, `embedding`, `decision`, `image` and `other`. A reported unrecognized type becomes `other`. Older rows without a type generally keep chat eligibility; known direct NVIDIA retrieval embeddings below remain excluded even without upstream categories. The Models inventory still lists non-chat rows, while the global picker, bot bindings and compaction use chat-capable models. Importing an explicitly typed non-chat row in Official keeps Official. A request for a known non-chat model at the chat hop returns HTTP 400 with `model_not_chat`.
 
 The managed public cache shares Go metadata across accepted direct Go bases. Account-specific discovery uses the selected provider's credential and can update an existing row's reported type and reasoning list even when the public catalog is unavailable. Saved explicit protocols take priority. A proposed effort list that would exclude a saved selected effort is held for that route. The optional transfer advisor applies its own saved-origin and effort rules. [Transfer advisor scope](#optional-tool-free-transfer-advisor).
 
+
+### Direct NVIDIA retrieval embeddings
+
+Known retrieval models at the direct NVIDIA origin `https://integrate.api.nvidia.com/v1` (also the host-only base and trailing slashes) use documented input capabilities. This classification also covers native model lists with missing categories. OpenBot marks these exact routes with the existing `modelType: "embedding"` and `modalities` fields:
+
+| Saved model slug | Input `modalities` |
+|---|---|
+| `nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1` | `["text","image"]` |
+| `nvidia/llama-nemotron-embed-vl-1b-v2` | `["text","image"]` |
+| `nvidia/nemotron-3.5-embed-1b` | `["text","image"]` |
+| `nvidia/nemotron-3.5-embed-8b` | `["text","image"]` |
+| `nvidia/nvclip` | `["text","image"]` |
+| `nvidia/embed-qa-4` | `["text"]` |
+| `nvidia/llama-3.2-nv-embedqa-1b-v1` | `["text"]` |
+| `nvidia/nemotron-3-embed-1b` | `["text"]` |
+| `nvidia/nv-embedqa-mistral-7b-v2` | `["text"]` |
+| `snowflake/arctic-embed-l` | `["text"]` |
+
+These models return embedding vectors. The `modalities` describe accepted inputs. NVIDIA documents the [retrieval API family](https://docs.api.nvidia.com/nim/reference/retrieval-apis), [Llama Nemotron vision-language embedding inputs](https://docs.api.nvidia.com/nim/reference/nvidia-llama-nemotron-embed-vl-1b-v2), [NV-CLIP text/image embeddings](https://docs.api.nvidia.com/nim/reference/nvidia-nvclip) and [embedding query/passage usage](https://docs.nvidia.com/nim/nemo-retriever/embedding/latest/use-the-api-openai.html). NVIDIA defines each endpoint's input formats and query/passage restrictions.
+
+Keep these rows in every independent saved direct NVIDIA account, including both accounts in a two-account setup. Preserve each provider ID, credential and `providerId:slug`, and keep account inventories separate during chat-route cleanup. Discovery, imports, effective saved-row normalization and refresh apply the documented classification and inputs to older untyped or incorrectly chat-typed rows. When discovery or the public catalog omits a saved known route, refresh preserves its row and applies the documented embedding metadata.
+
+The Models inventory retains these rows. Models classified as embeddings are excluded from active global bot chat, per-bot model assignments and compaction. The same eligibility checks cover existing catalog rows and direct chat-hop requests with missing upstream categories; direct chat requests return HTTP 400 with a message that the model does not support bot chat. A stale bot pin uses the existing global fallback and `bot-models.stale` behavior. Select a supported chat model for bot routing. The override applies to the exact NVIDIA origin and listed slugs; routes at other origins keep their existing classification. Generic routes, save kinds, settings schema and per-request reload rules remain unchanged. Verify current provider access and retrieval inference separately.
 
 ### Direct Z.AI GLM-5.3 reasoning
 

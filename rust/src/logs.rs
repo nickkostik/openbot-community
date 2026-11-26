@@ -1,3 +1,4 @@
+mod maintenance;
 mod read;
 mod record;
 mod report;
@@ -11,10 +12,10 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ pub use record::Trace;
 const REQUESTS: &str = "openbot-requests.jsonl";
 const EVENTS: &str = "openbot-events.jsonl";
 const BODIES: &str = "openbot-request-bodies";
+const SETTINGS: &str = "openbot-logs.json";
 const PENDING_WRITES: u32 = 32;
 
 #[derive(Clone)]
@@ -62,7 +64,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load(root: &Path) -> Self {
-        let raw = read_json(&root.join("openbot-logs.json"), 4096)
+        let raw = read_json(&root.join(SETTINGS), 4096)
             .ok()
             .flatten()
             .unwrap_or_default();
@@ -112,11 +114,15 @@ impl Logs {
         Router::new()
             .route("/api/logs", get(list))
             .route("/api/logs/{id}", get(detail))
-            .route("/api/logs/settings", get(settings))
+            .route("/api/logs/settings", get(settings).put(maintenance::update))
+            .route("/api/logs/cleanup", post(maintenance::cleanup))
+            .route("/api/logs/strip-bodies", post(maintenance::strip))
+            .route("/api/logs/clear", post(maintenance::clear))
             .route("/api/logs/events", get(events))
             .route("/api/logs/facets", get(facets))
             .route("/api/logs/stats", get(stats))
             .route("/api/logs/usage", get(usage))
+            .layer(DefaultBodyLimit::max(4096))
             .with_state(self)
     }
 

@@ -44,7 +44,7 @@ struct Args {
     /// Enable manual and scheduled catalog refresh writes in disposable state.
     #[arg(long)]
     enable_model_refresh: bool,
-    /// Record requests using the existing log settings in disposable state.
+    /// Record requests and maintain the log archive in disposable state.
     #[arg(long)]
     enable_request_logs: bool,
     /// Serve the built OpenBot web assets from this directory.
@@ -176,12 +176,17 @@ async fn serve(args: Args) -> io::Result<()> {
     ];
     println!("OpenBot Rust listening on http://{authority}");
     let draining = catalog.clone();
+    let log_cleanup = logs.schedule_cleanup();
     let result = axum::serve(
         listener,
         server::router(state, authority, services.into_iter().flatten()),
     )
     .with_graceful_shutdown(async move {
         shutdown().await;
+        if let Some(task) = log_cleanup {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(catalog) = draining {
             catalog.stop();
         }

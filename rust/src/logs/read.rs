@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::{BODIES, REQUESTS, at};
 
 const MAX_LOG_SCAN_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ROW_BYTES: usize = 128 * 1024;
+pub(super) const MAX_ROW_BYTES: usize = 128 * 1024;
 const MAX_LEGACY_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct Rows {
@@ -270,7 +270,7 @@ pub fn detail(root: &Path, id: &str) -> io::Result<Option<Value>> {
     Ok(Some(row))
 }
 
-fn regular_file(path: &Path) -> io::Result<Option<File>> {
+pub(super) fn regular_file(path: &Path) -> io::Result<Option<File>> {
     match fs::symlink_metadata(path) {
         Ok(info) if info.is_file() => File::open(path).map(Some),
         Ok(_) => Err(io::ErrorKind::InvalidInput.into()),

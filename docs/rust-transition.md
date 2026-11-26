@@ -53,7 +53,7 @@ Build the existing panel with `npm run build`, then point `--ui-dir` at the gene
 
 Open `/#/logs` with `--ui-dir` to browse saved records, captured bodies, events, and usage. In disposable Custom state, add `--enable-hop --enable-request-logs` and set `loggingEnabled` in `openbot-logs.json` to record new requests. The writer uses `openbot-requests.jsonl` and its matching body files. It records retry attempts and streamed outcomes under one request. Usage counts the provider once per turn and distinguishes a zero cache count from missing telemetry. Capture uses the saved body policy, redacts credentials, and caps each stored body.
 
-The current service still handles lifecycle and mode changes, log configuration, retention and cleanup, and the Official host tap.
+The same opt-in enables log settings saves, cleanup, Strip Bodies, and Clear in the disposable directory. The first retention pass runs after one minute and repeats every 30 minutes. Clear keeps event history. The candidate uses the existing append lock and keeps unknown rows during retention. The current service still handles lifecycle and mode changes and the Official host tap.
 
 ## Cutover checklist
 
@@ -68,7 +68,8 @@ The current service still handles lifecycle and mode changes, log configuration,
 - [x] Port Custom request recording plus log, event, and usage reads. Verify older paired rows, body redaction, and the Requests, Events, and Usage views in Chromium.
 - [ ] Complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
-- [ ] Port log settings, retention, cleanup, and compaction. Replay representative long histories with structured tool results and compare content and provider cache counters.
+- [x] Port log settings, scheduled retention, cleanup, Strip Bodies, and Clear. Rehearse all operations against disposable history.
+- [ ] Port compaction. Replay representative long histories with structured tool results and compare content and provider cache counters.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.

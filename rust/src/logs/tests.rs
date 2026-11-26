@@ -156,3 +156,142 @@ async fn ignores_symlinked_body_records() {
     assert_eq!(row["bodyMissing"], true);
     assert!(row.get("request").is_none());
 }
+
+async fn action(router: &Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn log_maintenance_prunes_strips_and_clears_without_touching_events_or_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("openbot-mode"), "custom\n").unwrap();
+    fs::write(
+        root.join(SETTINGS),
+        r#"{"loggingEnabled":true,"logRetentionDays":7,"maxRecords":1}"#,
+    )
+    .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let rows = [
+        json!({"id":"expired","startedAt":iso(now-time::Duration::days(8)),"status":200,"hasResponse":true}),
+        json!({"id":"recent","startedAt":iso(now),"status":200,"hasResponse":true,"responseTruncated":true,"bodyBytes":42}),
+        json!({"id":"unknown","startedAt":"old invalid date","status":200,"hasResponse":true}),
+    ];
+    let data = rows
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\nbroken-tail\n";
+    fs::write(root.join(REQUESTS), &data).unwrap();
+    fs::create_dir(root.join(BODIES)).unwrap();
+    for name in ["expired", "recent", "unknown", "unmatched"] {
+        fs::write(
+            root.join(BODIES).join(format!("{name}.json")),
+            r#"{"response":"fixture"}"#,
+        )
+        .unwrap();
+    }
+    let read_only = Logs::new(root, false).routes();
+    assert_eq!(
+        action(&read_only, "POST", "/api/logs/clear", json!({}))
+            .await
+            .0,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(fs::read_to_string(root.join(REQUESTS)).unwrap(), data);
+
+    let app = Logs::new(root, true).routes();
+    let (status, cleanup) = action(&app, "POST", "/api/logs/cleanup", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        cleanup,
+        json!({"ok":true,"removedByRetention":1,"removedByCap":0,"kept":2})
+    );
+    assert!(!root.join(BODIES).join("expired.json").exists());
+    assert!(root.join(BODIES).join("unmatched.json").exists());
+    assert!(
+        fs::read_to_string(root.join(REQUESTS))
+            .unwrap()
+            .contains("broken-tail")
+    );
+    let (_, listed) = request(&app, "/api/logs").await;
+    assert_eq!(listed["total"], 2);
+    let (status, stripped) = action(&app, "POST", "/api/logs/strip-bodies", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stripped["stripped"], 3);
+    let (_, row) = request(&app, "/api/logs/recent").await;
+    assert_eq!(row["hasResponse"], false);
+    assert!(row.get("responseTruncated").is_none());
+    assert!(row.get("bodyBytes").is_none());
+    let (status, _) = action(&app, "POST", "/api/logs/clear", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(request(&app, "/api/logs").await.1["total"], 0);
+    assert_eq!(request(&app, "/api/logs/events").await.1["total"], 3);
+    assert_eq!(
+        fs::read_to_string(root.join("openbot-mode")).unwrap(),
+        "custom\n"
+    );
+}
+
+#[tokio::test]
+async fn settings_changes_preserve_official_and_refuse_cleanup_with_invalid_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let logs = Logs::new(root, true);
+    let app = logs.clone().routes();
+    fs::write(root.join("openbot-mode"), "official\n").unwrap();
+    let on = json!({"loggingEnabled":true,"logBodies":true,"logRetentionDays":"70","maxRecords":9});
+    let (status, _) = action(&app, "PUT", "/api/logs/settings", on.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(!root.join(SETTINGS).exists());
+    fs::write(root.join("openbot-mode"), "custom\n").unwrap();
+    let (status, result) = action(&app, "PUT", "/api/logs/settings", on).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["logRetentionDays"], 70);
+    assert_eq!(result["wrapBytesChanged"], false);
+    let saved = fs::read_to_string(root.join(SETTINGS)).unwrap();
+    assert!(!saved.contains("maxRecords"));
+    let (status, _) = action(
+        &app,
+        "PUT",
+        "/api/logs/settings",
+        json!({"logRetentionDays":366}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(fs::read_to_string(root.join(SETTINGS)).unwrap(), saved);
+    let trace = logs.begin().await.unwrap();
+    let (status, _) = action(
+        &app,
+        "PUT",
+        "/api/logs/settings",
+        json!({"loggingEnabled":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    trace.finish(StatusCode::OK, None);
+    logs.wait_for_writes().await;
+    assert!(!root.join(REQUESTS).exists());
+
+    let old_turn = r#"{"id":"archived-turn","startedAt":"2000-01-01T00:00:00.000Z","ok":true}"#;
+    fs::write(root.join(SETTINGS), "{broken").unwrap();
+    fs::write(root.join(REQUESTS), old_turn).unwrap();
+    let (status, _) = action(&app, "POST", "/api/logs/cleanup", json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(fs::read_to_string(root.join(REQUESTS)).unwrap(), old_turn);
+}

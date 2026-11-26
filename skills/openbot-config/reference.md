@@ -177,7 +177,29 @@ The candidate exposes these read routes with `--ui-dir` or `--enable-request-log
 - `GET /api/logs/settings`, `GET /api/logs/stats` and `GET /api/logs/facets` read settings, sampled statistics and available filters.
 - `GET /api/logs/events` reads existing rows from `openbot-events.jsonl`. `GET /api/logs/usage` summarizes sampled provider usage by model, provider, purpose and time.
 
-Provider token totals in stats and usage exclude `custom-host` harness rows. Use the current Node service for settings changes, manual cleanup, retention, the Official stock host tap and context compaction.
+Provider token totals in stats and usage exclude `custom-host` harness rows.
+
+##### Rust log maintenance
+
+With `--enable-request-logs`, the candidate also accepts settings changes and archive maintenance in the disposable directory. Replace `42880` with the port printed by the candidate and run the command for the intended operation.
+
+```bash
+rust_log_origin=http://127.0.0.1:42880
+curl --fail-with-body -sS -X PUT -H 'Content-Type: application/json' \
+  --data '{"logBodies":false,"logBodiesOnError":false}' "$rust_log_origin/api/logs/settings"
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/cleanup"
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/strip-bodies"
+```
+
+`PUT /api/logs/settings` saves capture and retention policy in `openbot-logs.json`. A change to `loggingEnabled` requires saved Custom mode. In Official, the candidate returns HTTP 409 for a recording toggle. Use the existing Node service for the Official stock tap and context compaction.
+
+`POST /api/logs/cleanup` prunes expired request rows under `logRetentionDays` and cleans up eligible sidecars. A retention change also attempts cleanup immediately. The automatic task first checks after one minute and then every 30 minutes, whether recording is on or off. Invalid or unreadable log settings block automatic and manual retention cleanup. A missing settings file uses default retention. `POST /api/logs/strip-bodies` removes body captures and preserves request metadata.
+
+To empty the disposable request archive and remove its body captures, run Clear. Existing events remain in `openbot-events.jsonl`.
+
+```bash
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/clear"
+```
 
 ### Official controls without logging rewrap
 

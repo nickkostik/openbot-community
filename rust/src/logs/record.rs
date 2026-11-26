@@ -394,7 +394,7 @@ fn write(
             }
         }
     }
-    if let Err(error) = append(root, &row) {
+    if let Err(error) = append(&root.join(REQUESTS), &row) {
         if let Some(path) = body_path {
             let _ = fs::remove_file(path);
         }
@@ -433,9 +433,8 @@ fn write_body(root: &Path, id: &str, body: &Map<String, Value>) -> io::Result<(P
     Ok((path, bytes.len()))
 }
 
-fn append(root: &Path, row: &Value) -> io::Result<()> {
-    let path = root.join(REQUESTS);
-    ensure_regular(&path)?;
+pub(super) fn append(path: &Path, row: &Value) -> io::Result<()> {
+    ensure_regular(path)?;
     let mut file = options().read(true).append(true).create(true).open(path)?;
     let mut line = Vec::new();
     if file.metadata()?.len() > 0 {
@@ -451,7 +450,7 @@ fn append(root: &Path, row: &Value) -> io::Result<()> {
     file.write_all(&line)
 }
 
-fn ensure_regular(path: &Path) -> io::Result<()> {
+pub(super) fn ensure_regular(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(info) if info.is_file() => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -470,13 +469,13 @@ fn options() -> OpenOptions {
     options
 }
 
-struct AppendLock {
+pub(super) struct AppendLock {
     path: PathBuf,
     owner: String,
 }
 
 impl AppendLock {
-    fn acquire(root: &Path, id: &str) -> io::Result<Self> {
+    pub(super) fn acquire(root: &Path, id: &str) -> io::Result<Self> {
         let path = root.join("openbot-requests.lock");
         let owner = format!("{}\n{id}\n", std::process::id());
         let started = Instant::now();

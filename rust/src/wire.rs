@@ -295,9 +295,22 @@ fn messages(body: &Map<String, Value>) -> Result<Map<String, Value>, &'static st
     let mut tool_results = Vec::new();
     for message in items(body.get("messages")).filter(|row| row.is_object()) {
         match message["role"].as_str() {
-            Some("system") => {
-                if let Some(text) = message["content"].as_str() {
-                    system.push(text);
+            Some("system" | "developer") => {
+                match &message["content"] {
+                    Value::String(text) => system.push(text.clone()),
+                    Value::Array(parts) => {
+                        let text = parts
+                            .iter()
+                            .map(|part| {
+                                part["text"]
+                                    .as_str()
+                                    .filter(|_| part["type"] == "text")
+                                    .ok_or("unsupported Messages system content block")
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        system.push(text.join("\n"));
+                    }
+                    _ => {}
                 }
                 continue;
             }

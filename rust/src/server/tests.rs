@@ -76,7 +76,11 @@ async fn call(router: &Router, method: Method, value: Value) -> (StatusCode, Val
 #[tokio::test]
 async fn shadow_reads_both_go_accounts_and_provider_specific_efforts() {
     let dir = fixture();
-    let app = router(State::new(dir.path().into(), false).unwrap(), HOST.into());
+    let app = router(
+        State::new(dir.path().into(), false).unwrap(),
+        HOST.into(),
+        None,
+    );
     let (status, actual) = call(&app, Method::GET, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -106,7 +110,11 @@ async fn shadow_reads_both_go_accounts_and_provider_specific_efforts() {
 async fn batch_switch_validates_all_models_and_keeps_effort_per_route() {
     let dir = fixture();
     let file = dir.path().join("openbot-bot-models.json");
-    let app = router(State::new(dir.path().into(), true).unwrap(), HOST.into());
+    let app = router(
+        State::new(dir.path().into(), true).unwrap(),
+        HOST.into(),
+        None,
+    );
     let before = fs::read(&file).unwrap();
     for invalid in [
         json!({"botId":"bot-a","modelId":"opencode:search"}),
@@ -163,7 +171,7 @@ async fn batch_switch_validates_all_models_and_keeps_effort_per_route() {
 async fn simultaneous_writes_survive_restart() {
     let dir = fixture();
     let root = dir.path().to_owned();
-    let app = router(State::new(root.clone(), true).unwrap(), HOST.into());
+    let app = router(State::new(root.clone(), true).unwrap(), HOST.into(), None);
     assert!(State::new(root.clone(), true).is_err());
     let (first, second) = tokio::join!(
         call(
@@ -181,7 +189,7 @@ async fn simultaneous_writes_survive_restart() {
     assert_eq!(second.0, StatusCode::OK);
     drop(app);
 
-    let reopened = router(State::new(root, true).unwrap(), HOST.into());
+    let reopened = router(State::new(root, true).unwrap(), HOST.into(), None);
     let (status, view) = call(&reopened, Method::GET, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["assignments"]["bot-b"], "opencode:example");
@@ -193,7 +201,11 @@ async fn corrupt_state_can_be_read_but_a_save_cannot_replace_it() {
     let dir = fixture();
     let file = dir.path().join("openbot-bot-models.json");
     fs::write(&file, b"{ invalid").unwrap();
-    let app = router(State::new(dir.path().into(), true).unwrap(), HOST.into());
+    let app = router(
+        State::new(dir.path().into(), true).unwrap(),
+        HOST.into(),
+        None,
+    );
     let (status, view) = call(&app, Method::GET, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["assignments"], json!({}));
@@ -222,7 +234,11 @@ async fn corrupt_state_can_be_read_but_a_save_cannot_replace_it() {
 #[tokio::test]
 async fn rejects_cross_origin_and_non_loopback_host() {
     let dir = fixture();
-    let app = router(State::new(dir.path().into(), false).unwrap(), HOST.into());
+    let app = router(
+        State::new(dir.path().into(), false).unwrap(),
+        HOST.into(),
+        None,
+    );
     for (host, origin) in [
         ("untrusted.test", None),
         (HOST, Some("https://untrusted.test")),

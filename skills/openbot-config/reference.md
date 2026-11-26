@@ -105,6 +105,33 @@ Bot-mode upgrades use `openbot-pending-bounce.json`, `openbot-turn-lease.json` a
 
 CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status` and `openbot finalize-host`. Source install/repair uses `install`; explicit new `--origin`/`--model` requires private `OPENBOT_API_KEY`. `--dry-run` proves wrapping; `--census-only` is observation. `install --keep-service` is owned service repair, not a source upgrade: only explicitly saved Official selects the guarded [controls-only path](#official-controls-without-logging-rewrap), while Custom retains normal checked wrap/reload behavior and deferred-idle rules.
 
+### Rust hop candidate
+
+Use the candidate to verify provider inference on IPv4 loopback against a private, disposable OpenBot state directory. Pass `--enable-hop` to add the inference and health routes. Run the command from the source checkout with `--port 0` to bind a separate ephemeral listener.
+
+```bash
+cargo +1.95.0 run --locked --manifest-path rust/Cargo.toml -- \
+  --sand-data /tmp/openbot-candidate-state --port 0 --enable-hop
+```
+
+Use the printed `http://127.0.0.1:<bound-port>`. `GET /healthz` returns `{"ok":true,"service":"openbot"}` when the listener is up. `POST /v1/chat/completions` uses the saved catalog and credential for the selected route. Test account IDs and model IDs can use `fixture-account:fixture-model`. Keep credentials private.
+
+Dispatch rereads files in the directory passed to `--sand-data` on each request:
+
+| File | Candidate behavior |
+| --- | --- |
+| `openbot-mode` | Requires trimmed `custom`. Official or a missing file returns HTTP 503 `official_mode`. |
+| `openbot-pause.json` | `{"paused":true}` returns HTTP 503 `paused`. |
+| `openbot-pause-bots.json` | A matching bot ID in `pausedBotIds` returns HTTP 503 `bot_paused`. |
+| `openbot-plan.json`, `openbot-bot-models.json` | Use the existing providers and models. An intentional bot pin takes priority and a supported saved bot effort applies to its exact routed model. |
+| `secrets.json` | Use the selected provider ID's existing private credential record. |
+
+The hop generates the selected protocol's headers and converts upstream Chat Completions, Responses and Messages JSON or SSE into the caller's Chat Completions shape. Provider-specific session and cache identifiers are scoped to the selected account and available conversation or bot context. Eligible transient errors and temporary rate limits get bounded retries before client output. A later upstream error ends the original stream with the error.
+
+For saved OpenAI OAuth and ChatGPT plan sign-ins, the candidate uses valid saved access tokens. Expired tokens or tokens expiring within 60 seconds return HTTP 503 `provider_sign_in_required`. Use the current panel for sign-in and renewal. Candidate credential renewal and panel cutover are pending.
+
+Use the Node installer and unified supervisor for the live panel and hop on port 9280. Official uses stock server/Temporal delivery. Use `/healthz` for candidate listener readiness and a completion for candidate inference verification.
+
 ### Official controls without logging rewrap
 
 For an already selected literal Official mode, the reviewed installed CLI can recover the owned panel independently of optional native logging compatibility:

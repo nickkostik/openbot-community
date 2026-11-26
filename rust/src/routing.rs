@@ -26,10 +26,38 @@ pub struct Route {
     provider_id: String,
     model_id: String,
     model: String,
-    protocol: Protocol,
-    upstream: String,
+    pub protocol: Protocol,
+    pub upstream: String,
     reasoning_effort: Effort,
     stale_assignment: bool,
+}
+
+pub struct Selection<'a> {
+    pub model: &'a Model,
+    pub provider: &'a Provider,
+    pub effort_override: Option<Effort>,
+    origin: Url,
+    stale_assignment: bool,
+}
+
+impl Selection<'_> {
+    pub fn effort(&self) -> Effort {
+        self.effort_override
+            .unwrap_or_else(|| self.model.default_effort())
+    }
+
+    pub fn route(&self, credential: CredentialKind) -> Route {
+        let protocol = protocol_for(self.model, self.provider, &self.origin, credential);
+        Route {
+            provider_id: self.provider.id.clone(),
+            model_id: self.model.id.clone(),
+            model: self.model.slug.clone(),
+            protocol,
+            upstream: endpoint(self.origin.clone(), protocol, credential),
+            reasoning_effort: self.effort(),
+            stale_assignment: self.stale_assignment,
+        }
+    }
 }
 
 impl Route {
@@ -78,6 +106,15 @@ pub fn resolve(
     bot_id: Option<&str>,
     credential: CredentialKind,
 ) -> Result<Route, RouteError> {
+    Ok(select(catalog, settings, requested, bot_id)?.route(credential))
+}
+
+pub fn select<'a>(
+    catalog: &'a Catalog,
+    settings: &Settings,
+    requested: &str,
+    bot_id: Option<&str>,
+) -> Result<Selection<'a>, RouteError> {
     let pin = bot_id.and_then(|id| settings.model_for_bot(id));
     let mut stale_assignment = false;
     let selector = match pin {
@@ -112,15 +149,13 @@ pub fn resolve(
         .find(|provider| provider.id == model.provider_id)
         .ok_or(RouteError::IncompleteProvider)?;
     let origin = parse_origin(&provider.origin).ok_or(RouteError::IncompleteProvider)?;
-    let protocol = protocol_for(model, provider, &origin, credential);
-    let effort = bot_id.and_then(|id| settings.effort_for_bot(id, &model.id));
-    Ok(Route {
-        provider_id: provider.id.clone(),
-        model_id: model.id.clone(),
-        model: model.slug.clone(),
-        protocol,
-        upstream: endpoint(origin, protocol, credential),
-        reasoning_effort: model.routed_effort(effort),
+    Ok(Selection {
+        model,
+        provider,
+        origin,
+        effort_override: bot_id
+            .and_then(|id| settings.effort_for_bot(id, &model.id))
+            .and_then(|effort| model.effective_override(effort)),
         stale_assignment,
     })
 }

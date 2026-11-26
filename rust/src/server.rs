@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     bot_models::{Settings, View},
     catalog::Catalog,
+    hop::Hop,
     routing::{self, CredentialKind, Route},
 };
 
@@ -67,8 +68,7 @@ impl State {
         bot_id: Option<&str>,
         credential: CredentialKind,
     ) -> io::Result<Vec<Route>> {
-        let catalog = self.0.catalog()?;
-        let settings = self.0.settings(false)?;
+        let (catalog, settings) = self.saved()?;
         models
             .iter()
             .map(|model| {
@@ -76,6 +76,14 @@ impl State {
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
             })
             .collect()
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.0.root
+    }
+
+    pub fn saved(&self) -> io::Result<(Catalog, Settings)> {
+        Ok((self.0.catalog()?, self.0.settings(false)?))
     }
 }
 
@@ -138,12 +146,15 @@ pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-pub fn router(state: State, authority: String) -> Router {
-    Router::new()
+pub fn router(state: State, authority: String, hop: Option<Hop>) -> Router {
+    let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
         .layer(DefaultBodyLimit::max(BOT_MODELS_MAX_BYTES as usize))
-        .layer(middleware::from_fn_with_state(authority, local_requests))
-        .with_state(state)
+        .with_state(state);
+    if let Some(hop) = hop {
+        router = router.merge(hop.routes());
+    }
+    router.layer(middleware::from_fn_with_state(authority, local_requests))
 }
 
 async fn local_requests(

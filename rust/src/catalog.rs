@@ -42,8 +42,17 @@ impl Effort {
 
 #[derive(Clone, Copy, Debug)]
 struct Policy {
+    kind: PolicyKind,
     levels: &'static [Effort],
     aliases: &'static [(Effort, Effort)],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PolicyKind {
+    DeepSeek,
+    KimiCode,
+    NvidiaToggle,
+    NvidiaSuper,
 }
 
 impl Policy {
@@ -80,6 +89,7 @@ impl Policy {
                 | "deepseek-v4-flash"
                 | "deepseek-v4-flash-vision-exp",
             ) => Some(Self {
+                kind: PolicyKind::DeepSeek,
                 levels: &[Default, Off, Low, High, Max],
                 aliases: &[(Minimal, Low), (Medium, High), (XHigh, High)],
             }),
@@ -88,6 +98,7 @@ impl Policy {
                 "/coding" | "/coding/v1",
                 "k3.1-pro" | "k3.1-pro-highspeed",
             ) => Some(Self {
+                kind: PolicyKind::KimiCode,
                 levels: &[Default, Low, High, Max],
                 aliases: &[(Medium, High), (XHigh, Max)],
             }),
@@ -96,6 +107,7 @@ impl Policy {
                 "" | "/v1",
                 "nvidia/nemotron-3.5-lightning-30b-a3b" | "nvidia/nemotron-3.5-bolt-e4b",
             ) => Some(Self {
+                kind: PolicyKind::NvidiaToggle,
                 levels: &[Default, Off, On],
                 aliases: &[
                     (Minimal, On),
@@ -108,6 +120,7 @@ impl Policy {
             }),
             ("integrate.api.nvidia.com", "" | "/v1", "nvidia/nemotron-3.5-super-vl-120b-a12b") => {
                 Some(Self {
+                    kind: PolicyKind::NvidiaSuper,
                     levels: &[Default, Off, Low, High],
                     aliases: &[
                         (Minimal, Low),
@@ -179,6 +192,8 @@ pub struct Model {
     pub wire_chat: bool,
     pub protocol: Option<Protocol>,
     pub levels: Vec<Effort>,
+    pub max_output_tokens: u64,
+    pub fast: bool,
     saved_effort: Effort,
     policy: Option<Policy>,
 }
@@ -280,6 +295,16 @@ impl Model {
             wire_chat: row.get("modelType").is_none_or(|kind| kind == "chat"),
             protocol,
             levels,
+            max_output_tokens: configured_tokens(&row["maxOutputTokens"]),
+            fast: row["parameters"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["id"] == "fast"))
+                .is_some_and(|row| {
+                    row["value"] == true
+                        || row["value"]
+                            .as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("true"))
+                }),
             saved_effort,
             policy,
         })
@@ -291,12 +316,26 @@ impl Model {
             .map_or(effort, |(_, current)| *current)
     }
 
-    pub fn routed_effort(&self, override_effort: Option<Effort>) -> Effort {
-        override_effort
-            .map(|choice| self.display_effort(choice))
-            .filter(|choice| self.levels.contains(choice))
-            .unwrap_or_else(|| self.display_effort(self.saved_effort))
+    pub fn effective_override(&self, choice: Effort) -> Option<Effort> {
+        let choice = self.display_effort(choice);
+        self.levels.contains(&choice).then_some(choice)
     }
+
+    pub fn default_effort(&self) -> Effort {
+        self.display_effort(self.saved_effort)
+    }
+
+    pub fn policy(&self) -> Option<PolicyKind> {
+        self.policy.map(|policy| policy.kind)
+    }
+}
+
+fn configured_tokens(value: &Value) -> u64 {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|tokens| tokens.is_finite() && *tokens >= 1.0)
+        .map_or(65_536, |tokens| tokens.min(131_072.0) as u64)
 }
 
 #[derive(Debug, Default)]

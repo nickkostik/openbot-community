@@ -1,5 +1,7 @@
 mod bot_models;
 mod catalog;
+mod hop;
+mod reasoning;
 mod routing;
 mod server;
 mod wire;
@@ -15,7 +17,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     version,
-    about = "OpenBot Rust candidate for bot model settings and route resolution"
+    about = "OpenBot Rust candidate for bot settings and provider inference"
 )]
 struct Args {
     /// Directory containing the existing OpenBot plan and bot settings.
@@ -27,6 +29,9 @@ struct Args {
     /// Permit writes when testing against a separate copy of the state.
     #[arg(long)]
     write_bot_settings: bool,
+    /// Enable provider inference in a disposable Custom state directory.
+    #[arg(long)]
+    enable_hop: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -81,10 +86,15 @@ fn main() -> io::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(args.sand_data, args.port, args.write_bot_settings))
+        .block_on(serve(
+            args.sand_data,
+            args.port,
+            args.write_bot_settings,
+            args.enable_hop,
+        ))
 }
 
-async fn serve(sand_data: PathBuf, port: u16, writable: bool) -> io::Result<()> {
+async fn serve(sand_data: PathBuf, port: u16, writable: bool, enable_hop: bool) -> io::Result<()> {
     let state = server::State::new(sand_data, writable)?;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?;
@@ -93,8 +103,11 @@ async fn serve(sand_data: PathBuf, port: u16, writable: bool) -> io::Result<()> 
     } else {
         address.to_string()
     };
+    let hop = enable_hop
+        .then(|| hop::Hop::new(state.clone()))
+        .transpose()?;
     println!("OpenBot Rust listening on http://{authority}");
-    axum::serve(listener, server::router(state, authority))
+    axum::serve(listener, server::router(state, authority, hop))
         .with_graceful_shutdown(shutdown())
         .await
 }

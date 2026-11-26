@@ -107,7 +107,7 @@ CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status
 
 ### Rust hop candidate
 
-Use the candidate to verify provider inference on IPv4 loopback against a private, disposable OpenBot state directory. Pass `--enable-hop` to add the inference and health routes. Run the command from the source checkout with `--port 0` to bind a separate ephemeral listener.
+Use the candidate to verify provider inference on IPv4 loopback against a private, disposable OpenBot state directory. Pass `--enable-hop` to add the inference route. Run the command from the source checkout with `--port 0` to bind a separate ephemeral listener.
 
 ```bash
 cargo +1.95.0 run --locked --manifest-path rust/Cargo.toml -- \
@@ -148,6 +148,12 @@ Add `--enable-accounts` to the candidate command to rehearse credential saves an
 An add returns `createdProviderId` for the next available `openai` account ID. Use that ID when configuring a model in the disposable catalog. A targeted draft saves under the original provider ID after checking the saved account revision. A direct credential save uses `secret` in place of `credentialId`. Legacy Codex OAuth uses `POST /api/oauth/openai/start` and `POST /api/oauth/openai/complete` with the attempt's `sessionId` and its `http://localhost:1455/auth/callback` URL as `callbackUrl`. Save the resulting legacy draft as a new account.
 
 With both flags active, inference can renew a due OpenAI login when its renewal window permits. Concurrent requests for the same provider ID share one renewal. The candidate rereads the current credential and persists refreshed credentials only while the original value still matches. It atomically replaces the compatible `secrets.json` file, keeping the credential as a JSON-encoded string under `providers[providerId]`. The account routes and inference share the candidate writer guarded by `.openbot-rust-secrets.lock`. If a login is unusable, the hop returns HTTP 503 `provider_sign_in_required`. Use the existing Node panel for live account sign-in and renewal.
+
+#### Rust panel and provider discovery
+
+Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves. Successful account saves return the current panel state so the browser can show the saved account immediately.
+
+Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with either `--enable-hop` or `--enable-accounts`. The aggregate model catalog, scheduled refresh and remaining panel control routes are pending.
 
 ### Official controls without logging rewrap
 

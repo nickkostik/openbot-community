@@ -192,7 +192,7 @@ async fn discovery_reads_only_the_selected_account_and_does_not_follow_redirects
     let state = State::new(root.path().into(), false).unwrap();
     let discovery = Discovery::new(state.clone(), store).unwrap();
     let host = "127.0.0.1:39280";
-    let app = server::router(state, host.into(), None, None, Some(discovery));
+    let app = server::router(state, host.into(), [discovery.routes()]);
     for (id, code, kind) in [
         ("direct", 200, ""),
         ("redirect", 502, "unreachable"),

@@ -1,4 +1,4 @@
-use std::{io, path::Path};
+use std::path::Path;
 
 use axum::{
     body::Bytes,
@@ -13,7 +13,7 @@ use crate::{
     catalog::Protocol,
     reasoning,
     routing::{self, CredentialKind},
-    server::{State, read_json},
+    server::{State, read_json, read_mode},
 };
 
 use super::failure::Failure;
@@ -71,7 +71,7 @@ impl Prepared {
         let staged = state.clone();
         let pause_bot = bot.clone();
         let (catalog, settings) = tokio::task::spawn_blocking(move || {
-            if !custom_mode(staged.root()).map_err(|_| config_failure())? {
+            if read_mode(staged.root()).map_err(|_| config_failure())? != "custom" {
                 return Err(Failure::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "official_mode",
@@ -176,18 +176,6 @@ impl Prepared {
             client_stream,
         })
     }
-}
-
-fn custom_mode(root: &Path) -> io::Result<bool> {
-    use std::io::Read;
-    let file = match std::fs::File::open(root.join("openbot-mode")) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let mut contents = String::new();
-    file.take(65).read_to_string(&mut contents)?;
-    Ok(contents.len() <= 64 && contents.trim() == "custom")
 }
 
 fn check_paused(root: &Path, bot: Option<&str>) -> Result<(), Failure> {

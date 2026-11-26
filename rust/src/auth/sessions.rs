@@ -26,7 +26,7 @@ use super::{
     store::blocking,
     unique_id,
 };
-use crate::routing::CredentialKind;
+use crate::{panel::ListenerStatus, routing::CredentialKind};
 
 const LEGACY_CALLBACK: &str = "http://localhost:1455/auth/callback";
 const INITIAL_CLIENT: &str = "dynamic_agent_client";
@@ -40,6 +40,7 @@ pub struct Accounts(Arc<AccountsInner>);
 struct AccountsInner {
     store: CredentialStore,
     callback: Url,
+    status: ListenerStatus,
     sessions: Mutex<Sessions>,
 }
 
@@ -92,7 +93,11 @@ struct Draft {
 }
 
 impl Accounts {
-    pub fn new(store: CredentialStore, authority: &str) -> io::Result<Self> {
+    pub fn new(
+        store: CredentialStore,
+        authority: &str,
+        status: ListenerStatus,
+    ) -> io::Result<Self> {
         let callback =
             Url::parse(&format!("http://{authority}/auth/callback")).map_err(io::Error::other)?;
         if callback.host_str() != Some("127.0.0.1") || callback.port().is_none() {
@@ -104,6 +109,7 @@ impl Accounts {
         Ok(Self(Arc::new(AccountsInner {
             store,
             callback,
+            status,
             sessions: Mutex::default(),
         })))
     }
@@ -499,7 +505,7 @@ async fn save(
         };
         let target = draft.and_then(|draft| draft.target.as_ref());
         let store = &accounts.0.store;
-        let reply = match body["kind"].as_str() {
+        let mut reply = match body["kind"].as_str() {
             Some("set-secret") => {
                 let provider = required(&body, "providerId")?;
                 if draft.is_some() && target.is_none_or(|target| target.id != provider) {
@@ -539,6 +545,7 @@ async fn save(
         {
             sessions.attempts.remove(&draft.session);
         }
+        accounts.0.status.add_to(store.root(), &mut reply);
         Ok(reply)
     })
     .await

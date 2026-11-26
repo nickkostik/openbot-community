@@ -16,11 +16,8 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::{
-    auth::Accounts,
     bot_models::{Settings, View},
     catalog::Catalog,
-    discovery::Discovery,
-    hop::Hop,
     lease::Lease,
     routing::{self, CredentialKind, Route},
 };
@@ -144,25 +141,36 @@ pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+pub fn read_mode(root: &Path) -> io::Result<&'static str> {
+    let file = match File::open(root.join("openbot-mode")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok("official"),
+        Err(error) => return Err(error),
+    };
+    let mut contents = String::new();
+    file.take(65).read_to_string(&mut contents)?;
+    Ok(if contents.len() <= 64 && contents.trim() == "custom" {
+        "custom"
+    } else {
+        "official"
+    })
+}
+
 pub fn router(
     state: State,
     authority: String,
-    hop: Option<Hop>,
-    accounts: Option<Accounts>,
-    discovery: Option<Discovery>,
+    services: impl IntoIterator<Item = Router>,
 ) -> Router {
     let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
+        .route(
+            "/healthz",
+            get(|| async { Json(json!({"ok": true, "service": "openbot"})) }),
+        )
         .layer(DefaultBodyLimit::max(BOT_MODELS_MAX_BYTES as usize))
         .with_state(state);
-    if let Some(hop) = hop {
-        router = router.merge(hop.routes());
-    }
-    if let Some(accounts) = accounts {
-        router = router.merge(accounts.routes());
-    }
-    if let Some(discovery) = discovery {
-        router = router.merge(discovery.routes());
+    for service in services {
+        router = router.merge(service);
     }
     router.layer(middleware::from_fn_with_state(authority, local_requests))
 }

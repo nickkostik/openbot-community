@@ -65,8 +65,12 @@ impl CredentialStore {
         &self.0.network
     }
 
-    pub(super) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.0.root
+    }
+
+    pub fn public_view(&self) -> Result<Value, AuthError> {
+        Ok(public_fields(&self.plan()?, &self.load()?))
     }
 
     pub async fn authorize(&self, provider: &str, origin: &str) -> Result<Authorized, AuthError> {
@@ -364,7 +368,7 @@ impl Authorized {
     }
 }
 
-pub(super) async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     task: impl FnOnce() -> Result<T, AuthError> + Send + 'static,
 ) -> Result<T, AuthError> {
     tokio::task::spawn_blocking(task)
@@ -399,7 +403,7 @@ fn stage_json(
     Ok(file)
 }
 
-fn save_reply(plan: &Value, store: &Value, created: Option<String>) -> Value {
+fn public_fields(plan: &Value, store: &Value) -> Value {
     let active = plan["catalog"]["bindings"]
         .as_array()
         .into_iter()
@@ -411,10 +415,16 @@ fn save_reply(plan: &Value, store: &Value, created: Option<String>) -> Value {
         .into_iter()
         .flat_map(|entries| entries.keys())
         .collect();
-    let mut reply = json!({
-        "ok":true, "wrapBytesChanged":false, "providers":plan["catalog"]["providers"],
+    json!({
+        "providers":plan["catalog"]["providers"],
         "models":plan["catalog"]["models"], "keyedProviders":keyed, "activeModelId":active
-    });
+    })
+}
+
+fn save_reply(plan: &Value, store: &Value, created: Option<String>) -> Value {
+    let mut reply = public_fields(plan, store);
+    reply["ok"] = json!(true);
+    reply["wrapBytesChanged"] = json!(false);
     if let Some(id) = created {
         reply["createdProviderId"] = json!(id);
     }

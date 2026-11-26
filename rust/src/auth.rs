@@ -13,6 +13,7 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use sessions::Accounts;
+pub(crate) use store::blocking;
 pub use store::{Authorized, CredentialStore};
 
 pub const CODEX_USER_AGENT: &str =

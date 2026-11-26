@@ -18,9 +18,9 @@ use axum::{
     extract::{DefaultBodyLimit, State as AxumState, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::post,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{
     auth::CredentialStore,
@@ -70,10 +70,6 @@ impl Hop {
 
     pub fn routes(self) -> Router {
         Router::new()
-            .route(
-                "/healthz",
-                get(|| async { Json(json!({"ok": true, "service": "openbot"})) }),
-            )
             .route("/v1/chat/completions", post(completions))
             .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
             .with_state(self)

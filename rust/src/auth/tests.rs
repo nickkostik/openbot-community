@@ -184,13 +184,13 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
     let path = root.to_path_buf();
     let state = State::new(path, false).unwrap();
     let store = CredentialStore::with_network(root, true, upstream.network.clone()).unwrap();
-    router(
-        state,
-        HOST.into(),
-        None,
-        Some(Accounts::new(store, HOST).unwrap()),
-        None,
-    )
+    let status = crate::panel::ListenerStatus {
+        port: 30444,
+        serves_ui: true,
+        serves_hop: false,
+    };
+    let accounts = Accounts::new(store, HOST, status).unwrap();
+    router(state, HOST.into(), [accounts.routes()])
 }
 
 async fn request(app: &Router, method: Method, path: &str, body: Value) -> (StatusCode, String) {
@@ -387,6 +387,8 @@ async fn signed_plan_callback_enforces_identity_and_renews_the_original_provider
         let (status, saved) = post_json(&app, "/api/save", save.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["activeModelId"], "openai:gpt-fixture");
+        assert_eq!(saved["snapshot"]["alignment"]["desired"], "official");
+        assert_eq!(saved["logSettings"]["logRetentionDays"], 7);
         assert!(!saved.to_string().contains("fixture-new"));
         assert_eq!(
             post_json(&app, "/api/save", save).await.0,

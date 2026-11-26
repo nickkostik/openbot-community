@@ -4,6 +4,7 @@ mod catalog;
 mod discovery;
 mod hop;
 mod lease;
+mod panel;
 mod reasoning;
 mod routing;
 mod server;
@@ -38,6 +39,9 @@ struct Args {
     /// Enable local OpenAI sign-in, credential writes, and renewal in disposable state.
     #[arg(long)]
     enable_accounts: bool,
+    /// Serve the built OpenBot web assets from this directory.
+    #[arg(long)]
+    ui_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -98,6 +102,7 @@ fn main() -> io::Result<()> {
             args.write_bot_settings,
             args.enable_hop,
             args.enable_accounts,
+            args.ui_dir,
         ))
 }
 
@@ -107,6 +112,7 @@ async fn serve(
     writable: bool,
     enable_hop: bool,
     enable_accounts: bool,
+    ui_dir: Option<PathBuf>,
 ) -> io::Result<()> {
     let state = server::State::new(sand_data, writable)?;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
@@ -116,7 +122,12 @@ async fn serve(
     } else {
         address.to_string()
     };
-    let credentials = (enable_hop || enable_accounts)
+    let status = panel::ListenerStatus {
+        port: address.port(),
+        serves_ui: ui_dir.is_some(),
+        serves_hop: enable_hop,
+    };
+    let credentials = (enable_hop || enable_accounts || status.serves_ui)
         .then(|| auth::CredentialStore::new(state.root(), enable_accounts))
         .transpose()?;
     let hop = credentials
@@ -127,16 +138,27 @@ async fn serve(
     let accounts = credentials
         .clone()
         .filter(|_| enable_accounts)
-        .map(|store| auth::Accounts::new(store, &authority))
+        .map(|store| auth::Accounts::new(store, &authority, status))
         .transpose()?;
     let discovery = credentials
         .clone()
+        .filter(|_| enable_hop || enable_accounts)
         .map(|store| discovery::Discovery::new(state.clone(), store))
         .transpose()?;
+    let panel = ui_dir
+        .zip(credentials.clone())
+        .map(|(directory, store)| panel::routes(directory, store, status))
+        .transpose()?;
+    let services = [
+        hop.map(hop::Hop::routes),
+        accounts.map(auth::Accounts::routes),
+        discovery.map(discovery::Discovery::routes),
+        panel,
+    ];
     println!("OpenBot Rust listening on http://{authority}");
     let result = axum::serve(
         listener,
-        server::router(state, authority, hop, accounts, discovery),
+        server::router(state, authority, services.into_iter().flatten()),
     )
     .with_graceful_shutdown(shutdown())
     .await;

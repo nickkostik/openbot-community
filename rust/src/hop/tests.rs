@@ -910,17 +910,24 @@ async fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         json!({"clear_thinking":false,"type":"enabled"})
     );
     assert_eq!(zai["reasoning_effort"], "high");
-    let qwen = direct_body(
+    for origin in [
+        "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-        "qwen4-max",
-        "chat-completions",
-        "none",
-        request.clone(),
-    )
-    .await;
-    assert_eq!(qwen["reasoning_effort"], "none");
-    assert!(qwen.get("thinking_budget").is_none());
-    assert!(qwen.get("thinking").is_none());
+    ] {
+        for effort in ["none", "high"] {
+            let qwen = direct_body(
+                origin,
+                "qwen4-max",
+                "chat-completions",
+                effort,
+                request.clone(),
+            )
+            .await;
+            assert_eq!(qwen["reasoning_effort"], effort);
+            assert!(qwen.get("thinking_budget").is_none());
+            assert!(qwen.get("thinking").is_none());
+        }
+    }
 
     request["chat_template_kwargs"] =
         json!({"enable_thinking":false,"reasoning_effort":"low","custom_flag":true});

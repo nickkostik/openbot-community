@@ -211,6 +211,14 @@ pub fn parse_origin(raw: &str) -> Option<Url> {
     Some(origin)
 }
 
+pub(crate) fn is_alibaba_token_plan_origin(origin: &str) -> bool {
+    matches!(
+        origin.trim_end_matches('/'),
+        "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
+            | "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+    )
+}
+
 pub(crate) fn retired_provider(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     let mut previous = "";

@@ -12,12 +12,11 @@ use super::{
 use crate::{
     auth::credential::{Credential, openai_origin, text},
     catalog::{Catalog, Model, Protocol, Provider},
-    routing::{is_direct_provider, parse_origin},
+    routing::{is_alibaba_token_plan_origin, is_direct_provider, parse_origin},
 };
 
 const PLAN: &str = "openbot-plan.json";
 const MOVE: &str = ".openbot-rust-provider-move.json";
-const TOKEN_PLAN: &str = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
 #[derive(Deserialize, Serialize)]
 struct ProviderMove {
@@ -338,9 +337,9 @@ fn provider_row(command: &Value, id: &str, existing: Option<&Value>) -> Result<V
             "OpenAI accounts require a direct OpenAI endpoint.",
         ));
     }
-    if is_family(id, "alibaba-token-plan") && origin != TOKEN_PLAN {
+    if is_family(id, "alibaba-token-plan") && !is_alibaba_token_plan_origin(origin) {
         return Err(AuthError::input(
-            "Use the Singapore Alibaba Token Plan base URL for this account.",
+            "Use a direct QwenCloud Token Plan base URL for this account.",
         ));
     }
     let mut row = existing.cloned().unwrap_or_else(|| {
@@ -369,7 +368,8 @@ pub(super) fn provider_credential(id: &str, raw: &str, origin: &str) -> Result<S
         ));
     }
     let saved = Credential::import(raw, origin)?.into_saved();
-    if is_family(id, "alibaba-token-plan") && (origin != TOKEN_PLAN || !saved.starts_with("sk-sp-"))
+    if is_family(id, "alibaba-token-plan")
+        && (!is_alibaba_token_plan_origin(origin) || !saved.starts_with("sk-sp-"))
     {
         return Err(AuthError::input(
             "An Alibaba Token Plan account requires its dedicated token-plan endpoint and sk-sp- key.",

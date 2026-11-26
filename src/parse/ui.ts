@@ -1,4 +1,4 @@
-import { HIGH_AGENT_MAX_TOKENS, loopbackExpose, type ApiType, type Catalog, type DesiredState, type Expose, type Model, type Provider } from "../domain/types.ts";
+import { ALIBABA_TOKEN_PLAN_ORIGIN, HIGH_AGENT_MAX_TOKENS, isAlibabaTokenPlanOrigin, loopbackExpose, type ApiType, type Catalog, type DesiredState, type Expose, type Model, type Provider } from "../domain/types.ts";
 import {
   DEFAULT_CONTEXT_TOKENS,
   DEFAULT_MODALITIES,
@@ -327,6 +327,9 @@ export function applyUiCommand(input: {
     }
     if (base.startsWith("opencode-go") && !isOpenCodeGoOrigin(origin)) {
       throw new Error(`OpenBot: OpenCode Go accounts must use ${OPENCODE_GO_ORIGIN} directly`);
+    }
+    if (/^alibaba-token-plan(?:-|$)/.test(base) && !isAlibabaTokenPlanOrigin(origin)) {
+      throw new Error(`OpenBot: Alibaba Token Plan accounts must use a direct Token Plan URL such as ${ALIBABA_TOKEN_PLAN_ORIGIN}`);
     }
     const credential = normalizeProviderCredential(command.secret, origin);
     if (/^alibaba-(token|coding)-plan(?:-|$)/.test(base) && !credential.startsWith("sk-sp-")) {

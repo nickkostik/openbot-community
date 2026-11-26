@@ -15,7 +15,10 @@ var GROK_MODEL_RE = /^grok[-.]/i;
 var ZAI_DIRECT_RE = /^https:\/\/api\.z\.ai\/api\/(?:coding\/)?paas\/v4\/?$/i;
 var ZAI_GLM53_RE = /^glm-5\.3(?:-flash)?$/i;
 var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
-var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+var ALIBABA_TOKEN_PLAN_CHAT_ORIGINS = new Set([
+  "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+  "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+]);
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
 var DEEPSEEK_ORIGIN = "https://api.deepseek.com";
@@ -283,7 +286,7 @@ function applyProviderReasoningControls(body, ctx) {
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
-  if (baseUrl.replace(/\/$/, "") === ALIBABA_TOKEN_PLAN_CHAT_ORIGIN && ALIBABA_QWEN_REASONING_RE.test(modelId)) {
+  if (ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(baseUrl.replace(/\/$/, "")) && ALIBABA_QWEN_REASONING_RE.test(modelId)) {
     return applyAlibabaQwen(body, ctx.parameters);
   }
   if (isGrokRoute(modelId, baseUrl)) {

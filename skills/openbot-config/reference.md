@@ -164,7 +164,7 @@ Use the disposable candidate's loopback `POST /api/save` with `--enable-accounts
 
 The provider editor prompts for a credential when a keyed account changes URL scheme, host or port. Submit the credential for the new endpoint with the same provider ID. A cross-origin save temporarily writes the private `.openbot-rust-provider-move.json` receipt. It clears the old key, saves the new route and publishes the replacement key in that order. The writable Rust store completes an interrupted move at startup or before a later write, refuses conflicts with newer saved state, and removes the receipt after completion. Keep the receipt private because it contains the replacement credential.
 
-OpenCode accounts use their own direct Go credentials and the direct Go base `https://opencode.ai/inference/go` or a supported saved Go form. Alibaba Token Plan accounts require the Singapore base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and the matching `sk-sp-` subscription key. The Rust hop rejects retired N5, MetaKey and ModelHub routes already present in the catalog before dispatch.
+OpenCode accounts use their own direct Go credentials and the direct Go base `https://opencode.ai/inference/go` or a supported saved Go form. Alibaba Token Plan accounts use either accepted direct Chat Completions base and the matching `sk-sp-` subscription key. The Rust hop rejects retired N5, MetaKey and ModelHub routes already present in the catalog before dispatch. [Token Plan bases](#alibaba-token-plan-qwen-reasoning).
 
 Use the [managed Rust Computer host](#rust-computer-host-management) for candidate Official/Custom transitions and the existing ingress controls for tunnel changes. The legacy `upsert-provider` and `custom` save kinds require the candidate to be in Custom already.
 
@@ -469,10 +469,10 @@ Known presets use their direct origins and correct credential family. Use the `h
 
 | Preset | `familyId` | Direct Chat Completions base |
 |---|---|---|
-| Alibaba Token Plan | `alibaba-token-plan` | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` |
+| Alibaba Token Plan | `alibaba-token-plan` | `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` |
 | Alibaba Coding Plan | `alibaba-coding-plan` | `https://coding-intl.dashscope.aliyuncs.com/v1` |
 
-Use the dedicated `sk-sp-` key for the matching subscription. Add one account per subscription. The presets apply to new accounts, and existing providers retain their assigned IDs and configured origins. The Qwen effort mapping uses the Singapore Token Plan Chat Completions base. [Alibaba Cloud base URLs](https://www.alibabacloud.com/help/en/model-studio/base-url) · [Qwen reasoning](#alibaba-token-plan-qwen-reasoning).
+Use the dedicated `sk-sp-` key for the matching subscription and add each subscription as its own account. OpenBot calls the account's saved base directly, including the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. To move an existing account, edit its provider explicitly and supply the matching key. [QwenCloud Token Plan endpoints](https://docs.qwencloud.com/developer-guides/clients-and-developer-tools/other-tools) · [Alibaba Cloud Singapore endpoint](https://www.alibabacloud.com/help/en/model-studio/base-url) · [Qwen reasoning](#alibaba-token-plan-qwen-reasoning).
 
 ## Models and bot overrides
 
@@ -578,7 +578,7 @@ If the mapper receives a `thinking` field or keeps a supported effort, it sets `
 
 ### Alibaba Token Plan Qwen reasoning
 
-The hop uses this mapping for the Chat Completions base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` with an optional trailing slash and the model slugs `qwen4-max`, `qwen3.8-max`, `qwen3.8-max-0902`, `qwen3.8-flash`, `qwen3.8-2.4t-a95b` and `qwen3.8-27b`. Choose an effort from the saved model's `reasoningLevels`.
+The hop applies this map to the direct Chat Completions bases `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, including a trailing slash, for `qwen4-max`, `qwen3.8-max`, `qwen3.8-max-0902`, `qwen3.8-flash`, `qwen3.8-2.4t-a95b` and `qwen3.8-27b`. Choose an effort from the saved model's `reasoningLevels`.
 
 Off sends `reasoning_effort: "none"`. An explicit effort sends the selected value. Both choices remove the top-level `thinking`, `enable_thinking` and `thinking_budget` fields. Default leaves the caller's reasoning and thinking fields in place at this mapping step.
 

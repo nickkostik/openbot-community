@@ -195,6 +195,47 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
 }
 
 #[tokio::test]
+async fn token_plan_accounts_accept_only_direct_origins_and_dedicated_keys() {
+    let upstream = Upstream::start().await;
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("openbot-mode"), "official\n").unwrap();
+    let app = account_router(root.path(), &upstream);
+    let current = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+    let legacy = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+    let add = |origin, secret| {
+        json!({"kind":"add-provider","familyId":"alibaba-token-plan","name":"Token Plan",
+            "origin":origin,"secret":secret})
+    };
+    for command in [
+        add(current, "sk-payg-fixture"),
+        add(
+            "https://token-plan.maas.qwencloudapi.com.example/compatible-mode/v1",
+            "sk-sp-fixture",
+        ),
+    ] {
+        assert_eq!(
+            post_json(&app, "/api/save", command).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(!root.path().join("secrets.json").exists());
+    }
+    for (origin, secret, id) in [
+        (current, "sk-sp-one", "alibaba-token-plan"),
+        (legacy, "sk-sp-two", "alibaba-token-plan-2"),
+    ] {
+        let (status, result) = post_json(&app, "/api/save", add(origin, secret)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["createdProviderId"], id);
+        assert_eq!(credentials(root.path())["providers"][id], secret);
+        assert!(!result.to_string().contains(secret));
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("openbot-mode")).unwrap(),
+        "official\n"
+    );
+}
+
+#[tokio::test]
 async fn catalog_edits_keep_provider_accounts_and_model_settings_independent() {
     let upstream = Upstream::start().await;
     let root = tempfile::tempdir().unwrap();

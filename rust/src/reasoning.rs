@@ -3,7 +3,7 @@ use url::Url;
 
 use crate::{
     catalog::{Effort, PolicyKind, Protocol},
-    routing::Selection,
+    routing::{Selection, is_alibaba_token_plan_origin},
 };
 
 type Body = Map<String, Value>;
@@ -107,8 +107,7 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
         Some(PolicyKind::NvidiaToggle) => nvidia(body, selection, effort, true),
         Some(PolicyKind::NvidiaSuper) => nvidia(body, selection, effort, false),
         None if direct_zai => zai(body, effort),
-        None if origin.trim_end_matches('/')
-            == "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        None if is_alibaba_token_plan_origin(&origin)
             && matches!(
                 slug.as_str(),
                 "qwen4-max"

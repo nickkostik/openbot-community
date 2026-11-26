@@ -83,7 +83,8 @@ test("the direct Z.AI GLM-5.3 rule preserves Off for GLM-5.2 and other endpoints
   }
 });
 
-const alibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+const alibabaTokenPlan = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+const legacyAlibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
 test("direct Nemotron Bolt and Lightning use the native thinking switch", () => {
   const baseUrl = "https://integrate.api.nvidia.com/v1";
@@ -151,14 +152,19 @@ test("Alibaba Token Plan sends its native Off setting for Qwen 3.8 and Qwen4 Max
   }
 });
 
-test("Alibaba Token Plan applies selected Qwen effort without a conflicting wire budget", () => {
-  for (const [model, effort] of [["qwen3.8-flash", "medium"], ["qwen4-max", "high"]] as const) {
+test("Alibaba Token Plan applies selected Qwen effort on both direct hostnames", () => {
+  for (const [model, effort, origin] of [
+    ["qwen3.8-flash", "medium", alibabaTokenPlan],
+    ["qwen4-max", "high", alibabaTokenPlan],
+    ["qwen4-max", "none", legacyAlibabaTokenPlan],
+    ["qwen4-max", "high", legacyAlibabaTokenPlan],
+  ] as const) {
     const body: Record<string, unknown> = {
       model, reasoning_effort: "low", thinking: { type: "disabled" }, enable_thinking: false, thinking_budget: 4096,
     };
     maps.applyProviderReasoningControls(body, {
       modelId: model,
-      baseUrl: alibabaTokenPlan + "/",
+      baseUrl: origin + "/",
       parameters: [{ id: "effort", value: effort }],
     });
     assert.deepEqual(body, { model, reasoning_effort: effort });

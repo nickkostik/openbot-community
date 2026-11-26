@@ -28,7 +28,7 @@ test("Codex auth.json is one import and errors never echo file contents", () => 
 
 test("new presets use direct Go and token-plan endpoints without choosing a model", () => {
   assert.equal(PRESETS.find(row => row.id === "opencode-go")?.origin, "https://opencode.ai/inference/go");
-  assert.equal(PRESETS.find(row => row.id === "alibaba-token-plan")?.origin, "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1");
+  assert.equal(PRESETS.find(row => row.id === "alibaba-token-plan")?.origin, "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1");
   assert.equal(PRESETS.find(row => row.id === "alibaba-coding-plan")?.origin, "https://coding-intl.dashscope.aliyuncs.com/v1");
   assert.ok(PRESETS.every(row => row.model === ""));
   assert.ok(PRESETS.every(row => row.id !== "opencode" && !/n5|metakey/i.test(row.origin)));

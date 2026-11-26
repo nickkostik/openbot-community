@@ -5,7 +5,7 @@ import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
 import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
-import { documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
+import { DEEPSEEK_ORIGIN, documentedReasoningPolicy, isDirectDeepSeekOrigin } from "../../payload/provider-maps.cjs";
 import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
@@ -235,6 +235,7 @@ export function modelsUrl(origin: string): string {
   if (!base) {
     throw new Error("openbot: provider origin is empty");
   }
+  if (isDirectDeepSeekOrigin(base)) return `${DEEPSEEK_ORIGIN}/v1/models`;
   if (isOpenCodeGoOrigin(base)) {
     return `${OPENCODE_GO_ORIGIN}/v1/models`;
   }
@@ -465,7 +466,7 @@ export async function fetchModelsForProvider(input: {
       ...model,
       reasoningLevels: [...policy.levels],
       ...(policy.maxOutputTokens ? { maxOutputTokens: Math.min(model.maxOutputTokens ?? Infinity, policy.maxOutputTokens) } : {}),
-      ...(policy.kind !== "kimi-code-pro" ? { apiType: "chat-completions" as const } : {}),
+      ...(policy.apiType ? { apiType: policy.apiType } : {}),
     };
     if (!nativeOpenAI) return model;
     const facts = documentedOpenAIModel(model.id);

@@ -80,9 +80,11 @@ export function normalizeCatalog(catalog: Catalog): Catalog {
     const model = normalizeModel(row);
     if (!model) continue;
     const policy = documentedReasoningPolicy(model.slug, origins.get(model.providerId) ?? "");
+    // The normalizer has already interpreted legacy "none" as provider default.
+    const requestedEffort = row.activeReasoning === "none" ? model.activeReasoning : row.activeReasoning;
     models.push(policy ? makeModel({ ...model, reasoningLevels: policy.levels,
       maxOutputTokens: Math.min(model.maxOutputTokens, policy.maxOutputTokens ?? Infinity),
-      activeReasoning: documentedReasoningEffort(policy, row.activeReasoning) ?? "default" }) : model);
+      activeReasoning: documentedReasoningEffort(policy, requestedEffort) ?? "default" }) : model);
   }
   return {
     providers: catalog.providers.map((provider) => ({

@@ -51,6 +51,34 @@ test("normalizeProviderModels rejects a body that is not a model list", () => {
   assert.equal(normalizeProviderModels("nope"), undefined);
 });
 
+test("direct DeepSeek discovery shares its model list and adds documented reasoning choices", async () => {
+  const direct = "https://api.deepseek.com";
+  const entries = ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "other-model"]
+    .map(id => ({ id, context_length: 1048576 }));
+  for (const [origin, expectedUrl] of [
+    [direct + "/v1/", direct + "/v1/models"],
+    [direct + "/anthropic/v1/messages", direct + "/v1/models"],
+    [direct + "/responses", direct + "/v1/models"],
+    ["https://api.deepseek.com.example/v1", "https://api.deepseek.com.example/v1/models"],
+  ] as const) {
+    const result = await fetchModelsForProvider({
+      providerId: "deepseek",
+      catalog: makeCatalog([{ id: "deepseek", name: "DeepSeek", origin }]),
+      secretStore: makeSecrets({ deepseek: "fixture-key" }),
+      fetchFn: async (url) => {
+        assert.equal(url, expectedUrl);
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(result.status, 200);
+    const models = (result.body as { models: { id: string; contextLength: number; apiType?: string; reasoningLevels: string[] }[] }).models;
+    assert.deepEqual(models.map(model => model.id), entries.map(entry => entry.id));
+    const levels = expectedUrl.startsWith(direct + "/") ? ["default", "none", "low", "high", "max"] : [];
+    assert.deepEqual(models.map(model => model.reasoningLevels), [levels, levels, levels, []]);
+    assert.ok(models.every(model => model.apiType === undefined && model.contextLength === 1048576));
+  }
+});
+
 test("direct Kimi Code discovery applies the documented K3.1 Pro efforts", async () => {
   const entries = ["k3.1-pro", "k3.1-pro-highspeed", "k3"].map(id => ({
     id, reasoning_levels: ["none", "low", "high", "max"],

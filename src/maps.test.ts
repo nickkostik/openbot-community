@@ -9,7 +9,7 @@ const mapsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../pay
 const maps = require(mapsPath) as {
   applyProviderReasoningControls: (
     body: Record<string, unknown>,
-    ctx: { modelId: string; baseUrl: string; parameters: readonly { id: string; value: string }[] },
+    ctx: { modelId: string; baseUrl: string; apiType?: string; parameters: readonly { id: string; value: string }[] },
   ) => string;
 };
 
@@ -296,6 +296,49 @@ test("generic OpenAI passes max through as reasoning_effort max", () => {
   });
   assert.equal(result, "openai-effort");
   assert.equal(body.reasoning_effort, "max");
+});
+
+test("direct DeepSeek replaces stale controls with the saved thinking mode and effort", () => {
+  const format = { type: "json_schema" };
+  const output = { format, effort: "low" };
+  for (const apiType of ["chat-completions", "anthropic", "responses"]) {
+    for (const [id, value, effort] of [
+      ["thinking", "false", "none"], ["effort", "max", "max"],
+      ["effort", "minimal", "low"], ["effort", "xhigh", "high"], ["effort", "ultra", "max"],
+    ] as const) {
+      const model = "deepseek-flash";
+      const body = {
+        model, thinking: { type: "disabled" }, enable_thinking: false, thinking_budget: 256,
+        reasoning: { effort: "none" }, reasoning_effort: "low", output_config: output,
+      };
+      const applied = maps.applyProviderReasoningControls(body, {
+        modelId: model, baseUrl: "https://api.deepseek.com/v1", apiType, parameters: [{ id, value }],
+      });
+      assert.equal(applied, "deepseek-v4");
+      const expected = { model, output_config: { format } };
+      assert.deepEqual(body, apiType === "responses" ? { ...expected, reasoning_effort: effort }
+        : effort === "none" ? { ...expected, thinking: { type: "disabled" } }
+        : { ...expected, thinking: { type: "enabled" }, reasoning_effort: effort });
+    }
+  }
+  assert.deepEqual(output, { format, effort: "low" });
+});
+
+test("direct DeepSeek preserves the provider default and honors an explicitly disabled caller", () => {
+  for (const [apiType, incoming, expected] of [
+    ["responses", {}, {}],
+    ["responses", { thinking: { type: "disabled" }, reasoning_effort: "high" }, { reasoning_effort: "none" }],
+    ["responses", { reasoning: { effort: "none" } }, { reasoning_effort: "none" }],
+    ["anthropic", { output_config: { effort: "medium" } }, { thinking: { type: "enabled" }, reasoning_effort: "high" }],
+    ["chat-completions", { thinking: { type: "enabled" } }, { thinking: { type: "enabled" } }],
+  ] as const) {
+    const model = "deepseek-v4-pro";
+    const body = { model, ...incoming };
+    maps.applyProviderReasoningControls(body, {
+      modelId: model, baseUrl: "https://api.deepseek.com/anthropic/v1", apiType, parameters: [],
+    });
+    assert.deepEqual(body, { model, ...expected });
+  }
 });
 
 test("generic OpenAI passes xhigh through as reasoning_effort xhigh", () => {

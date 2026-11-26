@@ -25,6 +25,17 @@ test("all supported Go bases use current protocol-specific Console URLs", () => 
     "https://provider.example/inference/go/v1/responses");
 });
 
+test("direct DeepSeek bases use the provider's documented protocol paths", () => {
+  const base = "https://api.deepseek.com";
+  for (const origin of [base, base + "/v1/", base + "/v1/chat/completions", base + "/responses", base + "/anthropic/v1/messages"]) {
+    assert.equal(resolveUpstreamUrl({ origin }, false, "chat-completions"), base + "/v1/chat/completions");
+    assert.equal(resolveUpstreamUrl({ origin }, false, "responses"), base + "/responses");
+    assert.equal(resolveUpstreamUrl({ origin }, false, "anthropic"), base + "/anthropic/v1/messages");
+  }
+  assert.equal(resolveUpstreamUrl({ origin: "https://api.deepseek.com.example/v1" }, false, "anthropic"),
+    "https://api.deepseek.com.example/v1/messages");
+});
+
 test("native modern OpenAI routes retain Responses despite legacy catalog settings", () => {
   for (const slug of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.3-codex", "gpt-5.6-sol"]) {
     const model = { slug, apiType: "chat-completions" };
@@ -74,6 +85,23 @@ const request = {
   ],
   tools: [{ type: "function", function: { name: "lookup", description: "Find it", parameters: { type: "object", properties: { q: { type: "string" } } } } }],
 };
+
+test("stateless DeepSeek Responses replays the provider's reasoning with its tool call and result", () => {
+  const result = responsesSseToChat('data: {"type":"response.reasoning_text.delta","delta":"fixture-step"}\n\n');
+  const reasoning = JSON.parse(result.split("\n", 1)[0]!.slice(6)).choices[0].delta.reasoning_content;
+  assert.equal(reasoning, "fixture-step");
+  const input = { ...request, messages: request.messages.map(message => message.role === "assistant"
+    ? { ...message, reasoning_content: reasoning } : message) };
+  const replay = chatToResponses(input, true);
+  assert.deepEqual((replay.input as unknown[]).slice(-4), [
+    { type: "reasoning", content: [{ type: "reasoning_text", text: "fixture-step" }] },
+    { role: "assistant", content: "" },
+    { type: "function_call", call_id: "call_1", name: "lookup", arguments: '{"q":"x"}' },
+    { type: "function_call_output", call_id: "call_1", output: "done" },
+  ]);
+  assert.deepEqual(cjsConverters.chatToResponses(input, true), replay);
+  assert.deepEqual(chatToResponses(input), chatToResponses(request));
+});
 
 test("bot reasoning request controls retain TS/CJS parity across Responses and Anthropic", () => {
   for (const effort of ["none", "low", "high", "xhigh", "max"]) {

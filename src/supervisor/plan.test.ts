@@ -4,6 +4,23 @@ import { catalogFromPlanJson } from "./plan.ts";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_REASONING_LEVELS } from "../domain/model.ts";
 import { HIGH_AGENT_MAX_TOKENS } from "../domain/types.ts";
 
+test("saved direct DeepSeek models distinguish legacy Default from explicit Off", () => {
+  const origin = "https://api.deepseek.com/v1";
+  const providers = [{ id: "deepseek", origin }];
+  const models = [
+    ["deepseek-flash", ["none", "low", "high"], "none", "responses"],
+    ["deepseek-v4-pro", ["default", "none", "high"], "none", "anthropic"],
+    ["deepseek-v4-flash", ["default", "xhigh"], "xhigh", "chat-completions"],
+  ].map(([slug, reasoningLevels, activeReasoning, apiType]) => ({
+    id: "deepseek:" + slug, providerId: "deepseek", slug, reasoningLevels, activeReasoning, apiType,
+    contextTokens: 1048576, maxOutputTokens: 8192,
+  }));
+  const read = catalogFromPlanJson(JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } }));
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["default", "none", "high"]);
+  assert.deepEqual(read.models.map(row => row.apiType), ["responses", "anthropic", "chat-completions"]);
+  assert.ok(read.models.every(row => row.contextTokens === 1048576 && row.maxOutputTokens === 8192));
+});
+
 test("saved Kimi Code Pro routes display documented efforts and keep valid choices", () => {
   const entries = [
     ["kimi", "https://api.kimi.com/coding/v1", "k3.1-pro", "none"],

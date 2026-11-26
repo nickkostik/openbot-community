@@ -18,6 +18,13 @@ var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
 var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
+var DEEPSEEK_ORIGIN = "https://api.deepseek.com";
+var DEEPSEEK_V4_RE = /^(?:deepseek-flash|deepseek-v4-(?:pro|flash(?:-vision-exp)?))$/;
+var DEEPSEEK_V4 = Object.freeze({
+  kind: "deepseek-v4",
+  levels: Object.freeze(["default", "none", "low", "high", "max"]),
+  aliases: Object.freeze({ minimal: "low", medium: "high", xhigh: "high", ultra: "max" }),
+});
 var KIMI_CODE_PRO = Object.freeze({
   kind: "kimi-code-pro",
   levels: Object.freeze(["default", "low", "high", "max"]),
@@ -25,12 +32,14 @@ var KIMI_CODE_PRO = Object.freeze({
 });
 var NVIDIA_NEMOTRON_TOGGLE = Object.freeze({
   kind: "nvidia-nemotron-toggle",
+  apiType: "chat-completions",
   levels: Object.freeze(["default", "none", "on"]),
   aliases: Object.freeze({ minimal: "on", low: "on", medium: "on", high: "on", xhigh: "on", max: "on" }),
 });
 var NVIDIA_LIGHTNING = Object.freeze(Object.assign({}, NVIDIA_NEMOTRON_TOGGLE, { maxOutputTokens: 32768 }));
 var NVIDIA_SUPER_VL = Object.freeze({
   kind: "nvidia-super-vl",
+  apiType: "chat-completions",
   levels: Object.freeze(["default", "none", "low", "high"]),
   aliases: Object.freeze({ minimal: "low", medium: "low", on: "high", xhigh: "high", max: "high" }),
 });
@@ -41,7 +50,12 @@ function documentedReasoningEffort(policy, value) {
   return Object.hasOwn(policy.aliases, value) ? policy.aliases[value] : undefined;
 }
 
+function isDirectDeepSeekOrigin(baseUrl) {
+  return /^https:\/\/api\.deepseek\.com(?::443)?(?:\/(?:v1(?:\/(?:chat\/completions|responses))?|chat\/completions|responses|anthropic(?:\/v1(?:\/messages)?)?))?\/*$/i.test(baseUrl);
+}
+
 function documentedReasoningPolicy(modelId, baseUrl) {
+  if (isDirectDeepSeekOrigin(baseUrl) && DEEPSEEK_V4_RE.test(modelId)) return DEEPSEEK_V4;
   if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(baseUrl) && /^k3\.1-pro(?:-highspeed)?$/.test(modelId)) {
     return KIMI_CODE_PRO;
   }
@@ -65,6 +79,44 @@ function isGrokRoute(modelId, baseUrl) {
 
 function thinkingOff(body) {
   body.thinking = { type: "disabled" };
+}
+
+function applyDeepSeekV4(body, parameters, apiType) {
+  var thinking = param(parameters, "thinking");
+  var effort = thinking === false || thinking === "false" ? "none"
+    : documentedReasoningEffort(DEEPSEEK_V4, param(parameters, "effort"));
+  var incomingThinking = body.thinking?.type;
+  var output = body.output_config;
+  if (!effort || effort === "default") {
+    var nativeEffort = apiType === "responses" ? body.reasoning?.effort : apiType === "anthropic" ? output?.effort : undefined;
+    effort = incomingThinking === "disabled" ? "none"
+      : documentedReasoningEffort(DEEPSEEK_V4, nativeEffort)
+        || documentedReasoningEffort(DEEPSEEK_V4, body.reasoning_effort);
+    if (effort === "default" || (incomingThinking === "enabled" && effort === "none")) effort = undefined;
+  }
+
+  // The saved choice wins over thinking and effort fields from a previous model.
+  delete body.thinking;
+  delete body.thinking_budget;
+  delete body.enable_thinking;
+  delete body.reasoning;
+  delete body.reasoning_effort;
+  if (output && Object.hasOwn(output, "effort")) {
+    output = Object.assign({}, output);
+    delete output.effort;
+    if (Object.keys(output).length) body.output_config = output;
+    else delete body.output_config;
+  }
+
+  if (apiType === "responses") {
+    if (effort) body.reasoning_effort = effort;
+  } else if (effort === "none") {
+    thinkingOff(body);
+  } else if (effort || incomingThinking === "enabled") {
+    body.thinking = { type: "enabled" };
+    if (effort) body.reasoning_effort = effort;
+  }
+  return DEEPSEEK_V4.kind;
 }
 
 function applyKimiCodePro(body, parameters) {
@@ -223,6 +275,7 @@ function applyProviderReasoningControls(body, ctx) {
   var modelId = String(ctx.modelId || "");
   var baseUrl = String(ctx.baseUrl || "");
   var documented = documentedReasoningPolicy(modelId, baseUrl);
+  if (documented === DEEPSEEK_V4) return applyDeepSeekV4(body, ctx.parameters, ctx.apiType);
   if (documented === KIMI_CODE_PRO) {
     return applyKimiCodePro(body, ctx.parameters);
   }
@@ -243,6 +296,8 @@ function applyProviderReasoningControls(body, ctx) {
 }
 
 module.exports = {
+  DEEPSEEK_ORIGIN: DEEPSEEK_ORIGIN,
+  isDirectDeepSeekOrigin: isDirectDeepSeekOrigin,
   documentedReasoningPolicy: documentedReasoningPolicy,
   documentedReasoningEffort: documentedReasoningEffort,
   applyProviderReasoningControls: applyProviderReasoningControls,

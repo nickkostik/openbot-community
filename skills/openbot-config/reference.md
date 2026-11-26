@@ -376,6 +376,24 @@ The policy applies to these three Chat Completions models at `https://integrate.
 
 Default adds no new reasoning control. NVIDIA supplies the model's default when the request has no supported control. An explicit choice uses the native control above and preserves unrelated template options.
 
+### Direct DeepSeek V4 reasoning
+
+The model policy applies to `deepseek-flash`, `deepseek-v4-pro` and the compatibility IDs `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` on `https://api.deepseek.com`. OpenBot accepts the bare host or the suffixes `/v1`, `/chat/completions`, `/v1/chat/completions`, `/responses`, `/v1/responses`, `/anthropic`, `/anthropic/v1` and `/anthropic/v1/messages`, with optional port `443` and trailing slash. All of these forms discover available models with `GET https://api.deepseek.com/v1/models`. [DeepSeek model list](https://api-docs.deepseek.com/api/list-models/), [DeepSeek model IDs](https://api-docs.deepseek.com/quick_start/pricing/).
+
+The saved model or provider protocol selects the native endpoint on that host. Model choice and protocol remain independent. [Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/), [Responses](https://api-docs.deepseek.com/api/create-response/), [Anthropic Messages](https://api-docs.deepseek.com/guides/anthropic_api/).
+
+| Protocol | POST path | Explicit reasoning controls |
+| --- | --- | --- |
+| `chat-completions` | `/v1/chat/completions` | Off sets `thinking.type` to `disabled`. Low, High and Max enable thinking and set `reasoning_effort`. |
+| `responses` | `/responses` | `reasoning.effort` is `none`, `low`, `high` or `max`. |
+| `anthropic` | `/anthropic/v1/messages` | Off sets `thinking.type` to `disabled`. Low, High and Max enable thinking and set `output_config.effort`. |
+
+Discovery, route-scoped catalog metadata, manual imports and effective saved settings offer Default, Off (`none`), Low, High and Max. For these direct models, legacy `minimal` resolves to `low`, `medium` and `xhigh` resolve to `high`, and `ultra` resolves to `max`. [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+An explicit bot effort takes priority over the model setting. A saved Off, Low, High or Max replaces conflicting inbound controls. Model Default adds no effort override and can use supported incoming controls. When no supported control is supplied, DeepSeek enables thinking at High. Clearing a bot effort inherits the model setting. [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+For a tool continuation on the direct Responses endpoint, OpenBot serializes retained assistant `reasoning_content` as a `reasoning` item containing `reasoning_text` before the associated assistant message. Function calls and tool outputs retain their `call_id` linkage. [DeepSeek Responses input items](https://api-docs.deepseek.com/guides/responses_api/).
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.

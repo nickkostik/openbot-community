@@ -19,7 +19,7 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
-var { documentedReasoningEffort, documentedReasoningPolicy, isZaiGlm53Route } = require("./provider-maps.cjs");
+var { DEEPSEEK_ORIGIN, documentedReasoningEffort, documentedReasoningPolicy, isDirectDeepSeekOrigin, isZaiGlm53Route } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
 var chatGPTPlan = require("./chatgpt-plan.cjs");
@@ -431,6 +431,10 @@ function completionsUrl(origin) {
 function upstreamUrl(origin, apiType) {
   var b = String(origin || "").replace(/\/+$/, "");
   if (!b) throw new Error("openbot-hop: missing origin");
+  if (isDirectDeepSeekOrigin(b)) {
+    if (apiType === "responses") return DEEPSEEK_ORIGIN + "/responses";
+    b = DEEPSEEK_ORIGIN + (apiType === "anthropic" ? "/anthropic/v1" : "/v1");
+  }
   if (/^https:\/\/opencode\.ai\/(?:inference\/go(?:\/(?:openai|anthropic)\/v1)?|zen\/go(?:\/v1)?)$/.test(b)) {
     b = "https://opencode.ai/inference/go" + (apiType === "anthropic" ? "/anthropic/v1" : "/openai/v1");
   }
@@ -717,6 +721,20 @@ function applyMaps(body, ctx) {
   if (maps && typeof maps.applyProviderReasoningControls === "function") {
     maps.applyProviderReasoningControls(body, ctx);
   }
+}
+
+function encodeUpstreamBody(body, route, apiType) {
+  var origin = route.provider.origin;
+  applyMaps(body, {
+    modelId: route.model.slug,
+    baseUrl: origin,
+    apiType: apiType,
+    maxMode: false,
+    parameters: hopParameters(route.model),
+  });
+  if (apiType === "responses") return protocolConverters.chatToResponses(body, isDirectDeepSeekOrigin(origin));
+  if (apiType === "anthropic") return protocolConverters.chatToAnthropic(body);
+  return body;
 }
 
 // Serialized size of the outbound body WITHOUT its messages: tools, model,
@@ -1665,8 +1683,7 @@ function buildInjectionOutbound(baseBody, messages, route, apiType, maxCompletio
     else next.max_tokens = maxCompletionTokens;
   }
   applyMaxTokens(next, route.model, apiType);
-  applyMaps(next, { modelId: route.model.slug, baseUrl: route.provider.origin, maxMode: false, parameters: hopParameters(route.model) });
-  var outbound = apiType === "responses" ? protocolConverters.chatToResponses(next) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(next) : next;
+  var outbound = encodeUpstreamBody(next, route, apiType);
   outbound.__openbot_api_type = apiType;
   noteWireBytes(outbound);
   return outbound;
@@ -2032,7 +2049,7 @@ async function handleCompletionsInner(req, res) {
         delete body.thinking;
       }
       delete body.enable_thinking;
-      if (reasoningPolicy && reasoningPolicy.kind !== "kimi-code-pro" && isRecord(body.chat_template_kwargs)) {
+      if ((reasoningPolicy?.kind === "nvidia-nemotron-toggle" || reasoningPolicy?.kind === "nvidia-super-vl") && isRecord(body.chat_template_kwargs)) {
         body.chat_template_kwargs = Object.assign({}, body.chat_template_kwargs);
         delete body.chat_template_kwargs.enable_thinking;
         delete body.chat_template_kwargs.reasoning_effort;
@@ -2114,13 +2131,7 @@ async function handleCompletionsInner(req, res) {
     }
     var canonicalBody = Object.assign({}, body, { messages: Array.isArray(body.messages) ? body.messages.slice() : [] });
     applyMaxTokens(body, route.model, apiType);
-    applyMaps(body, {
-      modelId: route.model.slug,
-      baseUrl: route.provider.origin,
-      maxMode: false,
-      parameters: hopParameters(route.model),
-    });
-    var outboundBody = apiType === "responses" ? protocolConverters.chatToResponses(body) : apiType === "anthropic" ? protocolConverters.chatToAnthropic(body) : body;
+    var outboundBody = encodeUpstreamBody(body, route, apiType);
     var __cacheOrigin = String((route.provider && route.provider.origin) || "");
     var __cacheScope = conversationId || (injectionContext && injectionContext.observed && injectionContext.observed.botId) || "";
     if (__cacheScope && body.openbot_internal_auxiliary === true) __cacheScope += "\u0000auxiliary";

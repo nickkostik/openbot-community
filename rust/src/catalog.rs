@@ -146,7 +146,7 @@ fn openai_levels(slug: &str) -> Option<&'static [Effort]> {
     }
 }
 
-fn unversioned_slug(slug: &str) -> &str {
+pub fn unversioned_slug(slug: &str) -> &str {
     match slug
         .as_bytes()
         .split_at_checked(slug.len().saturating_sub(11))

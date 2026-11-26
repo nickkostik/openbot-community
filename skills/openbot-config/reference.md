@@ -153,7 +153,7 @@ With both flags active, inference can renew a due OpenAI login when its renewal 
 
 Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves. Successful account saves return the current panel state so the browser can show the saved account immediately.
 
-Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with either `--enable-hop` or `--enable-accounts`. The aggregate model catalog, scheduled refresh and remaining panel control routes are pending.
+Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with either `--enable-hop` or `--enable-accounts`. With `--ui-dir`, the candidate loads `openbot-model-catalog.json` at startup and serves read-only `GET /api/model-catalog`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. Live public-source refresh and the remaining panel control routes are pending.
 
 ### Official controls without logging rewrap
 

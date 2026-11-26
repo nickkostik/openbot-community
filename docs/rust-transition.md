@@ -45,7 +45,7 @@ With either `--enable-hop` or `--enable-accounts`, send `POST /api/providers/{id
 
 ## Open the panel in rehearsal
 
-Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads its saved catalog and listener status from Rust. Aggregate catalog refresh, logs, and the remaining control routes are pending.
+Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads the saved catalog and listener status from Rust. The candidate loads `openbot-model-catalog.json` at startup and uses it for the aggregate count and provider-scoped metadata. Live catalog refresh, logs, and the remaining control routes are pending.
 
 ## Cutover checklist
 
@@ -55,6 +55,7 @@ Build the existing panel with `npm run build`, then point `--ui-dir` at the gene
 - [x] Port credential drafts, refresh, and both OpenAI sign-in paths. Verify signed account renewal under the existing provider ID, independent registration, and refresh persistence in disposable state.
 - [x] Port on-demand provider discovery. Compare both Go and both NVIDIA accounts with the current service and verify OpenAI plan and OAuth descriptors with fixtures.
 - [x] Serve the existing built panel and state readback through Rust. Open Models in Chromium, exercise sign-in cancellation, and save and reload a disposable account key.
+- [x] Read the existing aggregate model catalog through Rust. Verify both global and provider-scoped lookups for the installed model IDs.
 - [ ] Port scheduled catalog refresh and complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [ ] Port log settings and retention, usage, compaction, and provider-specific cache identifiers. Replay representative long histories with structured tool results and compare content and cache counters.

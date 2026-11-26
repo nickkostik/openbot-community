@@ -1,3 +1,4 @@
+mod aggregate;
 mod auth;
 mod bot_models;
 mod catalog;
@@ -147,7 +148,10 @@ async fn serve(
         .transpose()?;
     let panel = ui_dir
         .zip(credentials.clone())
-        .map(|(directory, store)| panel::routes(directory, store, status))
+        .map(|(directory, store)| {
+            panel::routes(directory, store, status)
+                .map(|panel| panel.merge(aggregate::routes(state.clone())))
+        })
         .transpose()?;
     let services = [
         hop.map(hop::Hop::routes),

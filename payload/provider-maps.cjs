@@ -15,6 +15,9 @@ var GROK_MODEL_RE = /^grok[-.]/i;
 var ZAI_DIRECT_RE = /^https:\/\/api\.z\.ai\/api\/(?:coding\/)?paas\/v4\/?$/i;
 var ZAI_GLM53_RE = /^glm-5\.3(?:-flash)?$/i;
 var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
+var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
+var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
 
 function isGlmRoute(modelId, baseUrl) {
   return GLM_MODEL_RE.test(String(modelId || "")) || GLM_BASE_RE.test(String(baseUrl || ""));
@@ -45,6 +48,22 @@ function applyZaiGlm53(body, parameters) {
     body.thinking = Object.assign({}, options, { type: "enabled" });
   }
   return body.reasoning_effort === undefined ? "zai-glm53-default" : "zai-glm53-effort";
+}
+
+function applyAlibabaQwen(body, parameters) {
+  var thinking = param(parameters, "thinking");
+  var effort = thinking === false || String(thinking).toLowerCase() === "false"
+    ? "none"
+    : param(parameters, "effort");
+  if (!ALIBABA_QWEN_EFFORT_RE.test(String(effort))) return "alibaba-qwen-passthrough";
+
+  // An explicit selection replaces any thinking controls on the incoming
+  // request. These models reject a budget alongside reasoning_effort.
+  body.reasoning_effort = String(effort);
+  delete body.thinking_budget;
+  delete body.enable_thinking;
+  delete body.thinking;
+  return "alibaba-qwen-effort";
 }
 
 function applyGlm(body, parameters) {
@@ -118,6 +137,9 @@ function applyProviderReasoningControls(body, ctx) {
   var baseUrl = String(ctx.baseUrl || "");
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
+  }
+  if (baseUrl.replace(/\/$/, "") === ALIBABA_TOKEN_PLAN_CHAT_ORIGIN && ALIBABA_QWEN_REASONING_RE.test(modelId)) {
+    return applyAlibabaQwen(body, ctx.parameters);
   }
   if (isGrokRoute(modelId, baseUrl)) {
     return applyGrok(body, ctx.maxMode === true, ctx.parameters) || "grok-passthrough";

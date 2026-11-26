@@ -58,6 +58,56 @@ test("the direct Z.AI GLM-5.3 rule preserves Off for GLM-5.2 and other endpoints
   }
 });
 
+const alibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+
+test("Alibaba Token Plan sends its native Off setting for Qwen 3.8 and Qwen4 Max", () => {
+  for (const model of ["qwen3.8-max", "qwen3.8-flash", "qwen4-max"]) {
+    const body: Record<string, unknown> = {
+      model, reasoning_effort: "high", thinking: { type: "enabled" }, enable_thinking: true, thinking_budget: 4096,
+    };
+    maps.applyProviderReasoningControls(body, {
+      modelId: model,
+      baseUrl: alibabaTokenPlan,
+      parameters: [{ id: "thinking", value: "false" }],
+    });
+    assert.deepEqual(body, { model, reasoning_effort: "none" });
+  }
+});
+
+test("Alibaba Token Plan applies selected Qwen effort without a conflicting wire budget", () => {
+  for (const [model, effort] of [["qwen3.8-flash", "medium"], ["qwen4-max", "high"]] as const) {
+    const body: Record<string, unknown> = {
+      model, reasoning_effort: "low", thinking: { type: "disabled" }, enable_thinking: false, thinking_budget: 4096,
+    };
+    maps.applyProviderReasoningControls(body, {
+      modelId: model,
+      baseUrl: alibabaTokenPlan + "/",
+      parameters: [{ id: "effort", value: effort }],
+    });
+    assert.deepEqual(body, { model, reasoning_effort: effort });
+  }
+});
+
+test("Alibaba Token Plan keeps an explicit Qwen budget at the default setting", () => {
+  const body: Record<string, unknown> = { model: "qwen3.8-max", thinking_budget: 4096 };
+  maps.applyProviderReasoningControls(body, {
+    modelId: "qwen3.8-max",
+    baseUrl: alibabaTokenPlan,
+    parameters: [],
+  });
+  assert.deepEqual(body, { model: "qwen3.8-max", thinking_budget: 4096 });
+});
+
+test("Alibaba Token Plan Qwen mapping does not apply to the same slug at another provider", () => {
+  const body: Record<string, unknown> = { model: "qwen3.8-flash" };
+  maps.applyProviderReasoningControls(body, {
+    modelId: "qwen3.8-flash",
+    baseUrl: "https://example.test/v1",
+    parameters: [{ id: "thinking", value: "false" }],
+  });
+  assert.deepEqual(body, { model: "qwen3.8-flash", thinking: { type: "disabled" } });
+});
+
 test("GLM maps do not default to fast true", () => {
   const body: Record<string, unknown> = { model: "glm-5.3-flash" };
   const result = maps.applyProviderReasoningControls(body, {

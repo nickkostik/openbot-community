@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { openAIOAuthAccountId, type OpenAIOAuthCredential } from "./openai-oauth.ts";
+import { isDirectOrigin, readCredential, type ChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 export const MAX_CREDENTIAL_FILE_BYTES = 256 * 1024;
 
@@ -24,6 +25,11 @@ export function normalizeProviderCredential(raw: string, origin: string): string
   const value = raw.trim();
   if (!value) throw new Error("Credential is empty.");
   if (!value.startsWith("{")) return value;
+  const plan = readCredential(value);
+  if (plan) {
+    if (!isDirectOrigin(origin)) throw new Error("ChatGPT plan login requires the direct OpenAI API.");
+    return JSON.stringify(plan);
+  }
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { throw new Error("Credential file is not valid JSON."); }
   if (!record(parsed)) throw new Error("Credential file must contain an object.");
@@ -54,7 +60,7 @@ export function normalizeProviderCredential(raw: string, origin: string): string
 }
 
 export class CredentialDrafts {
-  private readonly entries = new Map<string, { secret: string; expiresAt: number }>();
+  private readonly entries = new Map<string, { secret: string; expiresAt: number; targetProviderId: string | undefined }>();
   private readonly now: () => number;
   private readonly maxEntries: number;
   constructor(now: () => number = Date.now, maxEntries = 32) {
@@ -66,19 +72,20 @@ export class CredentialDrafts {
     for (const [id, entry] of this.entries) if (entry.expiresAt <= this.now()) this.entries.delete(id);
   }
 
-  stage(credential: OpenAIOAuthCredential): { credentialId: string; expiresIn: number } {
+  stage(credential: OpenAIOAuthCredential | ChatGPTPlanCredential, targetProviderId?: string): { credentialId: string; expiresIn: number } {
     this.prune();
     if (this.entries.size >= this.maxEntries) throw new Error("Too many pending logins. Finish a login or wait for it to expire.");
     const credentialId = randomUUID();
     const expiresIn = 1800;
-    this.entries.set(credentialId, { secret: JSON.stringify(credential), expiresAt: this.now() + expiresIn * 1000 });
+    this.entries.set(credentialId, { secret: JSON.stringify(credential), expiresAt: this.now() + expiresIn * 1000, targetProviderId });
     return { credentialId, expiresIn };
   }
 
-  read(credentialId: string): string {
+  read(credentialId: string, targetProviderId?: string): string {
     this.prune();
     const entry = this.entries.get(credentialId);
-    if (!entry) throw new Error("Login draft expired. Sign in again before adding the account.");
+    if (!entry) throw new Error("Login draft expired. Sign in again.");
+    if (entry.targetProviderId !== targetProviderId) throw new Error("This login was started for a different provider account.");
     return entry.secret;
   }
 

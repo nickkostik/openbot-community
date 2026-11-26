@@ -4,22 +4,31 @@ import {
   DEFAULT_MODALITIES,
   DEFAULT_REASONING_LEVELS,
   makeModel,
+  modelSupportsChat,
+  parseMaxOutputTokens,
+  parseModelType,
 } from "../domain/model.ts";
 import { parseModelId, parseModelSlug } from "../supervisor/plan.ts";
 import { type BoxPaths } from "../supervisor/paths.ts";
 import { parseProviderId, parseSecretBytes } from "../supervisor/secrets.ts";
 import { customBoxFromCatalog, officialBox, parseExposeToken, parseUpstreamOrigin, slugify } from "./argv.ts";
 import { normalizeProviderCredential } from "../supervisor/credential-import.ts";
+import { isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
+import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
+import { readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 export type ModelLimitsInput = {
   readonly catalogLimits?: unknown;
   readonly apiType?: unknown;
+  readonly modelType?: unknown;
   readonly contextTokens?: unknown;
   readonly maxOutputTokens?: unknown;
   readonly reasoningLevels?: unknown;
   readonly modalities?: unknown;
   readonly activeReasoning?: unknown;
 };
+
+export class UnsupportedChatModelError extends Error {}
 
 export type UiCommand =
   | { readonly kind: "official" }
@@ -42,6 +51,7 @@ export type UiCommand =
       readonly kind: "upsert-model";
       readonly catalogLimits?: unknown;
       readonly apiType?: unknown;
+      readonly modelType?: unknown;
       readonly providerId: string;
       readonly slug: string;
       readonly contextTokens?: unknown;
@@ -76,6 +86,7 @@ function limitsFrom(input: Record<string, unknown>): ModelLimitsInput {
   const next: {
     catalogLimits?: unknown;
     apiType?: unknown;
+    modelType?: unknown;
     contextTokens?: unknown;
     maxOutputTokens?: unknown;
     reasoningLevels?: unknown;
@@ -84,6 +95,7 @@ function limitsFrom(input: Record<string, unknown>): ModelLimitsInput {
   } = {};
   if (input.catalogLimits !== undefined) next.catalogLimits = input.catalogLimits;
   if (input.apiType !== undefined) next.apiType = parseApiType(input.apiType);
+  if (input.modelType !== undefined) next.modelType = parseModelType(input.modelType);
   if (input.contextTokens !== undefined) {
     next.contextTokens = input.contextTokens;
   }
@@ -212,6 +224,10 @@ function emptyCatalog(): Catalog {
 }
 
 function withWildcard(catalog: Catalog, modelId: Model["id"]): Catalog {
+  const model = catalog.models.find((row) => row.id === modelId);
+  if (model && !modelSupportsChat(model)) {
+    throw new UnsupportedChatModelError(`OpenBot: ${model.slug} does not support bot chat`);
+  }
   return {
     ...catalog,
     bindings: [{ conversation: { kind: "wildcard" }, modelId }],
@@ -227,7 +243,7 @@ function upsertModelRow(catalog: Catalog, model: Model): Catalog {
   const rest = catalog.models.filter((row) => row.id !== model.id);
   const models = [...rest, model];
   const hasWildcard = catalog.bindings.some((row) => row.conversation.kind === "wildcard");
-  if (hasWildcard) {
+  if (hasWildcard || !modelSupportsChat(model)) {
     return { ...catalog, models };
   }
   return withWildcard({ ...catalog, models }, model.id);
@@ -235,29 +251,34 @@ function upsertModelRow(catalog: Catalog, model: Model): Catalog {
 
 function modelFromLimits(input: {
   id: Model["id"];
-  providerId: Model["providerId"];
+  provider: Provider;
   slug: Model["slug"];
   existing: Model | undefined;
   limits: ModelLimitsInput;
 }): Model {
   const existing = input.existing;
+  const policy = documentedReasoningPolicy(input.slug, input.provider.origin);
+  const requestedEffort = input.limits.activeReasoning ?? existing?.activeReasoning ?? "default";
+  const outputLimit = input.limits.maxOutputTokens ?? existing?.maxOutputTokens ?? HIGH_AGENT_MAX_TOKENS;
   return makeModel({
     id: input.id,
-    providerId: input.providerId,
+    providerId: input.provider.id,
     slug: input.slug,
     contextTokens: input.limits.contextTokens ?? existing?.contextTokens ?? DEFAULT_CONTEXT_TOKENS,
-    maxOutputTokens: input.limits.maxOutputTokens ?? existing?.maxOutputTokens ?? HIGH_AGENT_MAX_TOKENS,
-    reasoningLevels: input.limits.reasoningLevels ?? existing?.reasoningLevels ?? DEFAULT_REASONING_LEVELS,
+    maxOutputTokens: policy?.maxOutputTokens ? Math.min(parseMaxOutputTokens(outputLimit), policy.maxOutputTokens) : outputLimit,
+    reasoningLevels: policy?.levels ?? input.limits.reasoningLevels ?? existing?.reasoningLevels ?? DEFAULT_REASONING_LEVELS,
     modalities: input.limits.modalities ?? existing?.modalities ?? DEFAULT_MODALITIES,
-    activeReasoning: input.limits.activeReasoning ?? existing?.activeReasoning ?? "default",
+    activeReasoning: policy ? documentedReasoningEffort(policy, requestedEffort) ?? "default" : requestedEffort,
     parameters: existing?.parameters ?? [],
     apiType: input.limits.apiType ?? existing?.apiType,
+    modelType: parseModelType(input.limits.modelType) ?? existing?.modelType,
     catalogLimits: input.limits.catalogLimits ?? existing?.catalogLimits,
   });
 }
 
 function remainingFallback(models: readonly Model[], providerId: Model["providerId"]): Model | undefined {
-  return models.find((row) => row.providerId === providerId) ?? models[0];
+  const chatModels = models.filter(modelSupportsChat);
+  return chatModels.find((row) => row.providerId === providerId) ?? chatModels[0];
 }
 
 export type UiSave = {
@@ -283,6 +304,11 @@ export function applyUiCommand(input: {
 }): UiSave {
   const { command, catalog, paths } = input;
   const expose = input.expose ?? loopbackExpose();
+  function saveCatalog(next: Catalog): UiSave {
+    return input.mode === "official"
+      ? { desired: officialBox(paths, expose), catalogWrite: next }
+      : { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+  }
   if (command.kind === "add-provider") {
     const name = command.name.trim();
     if (!name || name.length > 128) throw new Error("OpenBot: account name must contain 1 to 128 characters");
@@ -299,12 +325,12 @@ export function applyUiCommand(input: {
     if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
       throw new Error("OpenBot: provider base URL must not contain credentials, a query, or a fragment");
     }
-    if (base.startsWith("opencode-go") && origin !== "https://opencode.ai/zen/go/v1") {
-      throw new Error("OpenBot: OpenCode Go accounts must use https://opencode.ai/zen/go/v1 directly");
+    if (base.startsWith("opencode-go") && !isOpenCodeGoOrigin(origin)) {
+      throw new Error(`OpenBot: OpenCode Go accounts must use ${OPENCODE_GO_ORIGIN} directly`);
     }
     const credential = normalizeProviderCredential(command.secret, origin);
-    if (base.startsWith("alibaba-token-plan") && !credential.startsWith("sk-sp-")) {
-      throw new Error("OpenBot: Alibaba Coding Plan requires its sk-sp- key, not a pay-as-you-go key");
+    if (/^alibaba-(token|coding)-plan(?:-|$)/.test(base) && !credential.startsWith("sk-sp-")) {
+      throw new Error("OpenBot: Alibaba plans require an sk-sp- subscription key");
     }
     const provider: Provider = { id: providerId, name, origin,
       apiType: parseApiType(command.apiType), maxTokensDefault: HIGH_AGENT_MAX_TOKENS, mapFile: "provider-maps.cjs" };
@@ -327,15 +353,17 @@ export function applyUiCommand(input: {
   }
   if (command.kind === "set-secret") {
     const providerId = parseProviderId(command.providerId);
-    if (!catalog.providers.some((row) => row.id === providerId)) {
+    const provider = catalog.providers.find(row => row.id === providerId);
+    if (!provider) {
       throw new Error("OpenBot: unknown provider");
     }
-    if (catalog.models.length === 0) {
+    if (input.mode !== "official" && catalog.models.length === 0) {
       throw new Error("OpenBot: add a model before using custom chat");
     }
     return {
-      desired: customBoxFromCatalog({ paths, catalog, expose }),
-      secret: { providerId, bytes: parseSecretBytes(command.secret) },
+      desired: input.mode === "official" ? officialBox(paths, expose) : customBoxFromCatalog({ paths, catalog, expose }),
+      secret: { providerId, bytes: parseSecretBytes(readChatGPTPlanCredential(command.secret.trim())
+        ? normalizeProviderCredential(command.secret, provider.origin) : command.secret) },
     };
   }
   if (command.kind === "update-provider") {
@@ -358,13 +386,8 @@ export function applyUiCommand(input: {
       origin,
       apiType: parseApiType(command.apiType),
     });
-    if (command.secret !== undefined) {
-      return {
-        desired: customBoxFromCatalog({ paths, catalog: next, expose }),
-        secret: { providerId, bytes: parseSecretBytes(command.secret) },
-      };
-    }
-    return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+    const save = saveCatalog(next);
+    return command.secret === undefined ? save : { ...save, secret: { providerId, bytes: parseSecretBytes(command.secret) } };
   }
   if (command.kind === "upsert-provider") {
     const providerId = parseProviderId(slugify(command.name));
@@ -401,7 +424,7 @@ export function applyUiCommand(input: {
       withProvider,
       modelFromLimits({
         id: modelId,
-        providerId,
+        provider,
         slug,
         existing,
         limits: command,
@@ -414,23 +437,15 @@ export function applyUiCommand(input: {
   }
   if (command.kind === "upsert-model") {
     const providerId = parseProviderId(command.providerId);
-    if (!catalog.providers.some((row) => row.id === providerId)) {
+    const provider = catalog.providers.find((row) => row.id === providerId);
+    if (!provider) {
       throw new Error("OpenBot: unknown provider");
     }
     const slug = parseModelSlug(command.slug);
     const modelId = parseModelId(`${providerId}:${command.slug}`);
     const existing = catalog.models.find((row) => row.id === modelId);
-    const next = upsertModelRow(
-      catalog,
-      modelFromLimits({
-        id: modelId,
-        providerId,
-        slug,
-        existing,
-        limits: command,
-      }),
-    );
-    return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+    const model = modelFromLimits({ id: modelId, provider, slug, existing, limits: command });
+    return saveCatalog(upsertModelRow(catalog, model));
   }
   if (command.kind === "use-model") {
     const modelId = parseModelId(command.modelId);
@@ -449,6 +464,7 @@ export function applyUiCommand(input: {
       activeReasoning: command.reasoning ?? model.activeReasoning,
       parameters: model.parameters,
       apiType: model.apiType,
+      modelType: model.modelType,
       catalogLimits: model.catalogLimits,
     });
     const next = upsertModelRow(catalog, nextModel);
@@ -475,32 +491,26 @@ export function applyUiCommand(input: {
         ];
       }
     }
-    return {
-      desired: customBoxFromCatalog({
-        paths,
-        catalog: { providers: catalog.providers, models, bindings },
-        expose,
-      }),
-    };
+    return saveCatalog({ providers: catalog.providers, models, bindings });
   }
   const providerId = parseProviderId(command.providerId);
   const providers = catalog.providers.filter((row) => row.id !== providerId);
   const models = catalog.models.filter((row) => row.providerId !== providerId);
-  if (providers.length === 0 || models.length === 0) {
+  if (providers.length === 0) {
     return { desired: officialBox(paths, expose), catalogWrite: emptyCatalog() };
   }
   const active = catalog.bindings.find((row) => row.conversation.kind === "wildcard");
-  const stillBound = active && models.some((row) => row.id === active.modelId);
-  const fallback = models[0];
+  const stillBound = active && models.some((row) => row.id === active.modelId && modelSupportsChat(row));
+  const fallback = models.find(modelSupportsChat);
   if (fallback === undefined) {
-    return { desired: officialBox(paths, expose), catalogWrite: emptyCatalog() };
+    return { desired: officialBox(paths, expose), catalogWrite: { providers, models, bindings: [] } };
   }
   const next: Catalog = {
     providers,
     models,
     bindings: [{ conversation: { kind: "wildcard" }, modelId: stillBound && active ? active.modelId : fallback.id }],
   };
-  return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+  return saveCatalog(next);
 }
 
 export function catalogAfterSave(parsed: UiSave, fromDisk: Catalog): Catalog {

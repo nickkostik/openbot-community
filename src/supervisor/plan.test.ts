@@ -4,6 +4,62 @@ import { catalogFromPlanJson } from "./plan.ts";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_REASONING_LEVELS } from "../domain/model.ts";
 import { HIGH_AGENT_MAX_TOKENS } from "../domain/types.ts";
 
+test("saved direct DeepSeek models distinguish legacy Default from explicit Off", () => {
+  const origin = "https://api.deepseek.com/v1";
+  const providers = [{ id: "deepseek", origin }];
+  const models = [
+    ["deepseek-flash", ["none", "low", "high"], "none", "responses"],
+    ["deepseek-v4-pro", ["default", "none", "high"], "none", "anthropic"],
+    ["deepseek-v4-flash", ["default", "xhigh"], "xhigh", "chat-completions"],
+  ].map(([slug, reasoningLevels, activeReasoning, apiType]) => ({
+    id: "deepseek:" + slug, providerId: "deepseek", slug, reasoningLevels, activeReasoning, apiType,
+    contextTokens: 1048576, maxOutputTokens: 8192,
+  }));
+  const read = catalogFromPlanJson(JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } }));
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["default", "none", "high"]);
+  assert.deepEqual(read.models.map(row => row.apiType), ["responses", "anthropic", "chat-completions"]);
+  assert.ok(read.models.every(row => row.contextTokens === 1048576 && row.maxOutputTokens === 8192));
+});
+
+test("saved Kimi Code Pro routes display documented efforts and keep valid choices", () => {
+  const entries = [
+    ["kimi", "https://api.kimi.com/coding/v1", "k3.1-pro", "none"],
+    ["kimi-2", "https://api.kimi.ai/coding/v1", "k3.1-pro-highspeed", "xhigh"],
+    ["other", "https://example.test/v1", "k3.1-pro", "none"],
+  ];
+  const providers = entries.map(([id, origin]) => ({ id, name: id, origin }));
+  const models = entries.map(([providerId, , slug, activeReasoning]) => ({
+    id: providerId + ":" + slug, providerId, slug, reasoningLevels: ["default", "none", "high", "max"],
+    activeReasoning, contextTokens: 262144, maxOutputTokens: 8192,
+  }));
+  const raw = JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } });
+  const read = catalogFromPlanJson(raw);
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["default", "max", "none"]);
+  assert.deepEqual(read.models.map(row => row.reasoningLevels.includes("none")), [false, false, true]);
+  assert.ok(read.models.every(row => row.contextTokens === 262144 && row.maxOutputTokens === 8192));
+});
+
+test("NVIDIA saved reasoning choices normalize by hosted model without changing its limits", () => {
+  const origin = "https://integrate.api.nvidia.com/v1";
+  const providers = [{ id: "first", origin }, { id: "second", origin }, { id: "other", origin: "https://example.test/v1" }];
+  const models = [
+    ["first", "nvidia/nemotron-3.5-bolt-e4b", "medium"],
+    ["second", "nvidia/nemotron-3.5-lightning-30b-a3b", "none"],
+    ["first", "nvidia/nemotron-3.5-super-vl-120b-a12b", "medium"],
+    ["other", "nvidia/nemotron-3.5-bolt-e4b", "medium"],
+  ].map(([providerId, slug, activeReasoning]) => ({
+    id: providerId + ":" + slug, providerId, slug, activeReasoning,
+    reasoningLevels: ["default", "none", "medium"], contextTokens: 256000, maxOutputTokens: 16000,
+  }));
+  const raw = JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } });
+  const read = catalogFromPlanJson(raw);
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["on", "none", "low", "medium"]);
+  assert.deepEqual(read.models.map(row => row.reasoningLevels), [
+    ["default", "none", "on"], ["default", "none", "on"], ["default", "none", "low", "high"], ["default", "none", "medium"],
+  ]);
+  assert.ok(read.models.every(row => row.contextTokens === 256000 && row.maxOutputTokens === 16000));
+});
+
 test("catalogFromPlanJson fills model limits on old plan JSON", () => {
   const catalog = catalogFromPlanJson(
     JSON.stringify({

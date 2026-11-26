@@ -4,6 +4,7 @@
  * Isolated in one file so backend-integration fixes are single-file changes.
  * Everything lives on the same origin as the served UI (no CORS, no base URL).
  */
+import { modelSupportsChat } from "../../../src/domain/model.ts";
 import type {
   BoxState,
   BotInfo,
@@ -190,12 +191,14 @@ export async function save(command: Command): Promise<SaveResult> {
   return (await request("/api/save", jsonInit(command))) as SaveResult;
 }
 
-export async function startOpenAIOAuth(): Promise<{ sessionId: string; authorizationUrl: string; expiresIn: number }> {
-  return (await request("/api/oauth/openai/start", jsonInit({}))) as { sessionId: string; authorizationUrl: string; expiresIn: number };
+export async function startChatGPTSignIn(providerId?: string): Promise<{ sessionId: string; authorizationUrl: string }> {
+  return (await request("/api/oauth/chatgpt/start", jsonInit({ providerId }))) as { sessionId: string; authorizationUrl: string };
 }
 
-export async function completeOpenAIOAuth(sessionId: string, callbackUrl: string): Promise<{ ok: true; credentialId: string; expiresIn: number }> {
-  return (await request("/api/oauth/openai/complete", jsonInit({ sessionId, callbackUrl }))) as { ok: true; credentialId: string; expiresIn: number };
+export type ChatGPTSignInStatus = { phase: "pending" | "expired" } | { phase: "failed"; error: string } | { phase: "ready"; credentialId: string };
+
+export async function chatGPTSignInStatus(sessionId: string): Promise<ChatGPTSignInStatus> {
+  return (await request("/api/oauth/chatgpt/status", jsonInit({ sessionId }))) as ChatGPTSignInStatus;
 }
 
 /* ---- Gateway pause (global kill-switch; the payload interceptor reads it) ---- */
@@ -554,7 +557,8 @@ export function customActivationBlocked(state: BoxState): RefusalError | null {
 
 /** Returning from Official preserves the saved global selection. */
 export function customActivationModel(state: BoxState): Model | undefined {
-  return modelById(state, state.activeModelId) ?? state.models[0];
+  const selected = modelById(state, state.activeModelId);
+  return selected && modelSupportsChat(selected) ? selected : state.models.find(modelSupportsChat);
 }
 
 export async function getLocalTransfer(): Promise<import("./types").LocalTransfer> {

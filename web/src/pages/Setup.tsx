@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { ArrowRight, Check, ChevronLeft, Info, ShieldAlert, TriangleAlert } from "lucide-react";
-import { ApiError, completeOpenAIOAuth, startOpenAIOAuth } from "../api/client";
+import { ApiError } from "../api/client";
 import { credentialFileEntries, MAX_CREDENTIAL_FILE_BYTES, type CredentialFileEntry } from "../lib/credential-file";
 import { PRESETS, type Preset } from "../lib/presets";
 import { refusalKindLabel, refusalRemedy } from "../lib/refusal";
@@ -9,6 +9,7 @@ import { useApp } from "../store";
 import { Button, Notice } from "../components/ui";
 import { Field, Input, PasswordInput } from "../components/fields";
 import { Listbox } from "../components/Listbox";
+import { ChatGPTSignIn } from "../components/ChatGPTSignIn";
 
 type CredentialMode = "api-key" | "oauth" | "file";
 type ApiType = "chat-completions" | "responses" | "anthropic";
@@ -23,12 +24,8 @@ export function Setup() {
   const [apiType, setApiType] = useState<ApiType>(initial.apiType ?? "chat-completions");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
-  const [oauthBusy, setOauthBusy] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
-  const [oauthSession, setOauthSession] = useState<string | null>(null);
-  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
-  const [callbackUrl, setCallbackUrl] = useState("");
   const [credentialId, setCredentialId] = useState<string | null>(null);
   const [credentialMode, setCredentialMode] = useState<CredentialMode>("api-key");
   const [fileEntries, setFileEntries] = useState<CredentialFileEntry[]>([]);
@@ -47,9 +44,6 @@ export function Setup() {
     setSecret("");
     setCredentialMode("api-key");
     setCredentialId(null);
-    setOauthSession(null);
-    setOauthUrl(null);
-    setCallbackUrl("");
     setFileEntries([]);
     setFileEntryId(null);
     setFieldError(null);
@@ -82,36 +76,9 @@ export function Setup() {
       if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
     } catch { return setFieldError("Enter an HTTP or HTTPS base URL without credentials, a query, or a fragment."); }
     if (credentialMode === "api-key" && !secret.trim()) return setFieldError("API key is required.");
-    if (credentialMode === "oauth" && !credentialId) return setFieldError("Complete OpenAI sign-in before continuing.");
+    if (credentialMode === "oauth" && !credentialId) return setFieldError("Complete ChatGPT sign-in before continuing.");
     if (credentialMode === "file" && !selectedEntry) return setFieldError("Choose a login file and select the account to import.");
     setStep(3);
-  };
-
-  const beginOAuth = async () => {
-    setOauthBusy(true);
-    setFieldError(null);
-    try {
-      const result = await startOpenAIOAuth();
-      setOauthSession(result.sessionId);
-      setOauthUrl(result.authorizationUrl);
-    } catch (err) {
-      setFieldError(err instanceof Error ? err.message : "Could not start OpenAI sign-in.");
-    } finally { setOauthBusy(false); }
-  };
-
-  const finishOAuth = async () => {
-    if (!oauthSession || !callbackUrl.trim()) return;
-    setOauthBusy(true);
-    setFieldError(null);
-    try {
-      const result = await completeOpenAIOAuth(oauthSession, callbackUrl.trim());
-      setCredentialId(result.credentialId);
-      setOauthSession(null);
-      setOauthUrl(null);
-      setCallbackUrl("");
-    } catch (err) {
-      setFieldError(err instanceof Error ? err.message : "OpenAI sign-in failed.");
-    } finally { setOauthBusy(false); }
   };
 
   const addAccount = async () => {
@@ -134,13 +101,13 @@ export function Setup() {
   const StepIndicator = ({ n }: { n: number }) => <div className="step__num">{n < step ? <Check aria-hidden="true" /> : n}</div>;
   const credentialOptions: { id: CredentialMode; label: string }[] = [
     { id: "api-key", label: "API key" },
-    ...(preset.oauth ? [{ id: "oauth" as const, label: "OpenAI sign-in" }] : []),
+    ...(preset.oauth ? [{ id: "oauth" as const, label: "ChatGPT plan" }] : []),
     { id: "file", label: "Import login file" },
   ];
 
   return <div className="wizard">
     <div className="page-title-row">
-      <button className="icon-btn" aria-label="Back to Models" disabled={busy || oauthBusy} onClick={() => navigate({ kind: "models" })}><ChevronLeft aria-hidden="true" /></button>
+      <button className="icon-btn" aria-label="Back to Models" disabled={busy} onClick={() => navigate({ kind: "models" })}><ChevronLeft aria-hidden="true" /></button>
       <h1>Add a provider account</h1>
     </div>
     <div className="steps">
@@ -164,30 +131,19 @@ export function Setup() {
 
     {step === 2 ? <section>
       <div className="card card--pad" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <Field label="Account name" htmlFor="f-name" helper="Each account gets its own model family, even when names match."><Input id="f-name" large maxLength={128} value={name} disabled={oauthBusy} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Account name" htmlFor="f-name" helper="Each account gets its own model family, even when names match."><Input id="f-name" large maxLength={128} value={name} onChange={(e) => setName(e.target.value)} /></Field>
         <Field label="Base URL" htmlFor="f-origin" helper={preset.id === "opencode-go" ? "OpenCode Go connects directly to this endpoint." : undefined}>
-          <Input id="f-origin" large mono value={origin} readOnly={preset.id === "opencode-go" || credentialMode === "oauth"} disabled={oauthBusy} onChange={(e) => setOrigin(e.target.value)} />
+          <Input id="f-origin" large mono value={origin} readOnly={preset.id === "opencode-go" || credentialMode === "oauth"} onChange={(e) => setOrigin(e.target.value)} />
         </Field>
         {preset.id === "custom" ? <Field label="API protocol"><Listbox label="API protocol" value={apiType} onChange={(v) => setApiType(v as ApiType)} groups={[{ label: "Protocols", options: [
           { value: "chat-completions", label: "OpenAI Chat Completions" }, { value: "responses", label: "OpenAI Responses" }, { value: "anthropic", label: "Anthropic Messages" },
         ] }]} /></Field> : null}
         <div className="credential-tabs" role="group" aria-label="Credential type">
-          {credentialOptions.map((option) => <button key={option.id} type="button" aria-pressed={credentialMode === option.id} disabled={oauthBusy} className={credentialMode === option.id ? "is-active" : ""}
+          {credentialOptions.map((option) => <button key={option.id} type="button" aria-pressed={credentialMode === option.id} className={credentialMode === option.id ? "is-active" : ""}
             onClick={() => { setCredentialMode(option.id); setFieldError(null); if (option.id === "oauth") { setOrigin(preset.origin); setApiType("responses"); } }}>{option.label}</button>)}
         </div>
-        {credentialMode === "api-key" ? <Field label="API key" htmlFor="f-key" helper="Saved on this computer only after you add the account."><PasswordInput id="f-key" large value={secret} onChange={setSecret} placeholder={preset.id === "alibaba-token-plan" ? "sk-sp-…" : "Paste your key"} /></Field> : null}
-        {credentialMode === "oauth" ? <div className="card card--pad oauth-panel" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <p className="card__hint">Connect your ChatGPT/Codex subscription. Existing logins stay separate.</p>
-          {credentialId ? <Notice tone="info" icon={Check}>Login ready. Add this account within 30 minutes.</Notice>
-            : <Button variant="secondary" loading={oauthBusy} loadingLabel="Signing in…" disabled={oauthBusy} onClick={() => void beginOAuth()}>Start OpenAI sign-in</Button>}
-          {oauthUrl ? <a href={oauthUrl} target="_blank" rel="noreferrer">Open the OpenAI authorization page</a> : null}
-          {oauthSession ? <>
-            <Field label="Authorization callback URL" htmlFor="oauth-callback" helper="After signing in, paste the complete localhost:1455 URL shown by your browser. A blank callback page is expected on a remote computer.">
-              <Input id="oauth-callback" mono value={callbackUrl} disabled={oauthBusy} onChange={(e) => setCallbackUrl(e.target.value)} placeholder="http://localhost:1455/auth/callback?…" />
-            </Field>
-            <Button variant="secondary" disabled={oauthBusy || !callbackUrl.trim()} onClick={() => void finishOAuth()}>Complete OpenAI sign-in</Button>
-          </> : null}
-        </div> : null}
+        {credentialMode === "api-key" ? <Field label="API key" htmlFor="f-key" helper="Saved on this computer only after you add the account."><PasswordInput id="f-key" large value={secret} onChange={setSecret} placeholder={preset.id.startsWith("alibaba-") ? "sk-sp-…" : "Paste your key"} /></Field> : null}
+        {credentialMode === "oauth" ? <ChatGPTSignIn ready={credentialId !== null} onReady={setCredentialId} /> : null}
         {credentialMode === "file" ? <div className="credential-drop" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={(e) => { e.preventDefault(); void readCredentialFile(e.dataTransfer.files[0]); }}>
           <Field label="Saved login file" htmlFor="credential-file" helper="Drop or choose Codex auth.json or OpenCode auth.json (up to 256 KiB). Only your selected account is imported. OpenAI OAuth tokens need a direct OpenAI endpoint.">
             <Input id="credential-file" type="file" accept=".json,application/json" onChange={(e) => void readCredentialFile(e.target.files?.[0])} />
@@ -199,8 +155,8 @@ export function Setup() {
         {fieldError ? <Notice tone="warn" icon={TriangleAlert}>{fieldError}</Notice> : null}
       </div>
       <div className="row wrap" style={{ justifyContent: "space-between", marginTop: 20 }}>
-        <Button variant="ghost" disabled={oauthBusy} onClick={() => setStep(1)}><ChevronLeft aria-hidden="true" />Back</Button>
-        <Button variant="primary" disabled={oauthBusy} onClick={continueToReview}>Review <ArrowRight aria-hidden="true" /></Button>
+        <Button variant="ghost" onClick={() => setStep(1)}><ChevronLeft aria-hidden="true" />Back</Button>
+        <Button variant="primary" onClick={continueToReview}>Review <ArrowRight aria-hidden="true" /></Button>
       </div>
     </section> : null}
 
@@ -210,7 +166,7 @@ export function Setup() {
           <span className="k">Account</span><span className="v">{name}</span>
           <span className="k">Base URL</span><span className="v mono">{origin}</span>
           <span className="k">Models</span><span className="v">Fetch after adding</span>
-          <span className="k">Credential</span><span className="v">{credentialMode === "oauth" ? "OpenAI login" : credentialMode === "file" ? selectedEntry?.label : "API key"}</span>
+          <span className="k">Credential</span><span className="v">{credentialMode === "oauth" ? "ChatGPT plan" : credentialMode === "file" ? selectedEntry?.label : "API key"}</span>
         </div>
         <Notice tone="info" icon={Info}>Adding this account preserves your selected model, mode, and bot settings.</Notice>
         <div className="row wrap" style={{ justifyContent: "space-between", alignItems: "center" }}>

@@ -3,6 +3,7 @@ import test from "node:test";
 import { type Catalog, type SecretBytes } from "../domain/types.ts";
 import { type SecretStore } from "../supervisor/secrets.ts";
 import { fetchModelsForProvider, modelsUrl, normalizeProviderModels, OPENAI_CODEX_MODELS_URL, type FetchLike } from "./provider-models.ts";
+import { ORIGIN, SCOPES } from "../../payload/chatgpt-plan.cjs";
 
 type ResponseStub = { readonly status: number; readonly ok: boolean; text(): Promise<string> };
 
@@ -48,6 +49,89 @@ test("normalizeProviderModels rejects a body that is not a model list", () => {
   assert.equal(normalizeProviderModels({ foo: 1 }), undefined);
   assert.equal(normalizeProviderModels([]), undefined);
   assert.equal(normalizeProviderModels("nope"), undefined);
+});
+
+test("direct DeepSeek discovery shares its model list and adds documented reasoning choices", async () => {
+  const direct = "https://api.deepseek.com";
+  const entries = ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "other-model"]
+    .map(id => ({ id, context_length: 1048576 }));
+  for (const [origin, expectedUrl] of [
+    [direct + "/v1/", direct + "/v1/models"],
+    [direct + "/anthropic/v1/messages", direct + "/v1/models"],
+    [direct + "/responses", direct + "/v1/models"],
+    ["https://api.deepseek.com.example/v1", "https://api.deepseek.com.example/v1/models"],
+  ] as const) {
+    const result = await fetchModelsForProvider({
+      providerId: "deepseek",
+      catalog: makeCatalog([{ id: "deepseek", name: "DeepSeek", origin }]),
+      secretStore: makeSecrets({ deepseek: "fixture-key" }),
+      fetchFn: async (url) => {
+        assert.equal(url, expectedUrl);
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(result.status, 200);
+    const models = (result.body as { models: { id: string; contextLength: number; apiType?: string; reasoningLevels: string[] }[] }).models;
+    assert.deepEqual(models.map(model => model.id), entries.map(entry => entry.id));
+    const levels = expectedUrl.startsWith(direct + "/") ? ["default", "none", "low", "high", "max"] : [];
+    assert.deepEqual(models.map(model => model.reasoningLevels), [levels, levels, levels, []]);
+    assert.ok(models.every(model => model.apiType === undefined && model.contextLength === 1048576));
+  }
+});
+
+test("direct Kimi Code discovery applies the documented K3.1 Pro efforts", async () => {
+  const entries = ["k3.1-pro", "k3.1-pro-highspeed", "k3"].map(id => ({
+    id, reasoning_levels: ["none", "low", "high", "max"],
+  }));
+  for (const origin of ["https://api.kimi.com/coding/v1", "https://api.kimi.ai/coding/", "https://example.test/coding/v1"]) {
+    const catalog = makeCatalog([{ id: "fixture", name: "Fixture", origin }]);
+    const result = await fetchModelsForProvider({
+      providerId: "fixture",
+      catalog,
+      secretStore: makeSecrets({ fixture: "fixture-key" }),
+      fetchFn: async (url) => {
+        assert.equal(url, modelsUrl(origin));
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(result.status, 200);
+    const models = (result.body as { models: { id: string; reasoningLevels: string[] }[] }).models;
+    const generic = ["default", "none", "low", "high", "max"];
+    const pro = origin.includes("example.test") ? generic : ["default", "low", "high", "max"];
+    assert.deepEqual(models.map(row => row.reasoningLevels), [pro, pro, generic]);
+  }
+});
+
+test("direct NVIDIA lists expose documented Nemotron reasoning and preserve other models", async () => {
+  const origin = "https://integrate.api.nvidia.com/v1";
+  const entries = [
+    "nvidia/nemotron-3.5-bolt-e4b", "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3-super-120b-a12b",
+  ].map(id => ({ id, context_length: 128000 }));
+  const catalog = makeCatalog([
+    { id: "first", name: "First", origin }, { id: "second", name: "Second", origin },
+    { id: "other", name: "Other", origin: "https://example.test/v1" },
+  ]);
+  for (const provider of catalog.providers) {
+    const response = await fetchModelsForProvider({
+      providerId: provider.id, catalog,
+      secretStore: makeSecrets({ first: "fixture-first", second: "fixture-second", other: "fixture-other" }),
+      fetchFn: async (url, options) => {
+        assert.equal(url, modelsUrl(provider.origin));
+        assert.equal(new Headers(options?.headers).get("authorization"), "Bearer fixture-" + provider.id);
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(response.status, 200);
+    const models = (response.body as { models: { reasoningLevels: string[]; apiType?: string; contextLength: number; maxOutputTokens: number | null }[] }).models;
+    const toggle = ["default", "none", "on"];
+    const expected = provider.id === "other" ? [[], [], [], []] : [toggle, toggle, ["default", "none", "low", "high"], []];
+    assert.deepEqual(models.map(model => model.reasoningLevels), expected);
+    assert.deepEqual(models.map(model => model.apiType), provider.id === "other"
+      ? [undefined, undefined, undefined, undefined] : ["chat-completions", "chat-completions", "chat-completions", undefined]);
+    assert.ok(models.every(model => model.contextLength === 128000));
+    assert.equal(models[1]?.maxOutputTokens, provider.id === "other" ? null : 32768);
+  }
 });
 
 test("normalizeProviderModels drops entries without an id as skipped", () => {
@@ -206,6 +290,30 @@ test("native OpenAI identity-only listings receive documented Sol capabilities",
   assert.deepEqual(model.reasoningLevels, ["default", "low", "medium", "high", "xhigh", "max"]);
 });
 
+test("ChatGPT plan model discovery lists only visible models through the public API", async () => {
+  const credential = { kind: "chatgpt-plan", clientId: "oaiapp_fixture", subject: "subject-fixture", idToken: "id-fixture",
+    accessToken: "access-old-fixture", refreshToken: "refresh-fixture", scopes: SCOPES, expiresAt: 1 };
+  const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: ORIGIN }]);
+  const result = await fetchModelsForProvider({ providerId: "openai", catalog, secretStore: makeSecrets({ openai: JSON.stringify(credential) }),
+    refreshOAuth: async id => {
+      assert.equal(id, "openai");
+      return JSON.stringify({ ...credential, accessToken: "access-new-fixture", expiresAt: 9999999999 });
+    },
+    fetchFn: async (url, init) => {
+      assert.equal(url, `${ORIGIN}/models`);
+      assert.equal(init?.headers?.Authorization, "Bearer access-new-fixture");
+      assert.equal(init?.headers?.originator, undefined);
+      return jsonResponse(200, { models: [{ slug: "private-fixture", visibility: "hide" },
+        { slug: "gpt-6.2-sol", visibility: "list", display_name: "GPT 6.2 Sol" },
+        { slug: "gpt-6.2-astra", visibility: "list", display_name: "GPT 6.2 Astra" }] });
+    } });
+  assert.equal(result.status, 200);
+  const rows = (result.body as { models: { id: string; apiType: string; contextLength: number; maxOutputTokens: number; reasoningLevels: string[] }[] }).models;
+  assert.deepEqual(rows.map(row => [row.id, row.apiType]), [["gpt-6.2-sol", "responses"], ["gpt-6.2-astra", "responses"]]);
+  assert.ok(rows.every(row => row.contextLength === 1_050_000 && row.maxOutputTokens === 128000));
+  assert.ok(rows.every(row => row.reasoningLevels.join(",") === "default,low,medium,high,xhigh,max"));
+});
+
 test("Codex descriptors retain their advertised context and supported efforts", async () => {
   const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: "https://api.openai.com/v1" }]);
   const credential = JSON.stringify({ kind: "openai-oauth", accessToken: "fixture-access", refreshToken: "fixture-refresh" });
@@ -217,19 +325,89 @@ test("Codex descriptors retain their advertised context and supported efforts", 
   assert.ok(normalized.models[0]?.reasoningLevels.includes("max"));
 });
 
-test("fetch-models reuses a stable OpenCode session across requests", async () => {
-  const catalog = makeCatalog([{ id: "opencode", name: "OpenCode", origin: "https://opencode.ai/zen/v1" }]);
-  const sessions: string[] = [];
-  const fetchFn: FetchLike = async (_url, init) => {
-    sessions.push(init?.headers?.["x-opencode-session"] ?? "");
-    return jsonResponse(200, { data: [{ id: "big-pickle" }] });
+test("fetch-models uses the Go catalog and separate stable sessions for both accounts", async () => {
+  const catalog = makeCatalog([
+    { id: "opencode", name: "Go 1", origin: "https://opencode.ai/zen/go/v1" },
+    { id: "opencode-2", name: "Go 2", origin: "https://opencode.ai/inference/go/anthropic/v1" },
+  ]);
+  const sessions = new Map<string, string>();
+  const secretStore = makeSecrets({ opencode: "fixture-go-1", "opencode-2": "fixture-go-2" });
+  for (const [providerId, url, token] of [
+    ["opencode", "https://opencode.ai/inference/go/v1/models", "fixture-go-1"],
+    ["opencode-2", "https://opencode.ai/inference/go/v1/models", "fixture-go-2"],
+  ] as const) {
+    const fetchFn: FetchLike = async (requested, init) => {
+      assert.equal(requested, url);
+      assert.equal(init?.headers?.Authorization, `Bearer ${token}`);
+      const session = init?.headers?.["x-opencode-session"];
+      assert.ok(session);
+      if (sessions.has(providerId)) assert.equal(session, sessions.get(providerId));
+      sessions.set(providerId, session);
+      return jsonResponse(200, { data: [{ id: "deepseek-v4.1-flash" }] });
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal((await fetchModelsForProvider({ providerId, catalog, secretStore, fetchFn })).status, 200);
+    }
+  }
+  assert.notEqual(sessions.get("opencode"), sessions.get("opencode-2"));
+});
+
+test("both direct Go lists preserve advertised chat capabilities and independent session headers", async () => {
+  const catalog = makeCatalog([
+    { id: "opencode", name: "Go 1", origin: "https://opencode.ai/zen/go/v1" },
+    { id: "opencode-2", name: "Go 2", origin: "https://opencode.ai/inference/go" },
+  ]);
+  const secretStore = makeSecrets({ opencode: "fixture-go-1", "opencode-2": "fixture-go-2" });
+  const sessions = new Map<string, string>();
+  const fixture = {
+    data: [
+      { id: "muse-spark-1.3-contributor", type: "chat", recommended_api: "responses",
+        limit: { context: 1048576, output: 131072 },
+        modalities: { input: ["text", "image/jpeg", "image/png", "application/pdf", "video/mp4", "audio/wav"] },
+        capabilities: { reasoning: { supported: true, effort: ["xhigh", "low", "minimal", "medium", "high"] } } },
+      { id: "qwen4-max", type: "chat", recommended_api: "messages",
+        limit: { output: 262144 }, capabilities: { reasoning: { supported: true, toggle: true, effort: ["high", "xhigh"] } } },
+      { id: "plain-chat", type: "chat", recommended_api: "chat-completions", capabilities: { reasoning: { supported: false } } },
+      { id: "interactions-chat", type: "chat", recommended_api: "interactions" },
+      { id: "kept-embedding", type: "embedding", recommended_api: "embeddings" },
+      { id: "kept-decision", type: "decision", recommended_api: "systemone" },
+    ],
   };
-  const input = { providerId: "opencode", catalog, secretStore: makeSecrets({ opencode: "zen-key" }), fetchFn };
-  assert.equal((await fetchModelsForProvider(input)).status, 200);
-  assert.equal((await fetchModelsForProvider(input)).status, 200);
-  assert.equal(sessions.length, 2);
-  assert.ok(sessions[0]);
-  assert.equal(sessions[0], sessions[1]);
+  for (const [index, provider] of catalog.providers.entries()) {
+    const fetchFn: FetchLike = async (url, init) => {
+      assert.equal(url, "https://opencode.ai/inference/go/v1/models");
+      assert.equal(init?.headers?.Authorization, `Bearer fixture-go-${index + 1}`);
+      assert.equal(init?.headers?.["User-Agent"], "OpenBot/catalog");
+      const session = init?.headers?.["x-opencode-session"];
+      assert.ok(session);
+      if (sessions.has(provider.id)) assert.equal(session, sessions.get(provider.id));
+      sessions.set(provider.id, session);
+      return jsonResponse(200, fixture);
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await fetchModelsForProvider({ providerId: provider.id, catalog, secretStore, fetchFn });
+      assert.equal(result.status, 200);
+      const { models } = result.body as { models: NonNullable<ReturnType<typeof normalizeProviderModels>>["models"] };
+      assert.equal(models.length, 6);
+      assert.deepEqual(models[0], { id: "muse-spark-1.3-contributor", name: null, contextLength: 1048576,
+        maxOutputTokens: 131072, modalities: ["text", "image", "video", "audio"],
+        reasoningLevels: ["default", "minimal", "low", "medium", "high", "xhigh"], apiType: "responses", modelType: "chat", providerMetadata: "opencode-go" });
+      assert.equal(models[1]?.apiType, "anthropic");
+      assert.equal(models[1]?.maxOutputTokens, 262144);
+      assert.deepEqual(models[1]?.reasoningLevels, ["default", "none", "high", "xhigh"]);
+      assert.equal(models[2]?.apiType, "chat-completions");
+      assert.deepEqual(models[2]?.reasoningLevels, ["default"]);
+      assert.equal(models[3]?.apiType, undefined);
+      assert.deepEqual(models.slice(4).map(row => [row.modelType, row.apiType, row.reasoningLevels]), [
+        ["embedding", undefined, []], ["decision", undefined, []],
+      ]);
+    }
+  }
+  assert.equal(new Set(sessions.values()).size, 2);
+  const generic = normalizeProviderModels(fixture)?.models[0];
+  assert.equal(generic?.contextLength, null);
+  assert.equal(generic?.apiType, undefined);
+  assert.deepEqual(generic?.reasoningLevels, []);
 });
 
 test("fetch-models returns 404 provider-not-found", async () => {

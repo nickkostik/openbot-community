@@ -159,7 +159,7 @@ export function ModelDialog({ open, onClose, providerName, existing, busy, onSav
           </div>
           <Field label="Reasoning allow-list" helper="default is always kept.">
             <div className="row gap-1 wrap">
-              {REASONING_LEVELS.map((l) => (
+              {REASONING_LEVELS.filter((level) => level !== "on" || existing?.reasoningLevels.includes(level)).map((l) => (
                 <ParamChip
                   key={l}
                   active={reasoning.has(l)}

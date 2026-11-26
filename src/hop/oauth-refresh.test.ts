@@ -7,9 +7,10 @@ import path from "node:path";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { ORIGIN, SCOPES, TOKEN_ENDPOINT } from "../../payload/chatgpt-plan.cjs";
 
 const hopPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../payload/hop-handler.cjs");
-const hop = createRequire(import.meta.url)(hopPath) as { loadKey: (providerId: string, provider: unknown) => Promise<string>; resolveUpstreamUrl: (provider: { origin: string }, oauth: boolean, apiType: string) => string };
+const hop = createRequire(import.meta.url)(hopPath) as { loadKey: (providerId: string, provider: unknown, expectedCredentialKind?: string) => Promise<string>; resolveUpstreamUrl: (provider: { origin: string }, oauth: boolean, apiType: string) => string };
 
 function expiredCredential(): string {
   return JSON.stringify({ kind: "openai-oauth", accessToken: "old-access", refreshToken: "refresh", expiresAt: 1 });
@@ -20,9 +21,10 @@ test("OpenAI OAuth resolves to the ChatGPT Codex Responses upstream", () => {
   assert.equal(hop.resolveUpstreamUrl({ origin: "https://api.openai.com/v1" }, false, "chat-completions"), "https://api.openai.com/v1/chat/completions");
 });
 
-function installRefreshStub(t: test.TestContext, body: object | ((form: URLSearchParams) => object)): { calls: () => number } {
+function installRefreshStub(t: test.TestContext, body: object | ((form: URLSearchParams) => object), url?: string): { calls: () => number } {
   let calls = 0;
-  t.mock.method(https, "request", ((_options: unknown, callback: (response: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) => {
+  t.mock.method(https, "request", ((options: { hostname: string; path: string }, callback: (response: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) => {
+    if (url) assert.equal(`https://${options.hostname}${options.path}`, url);
     calls += 1;
     const request = new EventEmitter() as EventEmitter & { setTimeout: (ms: number, fn: () => void) => void; write: (value: Buffer) => void; end: () => void; destroy: () => void };
     request.setTimeout = () => undefined;
@@ -93,4 +95,28 @@ test("concurrent OAuth refreshes fail closed when credential persistence fails",
   assert.equal(results[1]?.status, "rejected");
   assert.match(String((results[0] as PromiseRejectedResult).reason), /not persisted/);
   assert.match(fs.readFileSync(process.env.OPENBOT_SECRETS!, "utf8"), /old-access/);
+});
+
+test("ChatGPT plan refresh uses the issued registration and protects the direct destination", async (t) => {
+  const file = withSecretsFile(t);
+  const credential = { kind: "chatgpt-plan", clientId: "oaiapp_fixture", subject: "subject-fixture", idToken: "id-fixture",
+    accessToken: "access-old-fixture", refreshToken: "refresh-old-fixture", scopes: SCOPES, expiresAt: 1 };
+  fs.writeFileSync(file, JSON.stringify({ providers: { openai: JSON.stringify(credential), other: "other-fixture" } }));
+  const stub = installRefreshStub(t, form => {
+    assert.equal(form.get("client_id"), credential.clientId);
+    assert.equal(form.get("resource"), ORIGIN);
+    assert.equal(form.get("refresh_token"), credential.refreshToken);
+    assert.equal(form.has("scope"), false);
+    return { access_token: "new-access-fixture", refresh_token: "new-refresh-fixture", expires_in: 600 };
+  }, TOKEN_ENDPOINT);
+  await assert.rejects(hop.loadKey("openai", { origin: "https://relay.invalid/v1" }), /direct OpenAI API/);
+  await assert.rejects(hop.loadKey("openai", { origin: ORIGIN }, "openai-oauth"), /login changed/);
+  assert.equal(stub.calls(), 0);
+  assert.deepEqual(await Promise.all([hop.loadKey("openai", { origin: ORIGIN }), hop.loadKey("openai", { origin: ORIGIN })]),
+    ["new-access-fixture", "new-access-fixture"]);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8")).providers;
+  assert.equal(stub.calls(), 1);
+  assert.equal(JSON.parse(saved.openai).refreshToken, "new-refresh-fixture");
+  assert.equal(JSON.parse(saved.openai).subject, credential.subject);
+  assert.equal(saved.other, "other-fixture");
 });

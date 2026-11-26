@@ -49,7 +49,7 @@ function contentToResponses(value: unknown, role: unknown): unknown {
     return part;
   });
 }
-export function chatToResponses(body: unknown): Obj {
+export function chatToResponses(body: unknown, replayReasoning = false): Obj {
   if (!isObj(body)) return {};
   const out: Obj = {};
   for (const key of ["model", "stream", "temperature", "top_p", "metadata", "store", "user", "parallel_tool_calls", "tool_choice", "previous_response_id", "prompt", "conversation"]) if (body[key] !== undefined) out[key] = body[key];
@@ -62,6 +62,9 @@ export function chatToResponses(body: unknown): Obj {
   for (const message of messages) {
     if (!isObj(message)) continue;
     if (message.role === "tool") { input.push({ type: "function_call_output", call_id: clampId(message.tool_call_id), output: typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "") }); continue; }
+    if (replayReasoning && message.role === "assistant" && typeof message.reasoning_content === "string" && message.reasoning_content) {
+      input.push({ type: "reasoning", content: [{ type: "reasoning_text", text: message.reasoning_content }] });
+    }
     input.push({ role: message.role, content: contentToResponses(message.content, message.role) });
     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
       if (isObj(call) && isObj(call.function)) input.push({ type: "function_call", call_id: clampId(call.id), name: call.function.name, arguments: call.function.arguments ?? "{}" });

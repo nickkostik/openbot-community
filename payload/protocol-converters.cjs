@@ -20,7 +20,7 @@ function contentToResponses(v, role) {
     return p;
   });
 }
-function chatToResponses(body) {
+function chatToResponses(body, replayReasoning) {
   if (!isObj(body)) return {};
   var out = {};
   ["model","stream","temperature","top_p","metadata","store","user","parallel_tool_calls","tool_choice","previous_response_id","prompt","conversation"].forEach(function (k) { if (body[k] !== undefined) out[k] = body[k]; });
@@ -33,6 +33,10 @@ function chatToResponses(body) {
   messages.forEach(function (m) {
     if (!isObj(m)) return;
     if (m.role === "tool") { input.push({ type: "function_call_output", call_id: clampId(m.tool_call_id), output: typeof m.content === "string" ? m.content : JSON.stringify(m.content == null ? "" : m.content) }); return; }
+    // DeepSeek's stateless API accepts plaintext reasoning beside the assistant turn.
+    if (replayReasoning && m.role === "assistant" && typeof m.reasoning_content === "string" && m.reasoning_content) {
+      input.push({ type: "reasoning", content: [{ type: "reasoning_text", text: m.reasoning_content }] });
+    }
     input.push({ role: m.role, content: contentToResponses(m.content, m.role) });
     (Array.isArray(m.tool_calls) ? m.tool_calls : []).forEach(function (c) { if (isObj(c) && isObj(c.function)) input.push({ type: "function_call", call_id: clampId(c.id), name: c.function.name, arguments: c.function.arguments || "{}" }); });
   });

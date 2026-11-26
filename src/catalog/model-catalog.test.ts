@@ -613,6 +613,10 @@ test("route lookups preserve each provider's context, output and explicit effort
     assert.equal(go.model.maxOutputTokens, 384000);
     assert.deepEqual(go.model.reasoningLevels, ["default", "low", "high", "max"]);
     assert.equal(go.model.providerKey, "opencode-go");
+    for (const origin of ["https://opencode.ai/inference/go", "https://opencode.ai/inference/go/openai/v1",
+      "https://opencode.ai/inference/go/anthropic/v1"]) {
+      assert.deepEqual(reader.snapshot("shared", origin).lookup, go);
+    }
     const limited = reader.snapshot("shared", "https://limited.example/v1").lookup;
     assert.ok(limited?.found);
     assert.equal(limited.model.contextLength, 32000);
@@ -636,11 +640,34 @@ test("official legacy OpenAI limits remain scoped to the native endpoint", () =>
   assert.equal(manager.snapshot("gpt-3.5-turbo-0125", "https://another.example/v1").lookup?.found, false);
 });
 
+test("a stale route catalog cannot offer Off for direct Kimi Code K3.1 Pro", async () => {
+  const fs = memFs();
+  const fixture = {
+    kimi: { api: "https://api.kimi.ai/coding/v1", models: {
+      pro: { id: "k3.1-pro", reasoning: true, reasoning_options: ["none", "high"], limit: { context: 262144, output: 8192 } },
+    } },
+    other: { api: "https://example.test/v1", models: {
+      pro: { id: "k3.1-pro", reasoning: true, reasoning_options: ["none", "high"] },
+    } },
+  };
+  const fetchFn: FetchLike = async (url) => url.includes("models.dev") ? jsonResponse(200, fixture) : jsonResponse(503, {});
+  const first = createCatalogManager({ fs, cachePath, fetchFn });
+  await first.start();
+  const afterRestart = createCatalogManager({ fs, cachePath, fetchFn: async () => jsonResponse(503, {}) });
+  await afterRestart.start();
+  const lookup = afterRestart.snapshot("k3.1-pro", "https://api.kimi.com/coding/v1").lookup;
+  assert.ok(lookup?.found);
+  assert.equal(lookup.model.contextLength, 262144);
+  assert.deepEqual(lookup.model.reasoningLevels, ["default", "low", "high", "max"]);
+  const other = afterRestart.snapshot("k3.1-pro", "https://example.test/v1").lookup;
+  assert.ok(other?.found && other.model.reasoningLevels.includes("none"));
+});
+
 test("per-model SDK protocols stay scoped to the provider route and survive an offline restart", async () => {
   const fs = memFs();
   const manager = createCatalogManager({ fs, cachePath, fetchFn: async url => jsonResponse(200,
     url.includes("openrouter") ? { data: [] } : {
-      go: { api: "https://opencode.ai/zen/go/v1", npm: "@ai-sdk/openai-compatible", models: {
+      go: { api: "https://opencode.ai/inference/go/openai/v1", npm: "@ai-sdk/openai-compatible", models: {
         grok: { id: "grok-4.7", provider: { npm: "@ai-sdk/openai" } },
         ds: { id: "deepseek-flash" },
         muse: { id: "muse-spark-1.3-contributor", provider: { npm: "@ai-sdk/openai" } },
@@ -663,5 +690,6 @@ test("per-model SDK protocols stay scoped to the provider route and survive an o
     assert.ok(other?.found);
     assert.equal(other.model.apiType, "anthropic");
     assert.equal(reader.snapshot("grok-4.7", "https://opencode.ai/zen/v1").lookup?.found, false);
+    assert.equal(reader.snapshot("grok-4.7", "https://opencode.ai/inference/openai/v1").lookup?.found, false);
   }
 });

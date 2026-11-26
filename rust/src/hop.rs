@@ -46,6 +46,8 @@ pub struct Hop {
     version: String,
     logs: Option<Logs>,
     compactor: Option<Compactor>,
+    #[cfg(test)]
+    test_go_base: Option<String>,
 }
 
 enum Reply {
@@ -76,6 +78,8 @@ impl Hop {
             version: version(),
             logs: None,
             compactor: None,
+            #[cfg(test)]
+            test_go_base: None,
         })
     }
 
@@ -141,9 +145,14 @@ impl Hop {
     }
 
     async fn attempt(&self, prepared: &Prepared) -> Result<(StatusCode, Reply), Failure> {
+        let url = prepared.url.as_str();
+        #[cfg(test)]
+        let fixture = tests::fixture_go_url(self, prepared);
+        #[cfg(test)]
+        let url = fixture.as_deref().unwrap_or(url);
         let response = self
             .client
-            .post(&prepared.url)
+            .post(url)
             .headers(prepared.headers.clone())
             .body(prepared.body.clone())
             .send()

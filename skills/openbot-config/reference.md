@@ -149,6 +149,25 @@ An add returns `createdProviderId` for the next available `openai` account ID. U
 
 With both flags active, inference can renew a due OpenAI login when its renewal window permits. Concurrent requests for the same provider ID share one renewal. The candidate rereads the current credential and persists refreshed credentials only while the original value still matches. It atomically replaces the compatible `secrets.json` file, keeping the credential as a JSON-encoded string under `providers[providerId]`. The account routes and inference share the candidate writer guarded by `.openbot-rust-secrets.lock`. If a login is unusable, the hop returns HTTP 503 `provider_sign_in_required`. Use the existing Node panel for live account sign-in and renewal.
 
+#### Rust provider and model saves
+
+Use the disposable candidate's loopback `POST /api/save` with `--enable-accounts`. Ordinary provider and model saves preserve the saved mode.
+
+| Save kind | Fields and behavior |
+| --- | --- |
+| `add-provider` | Send `familyId`, `name`, `origin`, optional `apiType`, and a credential in `secret` or an eligible OpenAI `credentialId`. The reply returns the new independent `createdProviderId`. IDs use the family and numeric suffixes and reserve IDs still present in the credential store, including removed accounts. |
+| `update-provider` | Send the existing `providerId`, `name` and `origin`. Preserve the saved protocol by omitting `apiType`. Include the replacement `secret` when moving a keyed account to another origin. |
+| `set-secret` | Replace the saved credential for an existing direct provider ID using `secret` or a bound ChatGPT draft. |
+| `upsert-model` | Import or edit a `providerId:slug` row using the existing `providerId` and `slug`. Optional fields include `apiType`, `modelType`, `contextTokens`, `maxOutputTokens`, `modalities`, `catalogLimits`, `reasoningLevels` and `activeReasoning`. With no wildcard, the first eligible direct chat model can become the default. |
+| `remove-model` | Remove the selected `modelId` and its bindings. For a removed default, prefer another direct chat model in the same provider, then the first eligible surviving route. Removing the last active model can leave its provider with zero models and no wildcard while preserving the mode. |
+| `remove-provider` | Remove the `providerId`, its models and their bindings, keeping the credential ID reserved. The first remaining direct chat route becomes the default if needed. In Custom, deletion that would leave no direct chat route returns HTTP 409 and needs the managed host controls. |
+
+The provider editor prompts for a credential when a keyed account changes URL scheme, host or port. Submit the credential for the new endpoint with the same provider ID. A cross-origin save temporarily writes the private `.openbot-rust-provider-move.json` receipt. It clears the old key, saves the new route and publishes the replacement key in that order. The writable Rust store completes an interrupted move at startup or before a later write, refuses conflicts with newer saved state, and removes the receipt after completion. Keep the receipt private because it contains the replacement credential.
+
+OpenCode accounts use their own direct Go credentials and the direct Go base `https://opencode.ai/inference/go` or a supported saved Go form. Alibaba Token Plan accounts require the Singapore base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and the matching `sk-sp-` subscription key. The Rust hop rejects retired N5, MetaKey and ModelHub routes already present in the catalog before dispatch.
+
+Use managed host controls for Official/Custom mode or tunnel changes. The legacy `upsert-provider` and `custom` save kinds require the candidate to be in Custom already.
+
 #### Rust model selection and pauses
 
 Start the disposable candidate with `--enable-accounts` to use `POST /api/save` for a global model selection. Submit `{"kind":"use-model","modelId":"opencode-2:fixture-model","reasoning":"high"}` with an installed direct chat model and supported effort. Omit `reasoning` or send null to keep that model's saved effort. A successful save returns `activeModelId` and current panel state.
@@ -166,7 +185,7 @@ Set `paused` to false to resume the gateway or a single bot. The hop reads pause
 
 #### Rust panel and provider discovery
 
-Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves and Custom model selection. Successful account saves return the current panel state so the browser can show the saved account immediately.
+Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for provider and model saves. Successful saves return the current panel state.
 
 Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with `--enable-hop`, `--enable-accounts` or `--enable-model-refresh`. Use read-only `GET /api/model-catalog` with `--ui-dir` or `--enable-model-refresh`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. The remaining panel control routes are pending.
 

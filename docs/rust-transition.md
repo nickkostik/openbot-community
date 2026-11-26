@@ -75,6 +75,10 @@ Build the existing panel with `npm run build`, then point `--ui-dir` at the gene
 
 In disposable Custom state, Models and Dashboard can save an active model and reasoning effort with `--enable-accounts`. The selection writes the wildcard binding and leaves explicit conversation bindings and per-bot overrides intact. The two OpenCode Go accounts keep separate selections and credentials. The stock adapter reads the current plan on the next turn. Official activation returns a conflict until the managed host controls complete the mode change.
 
+The native `/api/save` routes also support adding and renaming provider accounts, editing endpoints, replacing credentials, and importing, editing, and removing models. A keyed account needs a credential for a different network origin. Its previous key is withdrawn before the endpoint changes, and the replacement is published after the new endpoint is saved. The private receipt `.openbot-rust-provider-move.json` lets the service finish an interrupted change. Manual and scheduled catalog changes use the same write lock. The hop checks the saved endpoint before taking a credential for a turn.
+
+New OpenCode accounts use the direct Go endpoints. Alibaba Token Plan accounts use their Singapore endpoint and dedicated key. Removing an active model chooses the next eligible chat model from the same provider, then checks other direct providers. Removing a provider preserves its reserved credential ID and unrelated conversation bindings. Catalog edits use the existing mode. The managed host controls handle mode and exposure changes and provider removal that would leave Custom without a direct chat model. [OpenCode Go API](https://opencode.ai/docs/console/api/models/) · [Alibaba Token Plan authentication](https://www.alibabacloud.com/help/en/model-studio/token-plan-faq)
+
 With `--write-bot-settings`, the dashboard can pause and resume the gateway and the Bots page can save individual or batch pause settings. The candidate uses the existing pause files. The stock adapter honors a pause on the next turn of an attached session. Terminal hop refusals return their original HTTP status to the adapter without a replay.
 
 ## Rehearse request recording
@@ -107,6 +111,7 @@ With request logging enabled, chat records show the estimated input, estimated r
 - [x] Port log settings, scheduled retention, cleanup, Strip Bodies, and Clear. Rehearse all operations against disposable history.
 - [x] Port compaction. Rehearse structured tool results, matching legacy briefs, native checkpoint restart, and an eligible direct OpenCode Go cache hit.
 - [x] Port active model and effort saves and gateway and bot pauses. Verify the next turn through one attached stock adapter session in disposable state.
+- [x] Port provider and model management. Verify an endpoint change and key replacement, imported model settings, active-model fallback, and removal through the existing panel.
 - [x] Stage and select the native panel and hop as one existing Linux user service. Verify ownership, a failed restart, an interrupted install, and rollback to the prior and original service.
 - [ ] Finish mode and host lifecycle commands. Verify watcher recovery and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.

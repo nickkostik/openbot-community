@@ -52,13 +52,19 @@ impl CredentialStore {
         let writer = writable
             .then(|| Lease::acquire(&root.join(".openbot-rust-secrets.lock")))
             .transpose()?;
-        Ok(Self(Arc::new(Store {
+        let store = Self(Arc::new(Store {
             root: root.to_owned(),
             network,
             writer,
             writes: Mutex::new(()),
             renewals: Mutex::new(HashMap::new()),
-        })))
+        }));
+        if writable {
+            let _write = store
+                .write_lock()
+                .map_err(|error| io::Error::other(error.message))?;
+        }
+        Ok(store)
     }
 
     pub(super) fn network(&self) -> &Network {
@@ -154,32 +160,13 @@ impl CredentialStore {
                     changed = true;
                 }
             }
-            let binding = json!({"conversation":{"kind":"wildcard"},"modelId":model_id});
-            let bindings = plan["catalog"]["bindings"]
-                .as_array_mut()
-                .ok_or_else(store_error)?;
-            let mut active = bindings
-                .iter()
-                .filter(|row| row["conversation"]["kind"] == "wildcard");
-            if active.next() != Some(&binding) || active.next().is_some() {
-                bindings.retain(|row| row["conversation"]["kind"] != "wildcard");
-                bindings.push(binding);
-                changed = true;
-            }
-            if plan["agents"].is_null() {
-                plan["agents"] = json!({});
-            }
-            let agents = plan["agents"].as_object_mut().ok_or_else(store_error)?;
-            let agent = json!({"modelId":model.slug,"providerId":model.provider_id});
-            if agents.get("*") != Some(&agent) {
-                agents.insert("*".into(), agent);
-                changed = true;
-            }
+            changed |= edits::set_wildcard(plan, model)?;
             Ok((changed, save_reply(plan, &store, None)))
         })?
         .ok_or_else(|| AuthError::input("Set up a model catalog before selecting a model."))
     }
 
+    #[cfg(test)]
     pub async fn authorize(&self, provider: &str, origin: &str) -> Result<Authorized, AuthError> {
         self.authorize_inner(provider, origin, false).await
     }
@@ -282,7 +269,7 @@ impl CredentialStore {
                         })
                 {
                     return Err(AuthError::conflict(
-                        "The provider changed before discovery.",
+                        "The saved provider endpoint changed. Try the request again.",
                     ));
                 }
                 Ok(())
@@ -382,8 +369,11 @@ impl CredentialStore {
             .providers
             .iter()
             .find(|provider| provider.id == id)
-            .ok_or_else(|| AuthError::input("Select an existing OpenAI provider."))?;
-        if !openai_origin(&provider.origin) {
+            .ok_or_else(|| AuthError::input("Select an existing provider."))?;
+        if !is_direct_provider(provider) {
+            return Err(AuthError::input("Select a direct provider endpoint."));
+        }
+        if expected.is_some() && !openai_origin(&provider.origin) {
             return Err(AuthError::input(
                 "Select an existing direct OpenAI provider.",
             ));
@@ -395,49 +385,10 @@ impl CredentialStore {
                 "The selected OpenAI account changed. Start sign-in again.",
             ));
         }
-        let saved = Credential::import(secret, &provider.origin)?.into_saved();
+        let saved = edits::provider_credential(id, secret, &provider.origin)?;
         store["providers"][id] = json!(saved);
         self.store(&store)?;
         Ok(save_reply(&plan, &store, None))
-    }
-
-    pub(super) fn add_openai(
-        &self,
-        name: &str,
-        origin: &str,
-        protocol: &str,
-        secret: &str,
-    ) -> Result<Value, AuthError> {
-        let _write = self.write_lock()?;
-        let mut plan = self.plan()?;
-        let mut store = self.load()?;
-        let secret = Credential::import(secret, origin)?.into_saved();
-        let ids = plan["catalog"]["providers"]
-            .as_array()
-            .ok_or_else(store_error)?;
-        let candidates = std::iter::once(String::from("openai"))
-            .chain((2..=10000).map(|suffix| format!("openai-{suffix}")));
-        let id = candidates
-            .into_iter()
-            .find(|id| {
-                raw_secret(&store, id).is_none() && !ids.iter().any(|entry| entry["id"] == *id)
-            })
-            .ok_or_else(|| AuthError::unavailable("OpenBot has too many OpenAI account IDs."))?;
-        plan["catalog"]["providers"]
-            .as_array_mut()
-            .ok_or_else(store_error)?
-            .push(json!({
-                "id": id, "name": name, "origin": origin, "apiType": protocol,
-                "maxTokensDefault": 65536, "mapFile": "provider-maps.cjs"
-            }));
-        store["providers"][&id] = json!(secret);
-        let staged_plan = stage(self.root(), &plan, PLAN_MAX_BYTES)?;
-        let staged_store = stage(self.root(), &store, STORE_MAX_BYTES)?;
-        // The provider becomes visible only after its credential is in place.
-        // An interrupted addition reserves its ID without making it selectable.
-        self.commit(staged_store, "secrets.json")?;
-        self.commit(staged_plan, "openbot-plan.json")?;
-        Ok(save_reply(&plan, &store, Some(id)))
     }
 
     fn write_lock(&self) -> Result<MutexGuard<'_, ()>, AuthError> {
@@ -447,7 +398,9 @@ impl CredentialStore {
                 "The credential store is read-only.",
             ));
         }
-        self.0.writes.lock().map_err(|_| store_error())
+        let guard = self.0.writes.lock().map_err(|_| store_error())?;
+        self.recover_provider_move()?;
+        Ok(guard)
     }
 
     fn load(&self) -> Result<Value, AuthError> {
@@ -619,3 +572,4 @@ fn save_reply(plan: &Value, store: &Value, created: Option<String>) -> Value {
 fn store_error() -> AuthError {
     AuthError::unavailable("OpenBot could not read or save its provider account settings.")
 }
+mod edits;

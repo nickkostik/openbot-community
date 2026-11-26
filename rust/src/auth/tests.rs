@@ -193,6 +193,213 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
     router(state, HOST.into(), [accounts.routes()])
 }
 
+#[tokio::test]
+async fn catalog_edits_keep_provider_accounts_and_model_settings_independent() {
+    let upstream = Upstream::start().await;
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("openbot-mode"), "official\n").unwrap();
+    let app = account_router(root.path(), &upstream);
+    let add = |name, origin, secret| {
+        json!({
+            "kind":"add-provider", "familyId":"opencode-go", "name":name,
+            "origin":origin, "apiType":"responses", "secret":secret
+        })
+    };
+    let invalid = [
+        add(
+            "Go on retired endpoint",
+            "https://n5.example.test/v1",
+            "fixture-placeholder",
+        ),
+        add("Zen", "https://opencode.ai/zen/v1", "fixture-placeholder"),
+        json!({"kind":"add-provider","familyId":"alibaba-token-plan","name":"Token Plan",
+            "origin":"https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1","secret":"payg-fixture"}),
+    ];
+    for command in invalid {
+        assert_eq!(
+            post_json(&app, "/api/save", command).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(!root.path().join("openbot-plan.json").exists());
+        assert!(!root.path().join("secrets.json").exists());
+    }
+    for (name, origin, secret, id) in [
+        (
+            "Go One",
+            "https://opencode.ai/zen/go/v1",
+            "fixture-one",
+            "opencode-go",
+        ),
+        (
+            "Go Two",
+            "https://opencode.ai/inference/go",
+            "fixture-two",
+            "opencode-go-2",
+        ),
+    ] {
+        let (status, result) = post_json(&app, "/api/save", add(name, origin, secret)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["createdProviderId"], id);
+        assert!(!result.to_string().contains(secret));
+        assert_eq!(credentials(root.path())["providers"][id], secret);
+    }
+    let plan_path = root.path().join("openbot-plan.json");
+    let mut stored: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    assert_eq!(stored["hop"]["port"], 30444);
+    stored["futureField"] = json!(["keep"]);
+    fs::write(&plan_path, stored.to_string()).unwrap();
+    for (provider, slug, effort) in [
+        ("opencode-go", "demo", "low"),
+        ("opencode-go", "fallback", "high"),
+        ("opencode-go-2", "demo", "high"),
+    ] {
+        let (status, result) = post_json(&app, "/api/save",json!({
+            "kind":"upsert-model","providerId":provider,"slug":slug,"modelType":"chat",
+            "contextTokens": 524288, "maxOutputTokens":32768, "apiType":"responses",
+            "reasoningLevels":["default","low","high"], "activeReasoning":effort,
+            "catalogLimits":{"sourceUrl":"https://models.dev/api.json", "providerKey":"fixture","contextTokens":524288},
+            "modalities":["text","image"],
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["activeModelId"], "opencode-go:demo");
+        let rows = result["models"].as_array().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == format!("{provider}:{slug}"))
+            .unwrap();
+        assert_eq!(row["contextTokens"], 524288);
+        assert_eq!(row["activeReasoning"], effort);
+        assert_eq!(row["catalogLimits"]["providerKey"], "fixture");
+        assert_eq!(row["modalities"], json!(["text", "image"]));
+    }
+    let (_, added) = post_json(&app, "/api/save",json!({
+        "kind":"upsert-model","providerId":"opencode-go-2","slug":"embedding","modelType":"embedding"
+    })).await;
+    assert_eq!(added["activeModelId"], "opencode-go:demo");
+    let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    plan["agents"]["old-thread"] = json!({"modelId":"demo","providerId":"opencode-go"});
+    plan["agents"]["keep-thread"] = json!({"modelId":"demo","providerId":"opencode-go-2"});
+    plan["catalog"]["bindings"].as_array_mut().unwrap().extend([
+        json!({"conversation":{"kind":"named","id":"old-thread"},"modelId":"opencode-go:demo"}),
+        json!({"conversation":{"kind":"named","id":"keep-thread"},"modelId":"opencode-go-2:demo"}),
+    ]);
+    fs::write(&plan_path, plan.to_string()).unwrap();
+    let (status, removed) = post_json(
+        &app,
+        "/api/save",
+        json!({"kind":"remove-model","modelId":"opencode-go:demo"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(removed["activeModelId"], "opencode-go:fallback");
+    let saved: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    assert_eq!(saved["futureField"], json!(["keep"]));
+    assert!(saved["agents"].get("old-thread").is_none());
+    assert_eq!(
+        saved["agents"]["keep-thread"],
+        plan["agents"]["keep-thread"]
+    );
+    assert_eq!(saved["agents"]["*"]["modelId"], "fallback");
+    let (status, removed) = post_json(
+        &app,
+        "/api/save",
+        json!({"kind":"remove-provider","providerId":"opencode-go"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(removed["activeModelId"], "opencode-go-2:demo");
+    assert_eq!(
+        credentials(root.path())["providers"]["opencode-go"],
+        "fixture-one"
+    );
+    assert_eq!(
+        post_json(
+            &app,
+            "/api/save",
+            json!({"kind":"set-secret","providerId":"opencode-go-2","secret":"fixture-rotated"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        credentials(root.path())["providers"]["opencode-go-2"],
+        "fixture-rotated"
+    );
+    let mode = root.path().join("openbot-mode");
+    let before = fs::read(&plan_path).unwrap();
+    let remove = json!({"kind":"remove-provider","providerId":"opencode-go-2"});
+    fs::write(&mode, "custom\n").unwrap();
+    assert_eq!(
+        post_json(&app, "/api/save", remove.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fs::read(&plan_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(&mode).unwrap(), "custom\n");
+    fs::write(&mode, "official\n").unwrap();
+    assert_eq!(post_json(&app, "/api/save", remove).await.0, StatusCode::OK);
+    assert!(!plan_path.exists());
+    assert_eq!(
+        credentials(root.path())["providers"]["opencode-go-2"],
+        "fixture-rotated"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("openbot-mode")).unwrap(),
+        "official\n"
+    );
+}
+
+#[tokio::test]
+async fn changing_provider_origin_requires_explicit_credentials_and_rejects_a_stale_route() {
+    let upstream = Upstream::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let app = account_router(root.path(), &upstream);
+    let old = "https://first.example.test/v1";
+    let new = "https://second.example.test/v1";
+    assert_eq!(
+        post_json(
+            &app,
+            "/api/save",
+            json!({"kind":"add-provider","familyId":"custom",
+            "name":"Fixture","origin":old,"secret":"fixture-old"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let edit =
+        json!({"kind":"update-provider","providerId":"custom","name":"Changed","origin":new});
+    assert_eq!(
+        post_json(&app, "/api/save", edit.clone()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut authorized = edit;
+    authorized["secret"] = json!("fixture-new");
+    let (status, saved) = post_json(&app, "/api/save", authorized).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["providers"][0]["origin"], new);
+    assert!(!saved.to_string().contains("fixture-new"));
+    assert!(
+        !root
+            .path()
+            .join(".openbot-rust-provider-move.json")
+            .exists()
+    );
+    let reader = CredentialStore::new(root.path(), false).unwrap();
+    let Err(error) = reader.authorize_configured("custom", old).await else {
+        panic!("a stale route must never obtain the replacement credential");
+    };
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(
+        reader
+            .authorize_configured("custom", new)
+            .await
+            .unwrap()
+            .token,
+        "fixture-new"
+    );
+}
+
 async fn request(app: &Router, method: Method, path: &str, body: Value) -> (StatusCode, String) {
     let response = app
         .clone()

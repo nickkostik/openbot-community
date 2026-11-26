@@ -249,7 +249,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    fn parse(value: &Value) -> Option<Self> {
+    pub(crate) fn parse(value: &Value) -> Option<Self> {
         match value.as_str()? {
             "chat-completions" => Some(Self::ChatCompletions),
             "responses" => Some(Self::Responses),
@@ -294,7 +294,7 @@ impl Binding {
 }
 
 impl Model {
-    fn from_saved(row: &Value, providers: &[Provider]) -> Option<Self> {
+    pub(crate) fn from_saved(row: &Value, providers: &[Provider]) -> Option<Self> {
         let id = row["id"].as_str()?;
         let provider_id = row["providerId"].as_str()?;
         let slug = row["slug"].as_str()?;

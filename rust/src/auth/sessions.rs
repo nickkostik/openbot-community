@@ -503,57 +503,57 @@ async fn save(
             accounts.0.status.add_to(store.root(), &mut reply);
             return Ok(reply);
         }
-        let mut sessions = accounts.sessions()?;
-        let id = body
-            .get("credentialId")
-            .map(|_| required(&body, "credentialId"))
-            .transpose()?;
-        if id.is_some() == body.get("secret").is_some() {
+        let store = &accounts.0.store;
+        let Some(id) = body.get("credentialId") else {
+            let secret = match body.get("secret") {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| AuthError::input("A credential must be text."))?,
+                ),
+                None => None,
+            };
+            let mut reply = if body["kind"] == "set-secret" {
+                store.save_secret(
+                    required(&body, "providerId")?,
+                    required(&body, "secret")?,
+                    None,
+                )?
+            } else {
+                store.edit_catalog(
+                    &body,
+                    secret.map(str::trim).filter(|value| !value.is_empty()),
+                    accounts.0.status.port,
+                )?
+            };
+            accounts.0.status.add_to(store.root(), &mut reply);
+            return Ok(reply);
+        };
+        if body.get("secret").is_some() {
             return Err(AuthError::input(
                 "Use one completed sign-in or one credential.",
             ));
         }
-        let draft = id
-            .map(|id| {
-                sessions.drafts.get(id).ok_or_else(|| {
-                    AuthError::input("That OpenAI sign-in expired or was already saved.")
-                })
-            })
-            .transpose()?;
-        let secret = match draft {
-            Some(draft) => draft.secret.as_str(),
-            None => required(&body, "secret")?,
-        };
-        let target = draft.and_then(|draft| draft.target.as_ref());
-        let store = &accounts.0.store;
+        let id = credential::text(id)
+            .ok_or_else(|| AuthError::input("A sign-in receipt is required."))?;
+        let mut sessions = accounts.sessions()?;
+        let draft = sessions
+            .drafts
+            .get(id)
+            .ok_or_else(|| AuthError::input("That OpenAI sign-in expired or was already saved."))?;
+        let target = draft.target.as_ref();
         let mut reply = match body["kind"].as_str() {
             Some("set-secret") => {
                 let provider = required(&body, "providerId")?;
-                if draft.is_some() && target.is_none_or(|target| target.id != provider) {
-                    return Err(AuthError::input(
-                        "Save the login under the provider that started sign-in.",
-                    ));
-                }
-                store.save_secret(provider, secret, target.map(|target| &target.revision))?
+                let target = target
+                    .filter(|target| target.id == provider)
+                    .ok_or_else(|| {
+                        AuthError::input("Save the login under the provider that started sign-in.")
+                    })?;
+                store.save_secret(provider, &draft.secret, Some(&target.revision))?
             }
             Some("add-provider") if body["familyId"] == "openai" && target.is_none() => {
-                let name = required(&body, "name")?;
-                if name.chars().count() > 128 {
-                    return Err(AuthError::input(
-                        "An account name can have up to 128 characters.",
-                    ));
-                }
-                let origin = required(&body, "origin")?;
-                if !credential::openai_origin(origin) {
-                    return Err(AuthError::input(
-                        "OpenAI accounts require a direct OpenAI endpoint.",
-                    ));
-                }
-                let protocol = match body["apiType"].as_str().unwrap_or("chat-completions") {
-                    protocol @ ("chat-completions" | "responses" | "anthropic") => protocol,
-                    _ => return Err(AuthError::input("Select a supported API protocol.")),
-                };
-                store.add_openai(name, origin, protocol, secret)?
+                store.edit_catalog(&body, Some(&draft.secret), accounts.0.status.port)?
             }
             _ => {
                 return Err(AuthError::input(
@@ -561,9 +561,7 @@ async fn save(
                 ));
             }
         };
-        if let Some(id) = id
-            && let Some(draft) = sessions.drafts.remove(id)
-        {
+        if let Some(draft) = sessions.drafts.remove(id) {
             sessions.attempts.remove(&draft.session);
         }
         accounts.0.status.add_to(store.root(), &mut reply);

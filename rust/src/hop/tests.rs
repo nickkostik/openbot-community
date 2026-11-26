@@ -117,8 +117,8 @@ impl Fixture {
         let base = &upstream.base;
         let plan = json!({"kind": "custom", "catalog": {
             "providers": [
-                {"id":"opencode","origin": format!("{base}/first/v1"), "apiType":"chat-completions"},
-                {"id":"opencode-2","origin": format!("{base}/second/v1"), "apiType":"responses"},
+                {"id":"opencode","origin":"https://opencode.ai/inference/go", "apiType":"chat-completions"},
+                {"id":"opencode-2","origin":"https://opencode.ai/zen/go/v1", "apiType":"responses"},
                 {"id":"messages-test","origin": format!("{base}/messages/v1"), "apiType":"anthropic"}
             ],
             "models": [
@@ -138,12 +138,13 @@ impl Fixture {
         fs::write(dir.path().join("openbot-mode"), "custom\n").unwrap();
         let state = State::new(dir.path().into(), true).unwrap();
         let logs = Logs::new(state.root(), true);
-        let hop = Hop::new(
+        let mut hop = Hop::new(
             state.clone(),
             CredentialStore::new(state.root(), false).unwrap(),
         )
         .unwrap()
         .with_logs(logs.clone());
+        hop.test_go_base = Some(base.clone());
         let logs_router = logs.clone().routes();
         let rust = TestServer::start(move |authority| {
             server::router(state, authority.into(), [hop.routes(), logs_router])
@@ -205,6 +206,20 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+pub(super) fn fixture_go_url(hop: &Hop, prepared: &Prepared) -> Option<String> {
+    let base = hop.test_go_base.as_ref()?;
+    let account = match prepared.provider_id.as_str() {
+        "opencode" => "first",
+        "opencode-2" => "second",
+        _ => return None,
+    };
+    let suffix = prepared
+        .url
+        .strip_prefix("https://opencode.ai/inference/go/openai/v1")
+        .expect("the fixture must resolve to the direct OpenCode Go endpoint");
+    Some(format!("{base}/{account}/v1{suffix}"))
 }
 
 fn file(root: &Path, name: &str, contents: Value) {

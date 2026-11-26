@@ -588,10 +588,13 @@ export function Models({ providerId }: { providerId?: string }) {
         open={editProvider}
         onClose={() => setEditProvider(false)}
         provider={selected ?? null}
+        hasCredential={selected !== undefined && selected !== null && hasKey(state, selected.id)}
         busy={busy === "provider"}
-        onSave={async (name, origin, apiType) => {
+        onSave={async (name, origin, apiType, secret) => {
           if (!selected) return;
-          const ok = await run("provider", { kind: "update-provider", providerId: selected.id, name, origin, apiType }, { title: "Provider updated", message: `${name} now points to ${origin}.` });
+          const ok = await run("provider", {
+            kind: "update-provider", providerId: selected.id, name, origin, apiType, ...(secret ? { secret } : {}),
+          }, { title: "Provider updated", message: `${name} now points to ${origin}.` });
           if (ok) setEditProvider(false);
         }}
       />

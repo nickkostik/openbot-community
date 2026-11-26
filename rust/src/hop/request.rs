@@ -116,30 +116,23 @@ impl Prepared {
             routing::select(&catalog, &settings, requested, selected_bot).map_err(|err| {
                 Failure::new(StatusCode::BAD_REQUEST, "invalid_model", &err.to_string())
             })?;
-        let credential = match intent {
-            Intent::Summary(route) => {
-                if selection.model.id != route.model_id
-                    || selection.provider.origin != route.origin
-                    || !selection.model.levels.contains(&route.effort)
-                {
-                    return Err(Failure::new(
-                        StatusCode::CONFLICT,
-                        "compaction_route_changed",
-                        "The saved compaction route changed.",
-                    ));
-                }
-                selection.effort_override = Some(route.effort);
-                credentials
-                    .authorize_configured(&selection.provider.id, &selection.provider.origin)
-                    .await
+        if let Intent::Summary(route) = intent {
+            if selection.model.id != route.model_id
+                || selection.provider.origin != route.origin
+                || !selection.model.levels.contains(&route.effort)
+            {
+                return Err(Failure::new(
+                    StatusCode::CONFLICT,
+                    "compaction_route_changed",
+                    "The saved compaction route changed.",
+                ));
             }
-            Intent::Chat(_) => {
-                credentials
-                    .authorize(&selection.provider.id, &selection.provider.origin)
-                    .await
-            }
+            selection.effort_override = Some(route.effort);
         }
-        .map_err(Failure::credential)?;
+        let credential = credentials
+            .authorize_configured(&selection.provider.id, &selection.provider.origin)
+            .await
+            .map_err(Failure::credential)?;
         let route = selection.route(credential.kind);
         let client_stream = body.get("stream") == Some(&Value::Bool(true));
         let conversation = conversation_field(|key| body.get(key));

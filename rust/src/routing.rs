@@ -146,7 +146,7 @@ pub fn select<'a>(
     let provider = catalog
         .providers
         .iter()
-        .find(|provider| provider.id == model.provider_id)
+        .find(|provider| provider.id == model.provider_id && is_direct_provider(provider))
         .ok_or(RouteError::IncompleteProvider)?;
     let origin = parse_origin(&provider.origin).ok_or(RouteError::IncompleteProvider)?;
     Ok(Selection {

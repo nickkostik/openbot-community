@@ -303,22 +303,23 @@ function defaultMaxTokens(requested, cap) {
   return limit;
 }
 
-function lookupMaxOutput(plan, agent) {
+function findCatalogModel(plan, modelId, providerId) {
   var models = plan && plan.catalog && plan.catalog.models;
-  if (!Array.isArray(models) || !agent) return HIGH_AGENT_MAX_TOKENS;
-  for (var i = 0; i < models.length; i++) {
-    var row = models[i];
-    if (!row) continue;
-    if (row.slug === agent.modelId || row.id === agent.modelId) {
-      var n = Number(row.maxOutputTokens);
-      // Clamp at the source: a poisoned row (e.g. 943718) falls back to the
-      // default instead of flowing into max_tokens and sailing through the
-      // hop-side self-comparison.
-      if (Number.isFinite(n) && n > 0 && n <= MAX_OUTPUT_TOKENS_CEILING) return Math.floor(n);
-      return HIGH_AGENT_MAX_TOKENS;
-    }
-  }
+  if (!Array.isArray(models)) return undefined;
+  return models.find((row) => row && row.id === modelId)
+    || (providerId && models.find((row) => row && row.slug === modelId && row.providerId === providerId))
+    || models.find((row) => row && row.slug === modelId && (!providerId || !row.providerId));
+}
+
+function modelOutputCap(model) {
+  var n = Number(model && model.maxOutputTokens);
+  // Keep invalid caps from overriding the default at the host boundary.
+  if (Number.isFinite(n) && n > 0 && n <= MAX_OUTPUT_TOKENS_CEILING) return Math.floor(n);
   return HIGH_AGENT_MAX_TOKENS;
+}
+
+function lookupMaxOutput(plan, agent) {
+  return modelOutputCap(agent && findCatalogModel(plan, agent.modelId, agent.providerId));
 }
 
 function collectIds(args) {
@@ -1219,8 +1220,10 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       // Per-bot model override: read assignments and the plan fresh on every
       // turn. A stale assignment (model removed from the catalog) falls back
       // to the global model with a log line instead of failing the chat.
+      var livePlan;
       try {
-        var assignment = botModels.resolveAssignment(hostMsgs, loadPlan());
+        livePlan = loadPlan();
+        var assignment = botModels.resolveAssignment(hostMsgs, livePlan);
         if (assignment && assignment.stale) {
           log("bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is not in the catalog; using the global model");
         } else if (assignment) {
@@ -1229,19 +1232,18 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       } catch (err) {
         /* plan or assignments unreadable: keep the global model */
       }
-      try {
-        var livePlan = loadPlan();
-        var effectiveModel = livePlan.catalog.models.find(function (model) {
-          return model.id === effectiveModelId || (model.slug === effectiveModelId && model.providerId === agent.providerId);
-        });
-        if (effectiveModel) { effectiveModelId = effectiveModel.id; effectiveProviderId = effectiveModel.providerId; }
-      } catch (err) { /* older minimal plans keep their slug binding */ }
+      var effectiveModel = findCatalogModel(livePlan, effectiveModelId, agent.providerId);
+      if (effectiveModel) {
+        effectiveModelId = effectiveModel.id || effectiveModelId;
+        effectiveProviderId = effectiveModel.providerId || effectiveProviderId;
+      }
       var body = {
         model: effectiveModelId,
         openbotRequestId: requestId,
         messages: toOpenAIMessages(hostMsgs),
         stream: true,
-        max_tokens: defaultMaxTokens(options2 && options2.maxTokens, agent.maxOutputTokens),
+        max_tokens: defaultMaxTokens(options2 && options2.maxTokens,
+          effectiveModel ? modelOutputCap(effectiveModel) : agent.maxOutputTokens),
       };
       // Conversation identity for the delivery-follow-up gate. Stamped once
       // per hop request, so BOTH upstream calls of one request (the first

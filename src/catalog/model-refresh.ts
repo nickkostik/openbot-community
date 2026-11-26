@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import path from "node:path";
 import { makeModel } from "../domain/model.ts";
+import { isOpenCodeGoOrigin } from "../domain/opencode-go.ts";
 import type { AbsPath, Catalog, Model, ModelId, ModelSlug, Provider } from "../domain/types.ts";
 import { catalogFromPlanJson } from "../supervisor/plan.ts";
 import type { FsDeps } from "../supervisor/procs.ts";
@@ -29,10 +30,7 @@ export function canDiscoverProvider(provider: Provider): boolean {
   // Automatic discovery may visit saved direct families; it must never send
   // keys to the retired N5/MetaKey relay or import OpenCode Zen PAYG listings.
   if (/\b(?:n5|meta[ -]?key)\b/i.test([provider.id, provider.name, provider.origin].join(" "))) return false;
-  if (/^opencode/i.test(provider.id)) {
-    try { const url = new URL(provider.origin); return url.hostname === "opencode.ai" && /^\/zen\/go(?:\/v1)?\/?$/.test(url.pathname); }
-    catch { return false; }
-  }
+  if (/^opencode/i.test(provider.id)) return isOpenCodeGoOrigin(provider.origin);
   return true;
 }
 
@@ -63,20 +61,28 @@ export function mergeModelRefresh(raw: string, lists: ProviderList[], manager: P
     const list = byProvider.get(provider.id);
     // A provider edited/removed during the fetch must not acquire stale routes.
     if (!list || providerKey(list.provider) !== providerKey(provider)) continue;
+    const goModels = new Map(list.result.ok
+      ? list.result.models.filter(model => model.providerMetadata === "opencode-go").map(model => [model.id, model])
+      : []);
     for (let i = 0; i < models.length; i++) {
       const row = models[i];
       const current = catalog.models.find(model => model.id === (record(row) ? row.id : undefined));
       if (!current || current.providerId !== provider.id) continue;
       const lookup = manager.snapshot(current.slug, provider.origin).lookup;
-      if (!lookup?.found) continue;
-      const fields = modelRefreshFields(current, lookup.model);
-      const levels = fields.reasoningLevels;
+      const direct = goModels.get(current.slug);
+      const directEfforts = direct?.reasoningLevels.length ? direct.reasoningLevels : undefined;
+      const modelType = direct?.modelType === "chat" && current.modelType === undefined ? undefined : direct?.modelType;
+      if (!lookup?.found && !directEfforts && !modelType) continue;
+      const fields: ReturnType<typeof modelRefreshFields> = lookup?.found ? modelRefreshFields(current, lookup.model) : { slug: current.slug };
+      const levels = directEfforts ?? fields.reasoningLevels;
       const required = new Set([current.activeReasoning, ...(protectedEfforts.get(current.id) ?? [])]);
-      if (levels && (unreadableBotSettings || [...required].some(effort => !levels.includes(effort)))) {
-        fields.reasoningLevels = current.reasoningLevels;
+      const hold = levels && (unreadableBotSettings || [...required].some(effort => !levels.includes(effort)));
+      if (hold) {
         reasoningHeld++;
       }
-      const next = { ...(models[i] as Record<string, unknown>), ...fields };
+      const next = { ...(models[i] as Record<string, unknown>), ...fields,
+        ...(modelType ? { modelType } : {}),
+        ...(levels ? { reasoningLevels: hold ? current.reasoningLevels : levels } : {}) };
       if (!isDeepStrictEqual(next, models[i])) { models[i] = next; updated++; }
     }
     if (!list.result.ok) continue; // A provider outage must never prune saved routes.

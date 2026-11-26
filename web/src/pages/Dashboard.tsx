@@ -14,6 +14,7 @@ import { customActivationBlocked, customActivationModel, getPause, hasKey, listL
 import type { GatewayPause, LogRecord, Model, SaveResult } from "../api/types";
 import { channelLabel, formatLatency, formatTime, labelReasoning } from "../lib/format";
 import { modelGroupsForState } from "../lib/model-options";
+import { modelSupportsChat } from "../../../src/domain/model.ts";
 import { deriveHealth } from "../lib/health";
 import { navigate } from "../lib/router";
 import { useApp, useBoxState } from "../store";
@@ -47,7 +48,8 @@ export function Dashboard() {
   const [pauseBusy, setPauseBusy] = useState(false);
 
   const custom = state.snapshot.alignment.desired === "custom";
-  const active = modelById(state, state.activeModelId);
+  const selected = modelById(state, state.activeModelId);
+  const active = selected && modelSupportsChat(selected) ? selected : undefined;
   const reenable = customActivationModel(state);
   const customBlocked = customActivationBlocked(state);
   const activeProvider = active ? providerById(state, active.providerId) : undefined;
@@ -263,7 +265,7 @@ export function Dashboard() {
                 <span className="hero-model-id">No model active</span>
               </div>
               <p className="hero-sub" style={{ color: "var(--body)" }}>
-                This provider has no models yet — fetch them from the Models page.
+                Choose a chat model from the Models page.
               </p>
               <div className="row gap-2">
                 <Button variant="secondary" onClick={() => navigate({ kind: "models" })}>
@@ -277,20 +279,17 @@ export function Dashboard() {
                 <span className="hero-model-id">Official Grok</span>
               </div>
               <p className="hero-sub" style={{ color: "var(--body)" }}>
-                {state.models.length
-                  ? `Ready to re-enable (last model: ${reenable?.slug ?? "—"}).`
+                {reenable
+                  ? `Ready to re-enable (${reenable.slug}).`
                   : "Chat is running on stock xAI."}
               </p>
-              {state.models.length ? (
+              {reenable ? (
                 <div className="row gap-2">
                   <Button
                     variant="secondary"
                     disabled={busy !== null || customBlocked !== null}
                     title={customBlocked ? "Repair the host or prepare a verified Local engine before switching." : undefined}
-                    onClick={() => {
-                      const last = reenable;
-                      if (last) void useModel(last);
-                    }}
+                    onClick={() => void useModel(reenable)}
                   >
                     Re-enable custom
                   </Button>

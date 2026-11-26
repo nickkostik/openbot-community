@@ -17,7 +17,7 @@ test("mapVendorEffort maps vendor tokens onto the OpenBot universe", () => {
   assert.equal(mapVendorEffort("off"), "none");
   assert.equal(mapVendorEffort("disabled"), "none");
   assert.equal(mapVendorEffort("low"), "low");
-  assert.equal(mapVendorEffort("minimal"), "low");
+  assert.equal(mapVendorEffort("minimal"), "minimal");
   assert.equal(mapVendorEffort("min"), "low");
   assert.equal(mapVendorEffort("medium"), "medium");
   assert.equal(mapVendorEffort("med"), "medium");
@@ -70,9 +70,9 @@ test("buildReasoningAllowList drops none when reasoning is mandatory", () => {
       reasoning: true,
       mandatory: true,
       hasToggle: false,
-      effortTokens: ["max", "high", "low"],
+      effortTokens: ["max", "low", "minimal", "high"],
     }),
-    ["default", "low", "high", "max"],
+    ["default", "minimal", "low", "high", "max"],
   );
 });
 

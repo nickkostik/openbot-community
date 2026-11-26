@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import type http from "node:http";
+import { DEFAULT_REASONING_LEVELS, modelSupportsChat, REASONING_LEVELS } from "../domain/model.ts";
 import type { Catalog, ReasoningLevel } from "../domain/types.ts";
 import type { SupervisorDeps } from "../supervisor/observe.ts";
 
-const EFFORTS: readonly string[] = ["default", "none", "low", "medium", "high", "xhigh", "max"];
+const EFFORTS: readonly string[] = REASONING_LEVELS;
 type Settings = { assignments: Record<string, string>; reasoning: Record<string, Record<string, ReasoningLevel>>; raw: Record<string, unknown> };
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -47,7 +48,8 @@ export async function handleBotModelsApi(
   if (url.pathname !== "/api/bot-models" || (req.method !== "GET" && req.method !== "PUT")) return false;
   if (req.method === "GET") {
     const settings = readSettings(current);
-    sendJson(res, 200, { assignments: settings.assignments, reasoning: settings.reasoning, available: catalogFromPlan(current.fs.read(current.paths.plan)).models.map((model) => String(model.id)) });
+    const available = catalogFromPlan(current.fs.read(current.paths.plan)).models.filter(modelSupportsChat).map((model) => String(model.id));
+    sendJson(res, 200, { assignments: settings.assignments, reasoning: settings.reasoning, available });
     return true;
   }
   let body: unknown;
@@ -59,7 +61,7 @@ export async function handleBotModelsApi(
   // no await, so another UI save cannot be lost between read and commit.
   const next = readSettings(current);
   const catalog = catalogFromPlan(current.fs.read(current.paths.plan));
-  const available = catalog.models.map((model) => String(model.id));
+  const available = catalog.models.filter(modelSupportsChat).map((model) => String(model.id));
   if ("assignments" in body) {
     if ("reasoningEffort" in body) return invalid("save assignments and reasoning separately");
     if (!isRecord(body.assignments)) return invalid("assignments must be an object");
@@ -86,7 +88,7 @@ export async function handleBotModelsApi(
       if (effort !== null && (typeof effort !== "string" || !EFFORTS.includes(effort))) return invalid("unsupported reasoning effort");
       for (const modelId of models as string[]) {
         const model = catalog.models.find((row) => String(row.id) === modelId)!;
-        const levels = model.reasoningLevels ?? ["default", "none", "low", "medium", "high"];
+        const levels = model.reasoningLevels ?? DEFAULT_REASONING_LEVELS;
         if (effort !== null && !levels.includes(effort as ReasoningLevel)) return invalid(`${modelId} does not support reasoning effort ${String(effort)}`);
       }
       for (const id of ids as string[]) {

@@ -183,9 +183,32 @@ test("handleCompletions falls back to the wildcard when the body already carries
   });
 });
 
-const efforts = ["default", "none", "low", "medium", "high", "xhigh", "max"];
+const efforts = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const secondBot = "00000000-0000-4000-8000-0d23e78bd190";
 const otherMessages = [{ role: "system", content: `/home/box/agent-data/agents/${secondBot}/profile.json` }, { role: "user", content: "hello" }];
+
+test("the hop rejects non-chat requests before upstream and falls back from an older bot assignment", async () => {
+  const upstream = await captureUpstream();
+  const hop = await startHop({ upstreamPort: upstream.port, assignments: { [botId]: "zhipu:embedding" },
+    models: [
+      { id: "zhipu:chat", providerId: "zhipu", slug: "chat", parameters: [] },
+      { id: "zhipu:embedding", providerId: "zhipu", slug: "embedding", modelType: "embedding", parameters: [] },
+    ] });
+  try {
+    const rejected = await post(hop.port, { model: "zhipu:embedding", messages: otherMessages });
+    assert.equal(rejected.status, 400);
+    assert.deepEqual(rejected.json, { error: { message: "embedding does not support bot chat", code: "model_not_chat" } });
+    assert.equal(upstream.getBody(), undefined);
+    const fallback = await post(hop.port, { model: "zhipu:embedding", messages: botMessages });
+    assert.equal(fallback.status, 200);
+    assert.equal(upstream.getBody()?.model, "chat");
+  } finally {
+    hop.child.kill("SIGTERM");
+    upstream.server.close();
+    await new Promise<void>((resolve) => hop.child.once("exit", () => resolve()));
+    rmSync(hop.dir, { recursive: true, force: true });
+  }
+});
 
 async function withReasoningHop(
   apiType: string,
@@ -251,9 +274,9 @@ test("internal compaction requests retain their model and effort despite bot ove
   });
 });
 
-test("Responses sends selected max and Off effort in reasoning.effort", async () => {
+test("Responses sends each selected effort in reasoning.effort", async () => {
   await withReasoningHop("responses", async (hop, upstream) => {
-    for (const effort of ["max", "none"]) {
+    for (const effort of ["minimal", "low", "max", "none"]) {
       writeFileSync(hop.settingsFile, JSON.stringify({ reasoning: { [botId]: { "zhipu:a": effort } } }));
       assert.equal((await post(hop.port, { model: "gpt-6.1-sol", messages: botMessages })).status, 200);
       assert.match(upstream.getPath(), /\/responses$/);

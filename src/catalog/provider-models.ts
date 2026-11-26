@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { type Catalog, type SecretBytes, MAX_OUTPUT_TOKENS_CEILING } from "../domain/types.ts";
-import { keepReasoningOrder } from "../domain/model.ts";
+import { type ApiType, type Catalog, type ModelType, type SecretBytes, MAX_OUTPUT_TOKENS_CEILING } from "../domain/types.ts";
+import { keepReasoningOrder, parseModelType } from "../domain/model.ts";
 import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
+import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
 
 /**
  * Source A: fetch a provider's own model list from its base URL + /v1/models,
@@ -33,6 +34,9 @@ export type FetchedModel = {
   readonly maxOutputTokens: number | null;
   readonly modalities: string[];
   readonly reasoningLevels: string[];
+  readonly apiType?: ApiType;
+  readonly modelType?: ModelType;
+  readonly providerMetadata?: "opencode-go";
 };
 
 export type FetchErrorKind = "unauthorized" | "unreachable" | "not-supported" | "parse-error" | "internal";
@@ -143,21 +147,48 @@ function modelIdFrom(item: Record<string, unknown>): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function normalizeEntry(item: Record<string, unknown>, id: string): FetchedModel {
+function goRecommendedProtocol(value: unknown): ApiType | undefined {
+  if (value === "messages") return "anthropic";
+  if (value === "responses" || value === "chat-completions") return value;
+  return undefined;
+}
+
+function goReasoningLevels(reasoning: Record<string, unknown> | undefined): string[] | undefined {
+  if (reasoning?.supported === false) return ["default"];
+  if (reasoning?.supported !== true) return undefined;
+  const levels = new Set(["default", ...filterReasoningLevels(reasoning.effort)]);
+  if (reasoning.toggle === true) levels.add("none");
+  return keepReasoningOrder(levels);
+}
+
+function normalizeEntry(item: Record<string, unknown>, id: string, directGo: boolean): FetchedModel {
   const architecture = nestedRecord(item, "architecture");
   const topProvider = nestedRecord(item, "top_provider");
+  const modelType = directGo && typeof item.type === "string" && item.type.trim()
+    ? parseModelType(item.type) ?? "other" : undefined;
+  const goChat = modelType === "chat";
+  const limit = goChat ? nestedRecord(item, "limit") : undefined;
+  const capabilities = goChat ? nestedRecord(item, "capabilities") : undefined;
+  const apiType = goChat ? goRecommendedProtocol(item.recommended_api) : undefined;
+  const mimeTypes = goChat ? firstArray(nestedRecord(item, "modalities")?.input) : undefined;
+  const goModalities = filterModalities(mimeTypes?.map(value => typeof value === "string" ? value.split("/", 1)[0] : value));
+  const reasoningLevels = goReasoningLevels(nestedRecord(capabilities, "reasoning"));
   return {
     id,
     name: stringOrNull(item.name ?? item.display_name),
-    contextLength: firstPositiveInt(item.context_length, item.contextLength, item.context_window, item.contextWindow, architecture?.context_length),
-    maxOutputTokens: firstSaneOutputTokens(
+    contextLength: firstPositiveInt(limit?.context, item.context_length, item.contextLength, item.context_window, item.contextWindow, architecture?.context_length),
+    // The native limit.output is published capacity. Model import applies the
+    // existing generation budget, including when the published limit is larger.
+    maxOutputTokens: firstPositiveInt(limit?.output) ?? firstSaneOutputTokens(
       topProvider?.max_completion_tokens,
       item.max_completion_tokens,
       item.maxOutputTokens,
       item.max_tokens,
     ),
-    modalities: filterModalities(firstArray(item.input_modalities, architecture?.input_modalities, item.modalities)),
-    reasoningLevels: [...fetchedReasoningLevels(item)],
+    modalities: goModalities.length ? goModalities : filterModalities(firstArray(item.input_modalities, architecture?.input_modalities, item.modalities)),
+    reasoningLevels: modelType && !goChat ? [] : reasoningLevels ?? [...fetchedReasoningLevels(item)],
+    ...(apiType ? { apiType } : {}),
+    ...(modelType ? { modelType, providerMetadata: "opencode-go" } : {}),
   };
 }
 
@@ -167,6 +198,7 @@ function normalizeEntry(item: Record<string, unknown>, id: string): FetchedModel
  */
 export function normalizeProviderModels(
   raw: unknown,
+  directGo = false,
 ): { models: FetchedModel[]; skipped: number; skippedReasons: string[] } | undefined {
   const list = modelListFrom(raw);
   if (list === undefined) {
@@ -190,7 +222,7 @@ export function normalizeProviderModels(
       continue;
     }
     seen.add(id);
-    models.push(normalizeEntry(item, id));
+    models.push(normalizeEntry(item, id, directGo));
   }
   return { models, skipped: skippedReasons.length, skippedReasons };
 }
@@ -200,6 +232,9 @@ export function modelsUrl(origin: string): string {
   const base = origin.replace(/\/+$/, "");
   if (!base) {
     throw new Error("openbot: provider origin is empty");
+  }
+  if (isOpenCodeGoOrigin(base)) {
+    return `${OPENCODE_GO_ORIGIN}/v1/models`;
   }
   if (
     /\/v1$/i.test(base) ||
@@ -262,6 +297,7 @@ async function fetchProviderModels(input: {
   fetchFn: FetchLike;
   totalTimeoutMs: number;
 }): Promise<FetchProviderResult> {
+  const directGo = isOpenCodeGoOrigin(input.url.replace(/\/v1\/models$/, ""));
   let oauthAccessToken: string | null = null;
   if (isOpenAIOAuthSecret(input.secret)) {
     try {
@@ -280,7 +316,8 @@ async function fetchProviderModels(input: {
         ...(input.headers ?? {}),
         ...((oauthAccessToken ?? input.secret) ? { Authorization: "Bearer " + (oauthAccessToken ?? input.secret) } : {}),
         Accept: "application/json",
-        ...(input.providerId.startsWith("opencode") ? { "x-opencode-session": opencodeModelsSession(input.providerId) } : {}),
+        ...(directGo ? { "User-Agent": "OpenBot/catalog" } : {}),
+        ...(directGo || input.providerId.startsWith("opencode") ? { "x-opencode-session": opencodeModelsSession(input.providerId) } : {}),
       },
       signal: AbortSignal.timeout(input.totalTimeoutMs),
     });
@@ -313,7 +350,7 @@ async function fetchProviderModels(input: {
   } catch {
     return { ok: false, errorKind: "parse-error", message: "provider returned a non-JSON body" };
   }
-  const normalized = normalizeProviderModels(parsed);
+  const normalized = normalizeProviderModels(parsed, directGo);
   if (normalized === undefined) {
     return { ok: false, errorKind: "parse-error", message: "provider response is not a model list" };
   }

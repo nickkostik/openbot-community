@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { credentialFileEntries, MAX_CREDENTIAL_FILE_BYTES } from "./credential-file.ts";
-import { PRESETS } from "./presets.ts";
+import { hasOpenCodeZenFreeModels, PRESETS } from "./presets.ts";
 
 test("a multi-account OpenCode file imports only the selected account", () => {
   const entries = credentialFileEntries(JSON.stringify({
@@ -27,8 +27,14 @@ test("Codex auth.json is one import and errors never echo file contents", () => 
 });
 
 test("new presets use direct Go and token-plan endpoints without choosing a model", () => {
-  assert.equal(PRESETS.find(row => row.id === "opencode-go")?.origin, "https://opencode.ai/zen/go/v1");
+  assert.equal(PRESETS.find(row => row.id === "opencode-go")?.origin, "https://opencode.ai/inference/go");
   assert.equal(PRESETS.find(row => row.id === "alibaba-token-plan")?.origin, "https://coding-intl.dashscope.aliyuncs.com/v1");
   assert.ok(PRESETS.every(row => row.model === ""));
   assert.ok(PRESETS.every(row => row.id !== "opencode" && !/n5|metakey/i.test(row.origin)));
+});
+
+test("the original Go account does not offer Zen's free model import", () => {
+  assert.equal(hasOpenCodeZenFreeModels({ id: "opencode", origin: "https://opencode.ai/zen/go/v1" }), false);
+  assert.equal(hasOpenCodeZenFreeModels({ id: "opencode", origin: "https://opencode.ai/inference/go" }), false);
+  assert.equal(hasOpenCodeZenFreeModels({ id: "opencode", origin: "https://opencode.ai/zen/v1" }), true);
 });

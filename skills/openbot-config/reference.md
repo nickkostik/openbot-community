@@ -205,7 +205,7 @@ Credential-file import sends exactly one chosen supported entry, not unrelated a
 {"providers":{"your-account":"<stored locally>"}}
 ```
 
-Known presets use their direct origins and correct credential family. Go accounts require `https://opencode.ai/zen/go/v1`; do not replace them with Zen PAYG. Native OpenAI/OAuth uses Responses. Preserve existing IDs/protocols; preset names are not migration authority. Automatic refresh excludes blocked intermediary families/origins under the existing product guards.
+Known presets use their direct origins and correct credential family. Use the `https://opencode.ai/inference/go` preset for new Go accounts and keep each subscription under its own saved provider ID. [OpenCode Go routes and catalog](#opencode-go-routes-and-catalog). Native OpenAI/OAuth uses Responses. Preserve existing IDs/protocols; preset names are not migration authority. Automatic refresh excludes blocked intermediary families/origins under the existing product guards.
 
 ## Models and bot overrides
 
@@ -227,7 +227,10 @@ Illustrative minimal plan; choose actual provider-supported models/limits privat
 
 `model.id` and bindings use canonical `providerId:slug`; wildcard `agents["*"].modelId` is the slug with its provider ID. Keep compatibility fields in sync. Model protocol overrides provider default, except mandatory native OpenAI/OAuth Responses. Preserve parameters and explicit protocols through edits. Invalid/missing plan yields hop 503, not authority to erase state.
 
-Reasoning order is `default, none, low, medium, high, xhigh, max`. Keep `default` and apply only supported levels. Operational output defaults to 65536, ceiling 131072; generic context defaults to 128000. Provider/model facts can differ. Do not default to 8192 or GLM fast mode. `parameters` are `{id:string,value:string}[]`; supported explicit bot effort clears conflicting inbound/legacy fast reasoning only for the request, not saved plan.
+Reasoning order is `default, none, minimal, low, medium, high, xhigh, max`. Keep `default` and apply only supported levels. Operational output defaults to 65536, ceiling 131072; generic context defaults to 128000. Provider/model facts can differ. Do not default to 8192 or GLM fast mode. `parameters` are `{id:string,value:string}[]`; supported explicit bot effort clears conflicting inbound/legacy fast reasoning only for the request, not saved plan.
+
+Use `minimal` where the routed model advertises it. Catalog normalization keeps it separate from `low`, while the legacy vendor shorthand `min` maps to `low`. The generic fallback remains `default, none, low, medium, high`. Generic Chat Completions sends the selected `reasoning_effort`, and the Responses converter carries it in `reasoning.effort`.
+
 
 Optional `catalogLimits` retains published facts separately:
 
@@ -256,7 +259,7 @@ Bot settings at `openbot-bot-models.json`:
 
 A bot pin wins over global/conversation routing; supported exact bot/model effort wins over model effort. Missing/corrupt settings inherit; internal model requests skip bot overrides. `default` explicitly selects provider default, while null API effort clears the choice. Clearing model pins preserves effort choices; switching accounts never transfers a same-slug effort. Preserve unrelated root metadata.
 
-`GET /api/bot-models` returns `{assignments,reasoning,available}`. `PUT` accepts selected `botId`/`botIds` pin edits, exact `reasoningModelId`/`modelIds` effort edits or separate full `{assignments}` replacement. It validates the entire selection. A deleted pin target falls back globally with a stale event, not a silent account remap.
+`GET /api/bot-models` returns `{assignments,reasoning,available}` and lists chat-capable catalog IDs in `available`. `PUT` accepts selected `botId`/`botIds` pin edits, exact `reasoningModelId`/`modelIds` effort edits or separate full `{assignments}` replacement. It validates the entire selection. A pin target that disappears or becomes unavailable for chat falls back to the global route and records `bot-models.stale`.
 
 Provider discovery: `POST /api/providers/:id/fetch-models` fetches without importing/selecting. Scoped metadata: `GET /api/model-catalog?modelId=<slug>&providerId=<existing-id>`; unknown provider returns 404, no match returns `lookup.found:false`, without cross-origin fallback. Managed cache uses origin/model scope; do not hand-edit it.
 
@@ -270,11 +273,39 @@ Only boolean false opts out; absent/malformed policy enables six-hour discovery.
 
 Refresh uses at most two direct provider calls concurrently and only existing credentials/accounts. It reads latest authority after awaits, preserves removed/changed accounts, default/bot settings/protocols/parameters and never deletes routes omitted by discovery. Explicit context stays; derived context may refresh. Saved output caps never rise and can fall to a smaller positive published limit. A new effort list excluding a selected bot/model effort is held. Plan merge is serialized and compare-checked; no reconcile or bounce.
 
+### OpenCode Go routes and catalog
+
+Add one account per subscription with the `opencode-go` preset. The `familyId` allocator keeps each account's credential and `providerId:slug` rows separate. For all supported saved Go bases, discovery uses `https://opencode.ai/inference/go/v1/models`. The accepted HTTPS bases on `opencode.ai` are `/inference/go`, its `/openai/v1` and `/anthropic/v1` forms, and the older `/zen/go` and `/zen/go/v1` forms. Use the Go subscription origin and key for new accounts. [OpenCode Go model listing](https://opencode.ai/docs/console/go/#models).
+
+The hop routes every accepted Go base through the current Console generation paths. The saved account supplies the credential and the effective model `apiType` sets the path. [OpenCode Go base URLs](https://opencode.ai/docs/console/harnesses#base-urls).
+
+| Model `apiType` | Path from `https://opencode.ai/inference/go` |
+|---|---|
+| `chat-completions` | `/openai/v1/chat/completions` |
+| `responses` | `/openai/v1/responses` |
+| `anthropic` | `/anthropic/v1/messages` |
+
+Discovery sends `User-Agent: OpenBot/catalog` and a stable `x-opencode-session` derived from the provider ID. Generation uses a stable session for the routed account and conversation, with a stable fallback for auxiliary requests. It keeps a supplied User-Agent, and uses `OpenBot/<installed version>` when the caller supplies none. Identify the actual client. [Go client guidance](https://opencode.ai/docs/console/go/#where-can-i-use-it).
+
+For a direct Go chat entry, `POST /api/providers/:id/fetch-models` returns normalized provider metadata. Imports use available direct chat capabilities before the provider-scoped public fallback.
+
+| Go model-list field | OpenBot handling |
+|---|---|
+| `recommended_api` | `responses` and `chat-completions` retain their names. `messages` maps to `anthropic`. Public route metadata and the provider default can supply a missing protocol. |
+| `limit.context` and `limit.output` | Positive advertised values inform model limits. A new configured output cap is bounded at 65536. |
+| `modalities.input` | Recognized MIME categories become deduplicated `text`, `image`, `video` and `audio` values. |
+| `capabilities.reasoning` | Explicitly unsupported reasoning gives Default. Supported reasoning adds the advertised effort values in order, and a supported toggle adds Off. |
+
+An explicit provider type is saved as optional `modelType`. Recognized values are `chat`, `embedding`, `decision`, `image` and `other`. A reported unrecognized type becomes `other`. Older rows without a type keep chat eligibility. The Models inventory still lists non-chat rows, while the global picker, bot bindings and compaction use chat-capable models. Importing an explicitly typed non-chat row in Official keeps Official. A request for a known non-chat model at the chat hop returns HTTP 400 with `model_not_chat`.
+
+The managed public cache shares Go metadata across accepted direct Go bases. Account-specific discovery uses the selected provider's credential and can update an existing row's reported type and reasoning list even when the public catalog is unavailable. Saved explicit protocols take priority. A proposed effort list that would exclude a saved selected effort is held for that route. The optional transfer advisor applies its own saved-origin and effort rules. [Transfer advisor scope](#optional-tool-free-transfer-advisor).
+
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.
 
-For a context-only edit while Official, do not call `POST /api/save` with `upsert-model` or `use-model`: those operations activate Custom. Back up the private saved plan, check expected original bytes and current mode, then atomically update only the affected existing model rows’ `contextTokens` in the resolved `openbot-plan.json`. Preserve mode, catalog IDs/providers, defaults, bot pins, reasoning, operational output budgets and compaction settings; do not rewrite mode or invoke reconcile. Validate/read back the plan and `GET /api/state`, comparing other settings before/after. The per-request hop reads the new JSON without a native host restart or mode save. Saved configuration and panel API readback establish configuration, not full-context provider acceptance or a native million-token turn.
+For a context-only edit to a chat route while Official, edit the saved plan directly. A chat model `upsert-model` or `use-model` activates Custom. Back up the private saved plan, check expected original bytes and current mode, then atomically update only the affected existing model rows’ `contextTokens` in the resolved `openbot-plan.json`. Preserve mode, catalog IDs/providers, defaults, bot pins, reasoning, operational output budgets and compaction settings; do not rewrite mode or invoke reconcile. Validate/read back the plan and `GET /api/state`, comparing other settings before/after. The per-request hop reads the new JSON without a native host restart or mode save. Saved configuration and panel API readback establish configuration, not full-context provider acceptance or a native million-token turn.
 
 ## Save and HTTP contracts
 
@@ -285,11 +316,11 @@ Loopback `POST /api/save`, `Content-Type: application/json`:
 | `official` | Select stock delivery; retain catalog/secrets/local engine. |
 | `add-provider` | `familyId,name,origin`, optional `apiType`; `secret` or OpenAI `credentialId`. Independent zero-model account. |
 | `upsert-provider`, `custom` | `name,origin,modelSlug,secret`, optional limits. Legacy name-derived activation. |
-| `upsert-model` | Existing `providerId,slug`, optional protocol/limits/reasoning/modalities/metadata. No separate update-model kind. |
-| `use-model` | Canonical `modelId`, optional `reasoning`; changes wildcard, intentional bot pins still win. |
+| `upsert-model` | Existing `providerId,slug`, optional `apiType`, `modelType`, limits, reasoning, modalities and metadata. A typed non-chat import preserves Official and stays in inventory without becoming a chat default. |
+| `use-model` | Canonical chat-capable `modelId`, optional `reasoning`. Changes the wildcard. Intentional bot pins still win. A known non-chat model returns HTTP 400 with `model_not_chat`. |
 | `update-provider` | `providerId,name,origin`, optional `secret,apiType`; retains ID. |
 | `set-secret` | Existing `providerId,secret`; preserve account identity. |
-| `remove-provider`, `remove-model` | Explicit `providerId`/`modelId`; last account/model removal can choose Official and remove the plan. |
+| `remove-provider`, `remove-model` | Explicit `providerId` or `modelId`. Fallback selection uses chat-capable rows. Removing a provider with no chat-capable models left selects Official and retains the remaining inventory. Removing the last account can remove the plan. |
 | `set-expose` | `expose:"cloudflare"` or `"off"`. |
 
 Success returns `{ok,wrapBytesChanged,snapshot,providers,models,keyedProviders,activeModelId,logSettings}`, with `createdProviderId` for additive onboarding. Saves use reconcile and serialized state authority. Refusals include `host-missing`, foreign listener/wrap, `census-refused`, `syntax-check-failed`, `listen-failed`, `mode-changed`, `source-changed` and `local-engine-refused` with a reason. Refusal is not permission to adopt, force ownership or reset configuration. An invalid selected engine can refuse before any mode or plan write; preserve its policy and artifacts for review instead of deleting the pin or hand-writing Custom.
@@ -861,7 +892,7 @@ These profile invariants protect existing state, not proof of a live context/ses
 
 ## Compaction and cache
 
-Custom `payload/context-truncate.cjs` normally chooses the selected canonical model with its effective supported reasoning. Kimi K3 is excluded; its selected-primary exception uses an approved configured cheap fallback. Missing/invalid targets or forbidden MetaKey/ModelHub/N5 routes are refused. Current approved overflow families are configured DeepSeek v4.1 Flash, GPT-6.1 Sol and Muse 1.3 Contributor routes, with account scope, credential/protocol and context preserved. Never add an account or rewrite an origin to satisfy compaction.
+Custom `payload/context-truncate.cjs` normally chooses the selected chat-capable canonical model with its effective supported reasoning. Overflow candidates must also support chat. Kimi K3 is excluded; its selected-primary exception uses an approved configured cheap fallback. Missing/invalid targets or forbidden MetaKey/ModelHub/N5 routes are refused. Current approved overflow families are configured DeepSeek v4.1 Flash, GPT-6.1 Sol and Muse 1.3 Contributor routes, with account scope, credential/protocol and context preserved. Never add an account or rewrite an origin to satisfy compaction.
 
 Only recognized context/input-size overflow can advance a dispatched chunk to an approved fallback. Auth, quota, generic errors and transport failures do not switch accounts. Sequential chunks are at most 65536 estimated transcript tokens, fitted to context and generation allowance; each request has an absolute 180-second deadline and each active run a ten-minute budget. Incomplete results retain accepted chunks and bounded exponential cooldown rather than fabricating a summary.
 

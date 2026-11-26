@@ -32,7 +32,9 @@ test("bot model API validates models and supports clearing and replacement", asy
     paths: { sandData: root, plan: path.join(root, "openbot-plan.json") },
     fs: { read: () => undefined },
   } as any;
-  const catalog = { providers: [], bindings: [], models: [{ id: "provider:model" }] } as any;
+  const catalog = { providers: [], bindings: [], models: [
+    { id: "provider:model" }, { id: "provider:embedding", modelType: "embedding" },
+  ] } as any;
   const readBody = async (req: Readable) => { const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks).toString(); };
   try {
     const bad = response();
@@ -41,6 +43,7 @@ test("bot model API validates models and supports clearing and replacement", asy
     const set = response();
     await handleBotModelsApi(request("PUT", { botId: "bot-1", modelId: "provider:model" }), set.res, new URL("http://localhost/api/bot-models"), current, readBody, (res, status, body) => { res.writeHead(status); res.end(JSON.stringify(body)); }, () => catalog);
     assert.equal(set.value.status, 200);
+    assert.deepEqual((set.value.body as any).available, ["provider:model"]);
     const clear = response();
     await handleBotModelsApi(request("PUT", { botId: "bot-1", modelId: null }), clear.res, new URL("http://localhost/api/bot-models"), current, readBody, (res, status, body) => { res.writeHead(status); res.end(JSON.stringify(body)); }, () => catalog);
     assert.deepEqual((clear.value.body as any).assignments, {});
@@ -52,7 +55,7 @@ test("bot model API validates models and supports clearing and replacement", asy
     assert.equal(batch.value.status, 200);
     assert.deepEqual((batch.value.body as any).assignments, { "bot-2": "provider:model", "bot-3": "provider:model", "bot-4": "provider:model" });
     const badBatch = response();
-    await handleBotModelsApi(request("PUT", { botIds: ["bot-3"], modelId: "missing" }), badBatch.res, new URL("http://localhost/api/bot-models"), current, readBody, (res, status, body) => { res.writeHead(status); res.end(JSON.stringify(body)); }, () => catalog);
+    await handleBotModelsApi(request("PUT", { botIds: ["bot-3"], modelId: "provider:embedding" }), badBatch.res, new URL("http://localhost/api/bot-models"), current, readBody, (res, status, body) => { res.writeHead(status); res.end(JSON.stringify(body)); }, () => catalog);
     assert.equal(badBatch.value.status, 400);
   } finally {
     if (previous === undefined) delete process.env.OPENBOT_BOT_MODELS;
@@ -72,7 +75,7 @@ async function withReasoningApi(run: (api: {
   process.env.OPENBOT_BOT_MODELS = file;
   const current = { paths: { sandData: root, plan: path.join(root, "plan.json") }, fs: { read: () => undefined } } as any;
   const catalog = { models: [
-    { id: "one:full", reasoningLevels: ["default", "none", "low", "high", "xhigh", "max"] },
+    { id: "one:full", reasoningLevels: ["default", "none", "minimal", "low", "high", "xhigh", "max"] },
     { id: "two:limited", reasoningLevels: ["default", "none", "low", "high"] },
     { id: "three:plain", reasoningLevels: ["default"] },
   ] } as any;
@@ -125,6 +128,7 @@ test("unsupported batch efforts and malformed settings leave the whole file unch
     const before = fs.readFileSync(file, "utf8");
     for (const body of [
       { botIds: ["a", "b"], modelId: "one:full", modelIds: ["one:full", "two:limited"], reasoningEffort: "max" },
+      { botId: "b", reasoningModelId: "two:limited", reasoningEffort: "minimal" },
       { botIds: ["a"], modelIds: ["three:plain"], reasoningEffort: "high" },
       { botIds: [], modelIds: ["one:full"], reasoningEffort: "high" },
       { botIds: ["a"], modelIds: [], reasoningEffort: null },
@@ -135,6 +139,15 @@ test("unsupported batch efforts and malformed settings leave the whole file unch
       assert.equal((await put(body)).status, 400);
       assert.equal(fs.readFileSync(file, "utf8"), before);
     }
+  });
+});
+
+test("minimal round-trips as its own per-bot effort on a supporting model", async () => {
+  await withReasoningApi(async ({ put, get }) => {
+    assert.equal((await put({ botId: "a", reasoningModelId: "one:full", reasoningEffort: "minimal" })).status, 200);
+    const saved = await get();
+    assert.deepEqual(saved.assignments, {});
+    assert.deepEqual(saved.reasoning, { a: { "one:full": "minimal" } });
   });
 });
 

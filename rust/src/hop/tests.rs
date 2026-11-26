@@ -141,7 +141,7 @@ impl Fixture {
         )
         .unwrap();
         let rust = TestServer::start(move |authority| {
-            server::router(state, authority.into(), Some(hop), None)
+            server::router(state, authority.into(), Some(hop), None, None)
         })
         .await;
         let client = reqwest::Client::builder()

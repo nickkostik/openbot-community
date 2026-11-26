@@ -1,7 +1,9 @@
 mod auth;
 mod bot_models;
 mod catalog;
+mod discovery;
 mod hop;
+mod lease;
 mod reasoning;
 mod routing;
 mod server;
@@ -127,10 +129,17 @@ async fn serve(
         .filter(|_| enable_accounts)
         .map(|store| auth::Accounts::new(store, &authority))
         .transpose()?;
+    let discovery = credentials
+        .clone()
+        .map(|store| discovery::Discovery::new(state.clone(), store))
+        .transpose()?;
     println!("OpenBot Rust listening on http://{authority}");
-    let result = axum::serve(listener, server::router(state, authority, hop, accounts))
-        .with_graceful_shutdown(shutdown())
-        .await;
+    let result = axum::serve(
+        listener,
+        server::router(state, authority, hop, accounts, discovery),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     if let Some(credentials) = credentials {
         credentials.wait_for_renewals().await;
     }

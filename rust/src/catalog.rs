@@ -137,7 +137,17 @@ impl Policy {
 }
 
 fn openai_levels(slug: &str) -> Option<&'static [Effort]> {
-    let name = match slug
+    match unversioned_slug(slug) {
+        "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6-astra" => {
+            Some(&OPENAI_REQUIRED_LEVELS)
+        }
+        "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" => Some(&OPENAI_LEVELS),
+        _ => None,
+    }
+}
+
+fn unversioned_slug(slug: &str) -> &str {
+    match slug
         .as_bytes()
         .split_at_checked(slug.len().saturating_sub(11))
     {
@@ -149,14 +159,44 @@ fn openai_levels(slug: &str) -> Option<&'static [Effort]> {
             std::str::from_utf8(head).unwrap_or(slug)
         }
         _ => slug,
-    };
-    match name {
-        "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6-astra" => {
-            Some(&OPENAI_REQUIRED_LEVELS)
-        }
-        "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" => Some(&OPENAI_LEVELS),
-        _ => None,
     }
+}
+
+pub struct DiscoveryFacts {
+    pub levels: &'static [Effort],
+    pub context: Option<u64>,
+    pub output: Option<u64>,
+    pub protocol: Option<Protocol>,
+}
+
+pub fn discovery_facts(slug: &str, origin: &str) -> Option<DiscoveryFacts> {
+    if let Some(policy) = Policy::for_route(slug, origin) {
+        let nvidia = matches!(
+            policy.kind,
+            PolicyKind::NvidiaToggle | PolicyKind::NvidiaSuper
+        );
+        return Some(DiscoveryFacts {
+            levels: policy.levels,
+            context: None,
+            output: (slug == "nvidia/nemotron-3.5-lightning-30b-a3b").then_some(32768),
+            protocol: nvidia.then_some(Protocol::ChatCompletions),
+        });
+    }
+    if Url::parse(origin)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.openai.com"))
+    {
+        return Some(DiscoveryFacts {
+            levels: openai_levels(slug)?,
+            context: Some(1_050_000),
+            output: matches!(
+                unversioned_slug(slug),
+                "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6.1-terra"
+            )
+            .then_some(128000),
+            protocol: None,
+        });
+    }
+    None
 }
 
 fn parsed_levels(value: &Value) -> Vec<Effort> {

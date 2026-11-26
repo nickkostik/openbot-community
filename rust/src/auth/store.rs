@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -18,6 +18,7 @@ use super::{
 };
 use crate::{
     catalog::Catalog,
+    lease::Lease,
     routing::CredentialKind,
     server::{PLAN_MAX_BYTES, read_json},
 };
@@ -31,7 +32,7 @@ pub struct CredentialStore(Arc<Store>);
 struct Store {
     root: PathBuf,
     network: Network,
-    writer: Option<File>,
+    writer: Option<Lease>,
     writes: Mutex<()>,
     renewals: Mutex<HashMap<String, Renewal>>,
 }
@@ -48,18 +49,9 @@ impl CredentialStore {
     }
 
     pub(super) fn with_network(root: &Path, writable: bool, network: Network) -> io::Result<Self> {
-        let writer = if writable {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(root.join(".openbot-rust-secrets.lock"))?;
-            file.try_lock()?;
-            Some(file)
-        } else {
-            None
-        };
+        let writer = writable
+            .then(|| Lease::acquire(&root.join(".openbot-rust-secrets.lock")))
+            .transpose()?;
         Ok(Self(Arc::new(Store {
             root: root.to_owned(),
             network,

@@ -1,6 +1,6 @@
 # OpenBot Rust transition
 
-The Rust candidate implements bot settings, model routing, provider inference, and OpenAI account handling. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
+The Rust candidate implements bot settings, model routing, provider inference, OpenAI account handling, and on-demand provider discovery. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
 
 ## Build and compare
 
@@ -39,13 +39,18 @@ Add `--enable-accounts` in disposable state to enable the account routes and cre
 
 Each successful refresh stores the replacement credentials atomically in the existing `secrets.json`. Concurrent turns for one provider share that refresh. The runtime waits for in-flight renewals during normal shutdown. Use synthetic tokens in rehearsals. A refresh can replace the renewable session's token at OpenAI, so running two services on copies of the same live token can break the session. Run the Rust tests with OpenSSL available for the ephemeral signing fixture. [OpenAI accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
 
+## Compare provider discovery
+
+With either `--enable-hop` or `--enable-accounts`, send `POST /api/providers/{id}/fetch-models` to query a saved provider. The response preserves the listed model order, model types, recommended protocols, and reasoning capabilities. Each OpenCode Go account uses its own credential and catalog session at the direct Go endpoint. Existing OpenAI token formats select their corresponding model endpoints. The request leaves the saved catalog in place. [OpenCode model list API](https://opencode.ai/docs/console/api/models/) · [OpenAI models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+
 ## Cutover checklist
 
 - [x] Compare the native bot settings API and route resolver with the deployed JavaScript service. Verify writes and restart against a disposable copy.
 - [x] Port request serialization and verify tool IDs, ordering, and mixed text and image content across Chat Completions, Responses, and Messages.
 - [x] Exercise the native HTTP provider hop against loopback fixtures and direct Go and NVIDIA endpoints. Verify model switches, native effort controls, streaming tool arguments, usage, error reporting, and reconnect in the disposable setup.
 - [x] Port credential drafts, refresh, and both OpenAI sign-in paths. Verify signed account renewal under the existing provider ID, independent registration, and refresh persistence in disposable state.
-- [ ] Port provider discovery and complete account authorization with the live desktop browser.
+- [x] Port on-demand provider discovery. Compare both Go and both NVIDIA accounts with the current service and verify OpenAI plan and OAuth descriptors with fixtures.
+- [ ] Port scheduled catalog refresh and complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [ ] Port log settings and retention, usage, compaction, and provider-specific cache identifiers. Replay representative long histories with structured tool results and compare content and cache counters.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.

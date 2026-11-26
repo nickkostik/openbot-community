@@ -1,5 +1,5 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -19,7 +19,9 @@ use crate::{
     auth::Accounts,
     bot_models::{Settings, View},
     catalog::Catalog,
+    discovery::Discovery,
     hop::Hop,
+    lease::Lease,
     routing::{self, CredentialKind, Route},
 };
 
@@ -31,7 +33,7 @@ pub struct State(Arc<Store>);
 
 struct Store {
     root: PathBuf,
-    writer: Option<File>,
+    writer: Option<Lease>,
     writes: Mutex<()>,
 }
 
@@ -44,18 +46,9 @@ impl State {
                 "expected an OpenBot state directory",
             ));
         }
-        let writer = if writable {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(root.join(".openbot-rust-bot-settings.lock"))?;
-            file.try_lock()?;
-            Some(file)
-        } else {
-            None
-        };
+        let writer = writable
+            .then(|| Lease::acquire(&root.join(".openbot-rust-bot-settings.lock")))
+            .transpose()?;
         Ok(Self(Arc::new(Store {
             root,
             writer,
@@ -85,6 +78,10 @@ impl State {
 
     pub fn saved(&self) -> io::Result<(Catalog, Settings)> {
         Ok((self.0.catalog()?, self.0.settings(false)?))
+    }
+
+    pub fn catalog(&self) -> io::Result<Catalog> {
+        self.0.catalog()
     }
 }
 
@@ -152,6 +149,7 @@ pub fn router(
     authority: String,
     hop: Option<Hop>,
     accounts: Option<Accounts>,
+    discovery: Option<Discovery>,
 ) -> Router {
     let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
@@ -162,6 +160,9 @@ pub fn router(
     }
     if let Some(accounts) = accounts {
         router = router.merge(accounts.routes());
+    }
+    if let Some(discovery) = discovery {
+        router = router.merge(discovery.routes());
     }
     router.layer(middleware::from_fn_with_state(authority, local_requests))
 }

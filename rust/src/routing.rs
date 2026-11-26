@@ -197,7 +197,7 @@ fn find_model<'a>(catalog: &'a Catalog, selector: &str) -> Option<&'a Model> {
         })
 }
 
-fn parse_origin(raw: &str) -> Option<Url> {
+pub fn parse_origin(raw: &str) -> Option<Url> {
     let origin = Url::parse(raw).ok()?;
     if !matches!(origin.scheme(), "http" | "https")
         || origin.host().is_none()
@@ -209,6 +209,20 @@ fn parse_origin(raw: &str) -> Option<Url> {
         return None;
     }
     Some(origin)
+}
+
+pub fn direct_go(origin: &Url) -> bool {
+    origin.scheme() == "https"
+        && origin.port().is_none()
+        && origin.host_str() == Some("opencode.ai")
+        && matches!(
+            origin.path().trim_end_matches('/'),
+            "/inference/go"
+                | "/inference/go/openai/v1"
+                | "/inference/go/anthropic/v1"
+                | "/zen/go"
+                | "/zen/go/v1"
+        )
 }
 
 fn protocol_for(
@@ -263,17 +277,7 @@ fn endpoint(mut origin: Url, protocol: Protocol, credential: CredentialKind) -> 
             Protocol::Anthropic => "/anthropic/v1",
             Protocol::ChatCompletions => "/v1",
         }
-    } else if direct
-        && host == Some("opencode.ai")
-        && matches!(
-            path.as_str(),
-            "/inference/go"
-                | "/inference/go/openai/v1"
-                | "/inference/go/anthropic/v1"
-                | "/zen/go"
-                | "/zen/go/v1"
-        )
-    {
+    } else if direct_go(&origin) {
         match protocol {
             Protocol::Anthropic => "/inference/go/anthropic/v1",
             Protocol::ChatCompletions | Protocol::Responses => "/inference/go/openai/v1",

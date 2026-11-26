@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    auth::{Authorized, CredentialStore},
+    auth::{Authorized, CODEX_USER_AGENT, CredentialStore},
     catalog::Protocol,
     reasoning,
     routing::{self, CredentialKind},
@@ -354,9 +354,10 @@ impl Authorized {
         headers.insert(secret.0, value);
         if self.kind == CredentialKind::OpenAiOauth {
             // These headers belong to the existing OAuth client contract.
-            headers.insert(header::USER_AGENT, HeaderValue::from_static(
-                "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)"
-            ));
+            headers.insert(
+                header::USER_AGENT,
+                HeaderValue::from_static(CODEX_USER_AGENT),
+            );
             headers.insert("originator", HeaderValue::from_static("codex-tui"));
             if let Some(account) = self
                 .account

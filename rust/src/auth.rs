@@ -15,6 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use sessions::Accounts;
 pub use store::{Authorized, CredentialStore};
 
+pub const CODEX_USER_AGENT: &str =
+    "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)";
+
 #[derive(Clone, Debug)]
 pub struct AuthError {
     pub status: StatusCode,

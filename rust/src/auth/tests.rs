@@ -189,6 +189,7 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
         HOST.into(),
         None,
         Some(Accounts::new(store, HOST).unwrap()),
+        None,
     )
 }
 

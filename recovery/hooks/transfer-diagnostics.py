@@ -29,8 +29,12 @@ BUDGET_POLICY = 'reasoning-inclusive-v1'
 REASONING_OUTPUT_TOKENS = 4096
 PLAIN_OUTPUT_TOKENS = 256
 PROMPT_TOKEN_RESERVE = 1024
-APPROVED_ORIGINS = {'https://opencode.ai/zen/go/v1', 'https://api.openai.com/v1',
-                    'https://integrate.api.nvidia.com/v1'}
+APPROVED_ORIGINS = {
+    'https://opencode.ai/inference/go',
+    'https://opencode.ai/zen/go/v1',
+    'https://api.openai.com/v1',
+    'https://integrate.api.nvidia.com/v1',
+}
 PHASES = {'review-needed', 'checking-bindings', 'copying', 'registering', 'preserving-late-history', 'waiting-for-publication',
           'activating', 'waiting-for-rate-limit', 'waiting-for-control-plane', 'bound-box'}
 REFUSALS = {'history-conflict', 'identity-conflict', 'preflight-refused'}

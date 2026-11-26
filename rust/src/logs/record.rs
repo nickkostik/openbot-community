@@ -125,6 +125,10 @@ impl Trace {
     }
 
     pub fn route(&mut self, prepared: &crate::hop::request::Prepared) {
+        if let Some(compaction) = &prepared.compaction {
+            self.row
+                .insert("compaction".into(), json!(compaction.measurement));
+        }
         self.text("providerId", Some(&prepared.provider_id), 128);
         self.text("providerName", prepared.provider_name.as_deref(), 200);
         self.text("model", Some(&prepared.model), 200);
@@ -335,6 +339,7 @@ fn write(
         "providerName",
         "botId",
         "upstreamEndpoint",
+        "compaction",
     ] {
         if let Some(value) = row.get_mut(field) {
             redactor.value(value);

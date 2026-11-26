@@ -232,6 +232,7 @@ pub struct Model {
     pub wire_chat: bool,
     pub protocol: Option<Protocol>,
     pub levels: Vec<Effort>,
+    pub context_tokens: usize,
     pub max_output_tokens: u64,
     pub fast: bool,
     saved_effort: Effort,
@@ -337,6 +338,11 @@ impl Model {
             wire_chat: row.get("modelType").is_none_or(|kind| kind == "chat"),
             protocol,
             levels,
+            context_tokens: row["contextTokens"]
+                .as_u64()
+                .or_else(|| row["contextTokens"].as_str()?.trim().parse().ok())
+                .filter(|value| (1..=100_000_000).contains(value))
+                .map_or(0, |value| value as usize),
             max_output_tokens: configured_tokens(&row["maxOutputTokens"]),
             fast: row["parameters"]
                 .as_array()

@@ -692,6 +692,7 @@ async fn saved_openai_credentials_are_scoped_to_the_existing_outbound_contracts(
             body.clone(),
             &HeaderMap::new(),
             "fixture",
+            Intent::Chat(None),
         )
         .await
         .unwrap();
@@ -820,9 +821,16 @@ async fn direct_body(
     );
     let state = State::new(dir.path().into(), false).unwrap();
     let credentials = CredentialStore::new(state.root(), false).unwrap();
-    let prepared = Prepared::load(&state, &credentials, request, &HeaderMap::new(), "fixture")
-        .await
-        .unwrap();
+    let prepared = Prepared::load(
+        &state,
+        &credentials,
+        request,
+        &HeaderMap::new(),
+        "fixture",
+        Intent::Chat(None),
+    )
+    .await
+    .unwrap();
     serde_json::from_slice(&prepared.body).unwrap()
 }
 

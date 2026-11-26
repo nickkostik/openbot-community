@@ -11,6 +11,7 @@ use url::Url;
 use crate::{
     auth::{Authorized, CODEX_USER_AGENT, CredentialStore},
     catalog::{Effort, Protocol},
+    compaction::{Compacted, Compactor, SummaryRoute},
     reasoning,
     routing::{self, CredentialKind},
     server::{State, read_json, read_mode},
@@ -18,7 +19,14 @@ use crate::{
 
 use super::failure::Failure;
 
-pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_INBOUND_BYTES: usize = 64 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub enum Intent<'a> {
+    Chat(Option<&'a Compactor>),
+    Summary(&'a SummaryRoute),
+}
 
 pub struct Prepared {
     pub url: String,
@@ -34,6 +42,7 @@ pub struct Prepared {
     pub secret: String,
     pub upstream_stream: bool,
     pub client_stream: bool,
+    pub compaction: Option<Compacted>,
 }
 
 const CONVERSATION_FIELDS: &[&str] = &[
@@ -64,8 +73,9 @@ impl Prepared {
         body: Value,
         incoming: &HeaderMap,
         version: &str,
+        intent: Intent<'_>,
     ) -> Result<Self, Failure> {
-        let Value::Object(mut body) = body else {
+        let Value::Object(body) = body else {
             return Err(Failure::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
@@ -102,14 +112,34 @@ impl Prepared {
         let selected_bot = bot
             .as_deref()
             .filter(|_| body.get("openbot_internal_model") != Some(&Value::Bool(true)));
-        let selection =
+        let mut selection =
             routing::select(&catalog, &settings, requested, selected_bot).map_err(|err| {
                 Failure::new(StatusCode::BAD_REQUEST, "invalid_model", &err.to_string())
             })?;
-        let credential = credentials
-            .authorize(&selection.provider.id, &selection.provider.origin)
-            .await
-            .map_err(Failure::credential)?;
+        let credential = match intent {
+            Intent::Summary(route) => {
+                if selection.model.id != route.model_id
+                    || selection.provider.origin != route.origin
+                    || !selection.model.levels.contains(&route.effort)
+                {
+                    return Err(Failure::new(
+                        StatusCode::CONFLICT,
+                        "compaction_route_changed",
+                        "The saved compaction route changed.",
+                    ));
+                }
+                selection.effort_override = Some(route.effort);
+                credentials
+                    .authorize_configured(&selection.provider.id, &selection.provider.origin)
+                    .await
+            }
+            Intent::Chat(_) => {
+                credentials
+                    .authorize(&selection.provider.id, &selection.provider.origin)
+                    .await
+            }
+        }
+        .map_err(Failure::credential)?;
         let route = selection.route(credential.kind);
         let client_stream = body.get("stream") == Some(&Value::Bool(true));
         let conversation = conversation_field(|key| body.get(key));
@@ -121,6 +151,15 @@ impl Prepared {
         let session_key = scope
             .as_deref()
             .map(|scope| stable_cache_key(&selection.provider.id, scope));
+        let (mut body, compaction) = match intent {
+            Intent::Chat(Some(compactor)) => {
+                let conversation = conversation.map(str::to_owned);
+                compactor
+                    .apply(body, conversation, bot.clone(), &catalog, &selection)
+                    .await
+            }
+            _ => (body, None),
+        };
 
         for key in CONVERSATION_FIELDS.iter().chain(INTERNAL_FIELDS) {
             body.shift_remove(*key);
@@ -180,6 +219,7 @@ impl Prepared {
             secret: credential.token,
             upstream_stream: upcoming_stream,
             client_stream,
+            compaction,
         })
     }
 }

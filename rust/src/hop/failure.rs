@@ -32,6 +32,28 @@ impl Failure {
         self.status
     }
 
+    pub fn context_overflow(&self) -> bool {
+        if !matches!(self.status.as_u16(), 400 | 413 | 422) {
+            return false;
+        }
+        let text = format!("{} {}", self.code, self.message)
+            .to_ascii_lowercase()
+            .replace(['_', '-'], " ");
+        [
+            "context length exceeded",
+            "context window",
+            "maximum context",
+            "context too long",
+            "context too large",
+            "too many tokens",
+            "input too long",
+            "prompt too long",
+            "input tokens exceed",
+        ]
+        .iter()
+        .any(|pattern| text.contains(pattern))
+    }
+
     pub fn credential(error: AuthError) -> Self {
         let code = if error.status == StatusCode::NOT_FOUND {
             "missing_credential"

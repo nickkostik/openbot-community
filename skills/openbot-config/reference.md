@@ -191,7 +191,7 @@ curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/cleanup"
 curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/strip-bodies"
 ```
 
-`PUT /api/logs/settings` saves capture and retention policy in `openbot-logs.json`. A change to `loggingEnabled` requires saved Custom mode. In Official, the candidate returns HTTP 409 for a recording toggle. Use the existing Node service for the Official stock tap and context compaction.
+`PUT /api/logs/settings` saves capture and retention policy in `openbot-logs.json`. A change to `loggingEnabled` requires saved Custom mode. In Official, the candidate returns HTTP 409 for a recording toggle. Use the existing Node service for the Official stock tap and live context compaction.
 
 `POST /api/logs/cleanup` prunes expired request rows under `logRetentionDays` and cleans up eligible sidecars. A retention change also attempts cleanup immediately. The automatic task first checks after one minute and then every 30 minutes, whether recording is on or off. Invalid or unreadable log settings block automatic and manual retention cleanup. A missing settings file uses default retention. `POST /api/logs/strip-bodies` removes body captures and preserves request metadata.
 
@@ -200,6 +200,20 @@ To empty the disposable request archive and remove its body captures, run Clear.
 ```bash
 curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/clear"
 ```
+
+#### Rust context compaction
+
+Run the disposable Custom candidate with `--enable-hop --enable-compaction`. The hop compacts the canonical chat `messages` sent upstream. It chooses a new trim above an estimated 85% of the selected model's configured context and aims to retain 35%. A smaller selected window can trigger a trim earlier. A matching saved boundary can be reused on later turns.
+
+The estimate includes instructions, assistant reasoning, tool calls and results, and tool definitions. ASCII text is estimated at about four characters per token. Non-ASCII characters and images use separate allowances. The compactor keeps system and developer instructions, the full latest user turn and its following messages, and matched calls and results together across the trim boundary. Protected material can keep a request above the target. The candidate accepts up to 64 MiB inbound and caps the encoded provider request at 16 MiB.
+
+Compaction skips marked auxiliary and internal summary requests, native Responses input or continuation IDs, and models without a configured context size. Requests with too little history or without a safe trim also skip compaction.
+
+The candidate stores private 0600 `<key>.rust.json` checkpoints and `<key>.<job-id>.rust.transcript` source sidecars under `openbot/compact-state`. It can reuse a complete matching legacy brief read-only. Rust resumption uses its own checkpoint and hash-verified source. Eligible later turns resume at the last completed chunk after any cooldown, provided the saved history receipt and route still match.
+
+The initial outgoing brief can use local excerpts while an eligible background summary runs. Summary jobs use the selected canonical route and effort when eligible, processing up to 65,536 estimated transcript tokens per chunk within the route's budget. Candidate routes must fit the estimated prompt and output allowance. Once a summary request is sent, advancing to another route requires a recognized context overflow. Approved alternates come from configured direct DeepSeek V4.1 or V4 Flash, GPT-6.1 Sol and Muse 1.3 Contributor routes. The route policy excludes Kimi K3 as a summarizer and excludes retired intermediary endpoints. If there is no eligible summary route, the local excerpt remains available.
+
+With request logging enabled, the chat record's `compaction` fields show estimated input and retained sizes, target, configured context, covered messages and summary source when available. Summary requests appear in separate records with `purpose: "compaction"` for usage reporting. Provider-reported usage is measured separately from the compaction estimates.
 
 ### Official controls without logging rewrap
 

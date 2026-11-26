@@ -55,6 +55,14 @@ Open `/#/logs` with `--ui-dir` to browse saved records, captured bodies, events,
 
 The same opt-in enables log settings saves, cleanup, Strip Bodies, and Clear in the disposable directory. The first retention pass runs after one minute and repeats every 30 minutes. Clear keeps event history. The candidate uses the existing append lock and keeps unknown rows during retention. The current service still handles lifecycle and mode changes and the Official host tap.
 
+## Rehearse compaction
+
+Use `--enable-hop --enable-compaction` with disposable Custom state. For canonical chat history, Rust estimates the input size with the tool schemas and starts trimming at 85 percent of the selected model window. It targets 35 percent when the protected messages fit. The latest user exchange, system and developer instructions, and adjacent tool calls and results keep their structure. Old excerpts are available while the provider writes a brief. Subsequent turns verify the covered history and reuse the saved boundary. Native Responses input and auxiliary calls bypass compaction.
+
+Native summaries and resumable checkpoints use private sidecars under `openbot/compact-state`. The candidate reads a completed legacy brief only when the covered messages match. It preserves the existing legacy summary and checkpoint files. Interrupted native work resumes from its confirmed chunk. Changing the model, effort, or covered history invalidates stale work. The requested direct account receives the summary call when eligible. Context overflow can move the summary to an approved configured fallback.
+
+With request logging enabled, chat records show the estimated input, estimated retained input, target, and summary source. The usage report shows actual provider tokens and reports compaction requests separately. Cache measurements require an eligible repeated prefix. [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) · [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache/)
+
 ## Cutover checklist
 
 - [x] Compare the native bot settings API and route resolver with the deployed JavaScript service. Verify writes and restart against a disposable copy.
@@ -69,7 +77,7 @@ The same opt-in enables log settings saves, cleanup, Strip Bodies, and Clear in 
 - [ ] Complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [x] Port log settings, scheduled retention, cleanup, Strip Bodies, and Clear. Rehearse all operations against disposable history.
-- [ ] Port compaction. Replay representative long histories with structured tool results and compare content and provider cache counters.
+- [x] Port compaction. Rehearse structured tool results, matching legacy briefs, native checkpoint restart, and an eligible direct OpenCode Go cache hit.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.

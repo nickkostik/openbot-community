@@ -2,6 +2,7 @@ mod aggregate;
 mod auth;
 mod bot_models;
 mod catalog;
+mod compaction;
 mod discovery;
 mod hop;
 mod lease;
@@ -47,6 +48,9 @@ struct Args {
     /// Record requests and maintain the log archive in disposable state.
     #[arg(long)]
     enable_request_logs: bool,
+    /// Compact long Custom histories in disposable state.
+    #[arg(long, requires = "enable_hop")]
+    enable_compaction: bool,
     /// Serve the built OpenBot web assets from this directory.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
@@ -116,6 +120,7 @@ async fn serve(args: Args) -> io::Result<()> {
         enable_accounts,
         enable_model_refresh,
         enable_request_logs,
+        enable_compaction,
         ui_dir,
         ..
     } = args;
@@ -137,10 +142,18 @@ async fn serve(args: Args) -> io::Result<()> {
         .then(|| auth::CredentialStore::new(state.root(), enable_accounts || enable_model_refresh))
         .transpose()?;
     let logs = logs::Logs::new(state.root(), enable_request_logs);
+    let compactor = enable_compaction
+        .then(|| compaction::Compactor::new(state.root()))
+        .transpose()?;
     let hop = credentials
         .clone()
         .filter(|_| enable_hop)
-        .map(|store| hop::Hop::new(state.clone(), store).map(|hop| hop.with_logs(logs.clone())))
+        .map(|store| {
+            hop::Hop::new(state.clone(), store).map(|hop| {
+                hop.with_logs(logs.clone())
+                    .with_compactor(compactor.clone())
+            })
+        })
         .transpose()?;
     let accounts = credentials
         .clone()
@@ -176,6 +189,7 @@ async fn serve(args: Args) -> io::Result<()> {
     ];
     println!("OpenBot Rust listening on http://{authority}");
     let draining = catalog.clone();
+    let stop_compactor = compactor.clone();
     let log_cleanup = logs.schedule_cleanup();
     let result = axum::serve(
         listener,
@@ -189,6 +203,9 @@ async fn serve(args: Args) -> io::Result<()> {
         }
         if let Some(catalog) = draining {
             catalog.stop();
+        }
+        if let Some(compactor) = stop_compactor {
+            compactor.stop();
         }
     })
     .await;

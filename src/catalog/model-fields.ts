@@ -75,6 +75,7 @@ export function modelImportFields(
   const publishedOutput = positive(fetched.maxOutputTokens) ?? positive(catalog?.maxOutputTokens);
   const maxOutputTokens = publishedOutput ? Math.min(65536, publishedOutput) : undefined;
   const reasoningLevels = importReasoningLevels(fetched, catalog);
+  const apiType = fetched.apiType ?? catalog?.apiType;
 
   const modalities = catalog?.modalities?.length
     ? catalog.modalities
@@ -84,7 +85,7 @@ export function modelImportFields(
 
   return {
     slug: fetched.id,
-    ...(catalog?.apiType ? { apiType: catalog.apiType } : {}),
+    ...(apiType ? { apiType } : {}),
     ...(contextTokens !== undefined ? { contextTokens } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(reasoningLevels ? { reasoningLevels } : {}),

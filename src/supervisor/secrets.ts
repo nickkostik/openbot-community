@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type AbsPath, type ProviderId, type SecretBytes } from "../domain/types.ts";
 
 export type SecretStore = {
@@ -53,6 +54,8 @@ export function secretFor(store: SecretStore, providerId: ProviderId): SecretByt
 export type SecretsFs = {
   read(path: AbsPath): string | undefined;
   write(path: AbsPath, body: string, mode: number): void;
+  rename?(from: AbsPath, to: AbsPath): void;
+  remove?(path: AbsPath): void;
 };
 
 export function loadSecrets(fs: SecretsFs, path: AbsPath): SecretStore {
@@ -64,5 +67,14 @@ export function loadSecrets(fs: SecretsFs, path: AbsPath): SecretStore {
 }
 
 export function saveSecrets(fs: SecretsFs, path: AbsPath, store: SecretStore): void {
-  fs.write(path, writeSecretStore(store), 0o600);
+  const content = writeSecretStore(store);
+  if (!fs.rename) {
+    fs.write(path, content, 0o600);
+    return;
+  }
+  const staged = `${path}.save-${randomUUID()}` as AbsPath;
+  try {
+    fs.write(staged, content, 0o600);
+    fs.rename(staged, path);
+  } finally { fs.remove?.(staged); }
 }

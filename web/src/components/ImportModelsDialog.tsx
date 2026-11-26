@@ -15,6 +15,7 @@ type ImportModelsDialogProps = {
   error: FetchModelsError | null;
   onImport: (models: FetchedModel[]) => Promise<void>;
   onNoSecret?: () => void;
+  onConnectChatGPT?: (() => void) | undefined;
 };
 
 function errorRemedy(kind: string | undefined): string {
@@ -44,6 +45,7 @@ export function ImportModelsDialog({
   error,
   onImport,
   onNoSecret,
+  onConnectChatGPT,
 }: ImportModelsDialogProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -167,7 +169,7 @@ export function ImportModelsDialog({
             <div className="notice notice--danger">
               <TriangleAlert aria-hidden="true" />
               <span className="text">
-                <strong>{error.error.kind}</strong> — {errorRemedy(error.error.kind)}
+                <strong>{error.error.kind}</strong> {error.error.message || errorRemedy(error.error.kind)}
                 {error.error.upstreamStatus !== undefined ? ` (upstream ${error.error.upstreamStatus})` : ""}
               </span>
             </div>
@@ -175,6 +177,9 @@ export function ImportModelsDialog({
               <Button variant="secondary" onClick={onNoSecret}>
                 Add key first
               </Button>
+            ) : null}
+            {onConnectChatGPT && ["no-secret", "unauthorized"].includes(error.error.kind) ? (
+              <Button variant="secondary" onClick={onConnectChatGPT}>Connect ChatGPT</Button>
             ) : null}
           </div>
         ) : isEmpty ? (

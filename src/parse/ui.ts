@@ -10,6 +10,7 @@ import { type BoxPaths } from "../supervisor/paths.ts";
 import { parseProviderId, parseSecretBytes } from "../supervisor/secrets.ts";
 import { customBoxFromCatalog, officialBox, parseExposeToken, parseUpstreamOrigin, slugify } from "./argv.ts";
 import { normalizeProviderCredential } from "../supervisor/credential-import.ts";
+import { readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 export type ModelLimitsInput = {
   readonly catalogLimits?: unknown;
@@ -327,15 +328,17 @@ export function applyUiCommand(input: {
   }
   if (command.kind === "set-secret") {
     const providerId = parseProviderId(command.providerId);
-    if (!catalog.providers.some((row) => row.id === providerId)) {
+    const provider = catalog.providers.find(row => row.id === providerId);
+    if (!provider) {
       throw new Error("OpenBot: unknown provider");
     }
-    if (catalog.models.length === 0) {
+    if (input.mode !== "official" && catalog.models.length === 0) {
       throw new Error("OpenBot: add a model before using custom chat");
     }
     return {
-      desired: customBoxFromCatalog({ paths, catalog, expose }),
-      secret: { providerId, bytes: parseSecretBytes(command.secret) },
+      desired: input.mode === "official" ? officialBox(paths, expose) : customBoxFromCatalog({ paths, catalog, expose }),
+      secret: { providerId, bytes: parseSecretBytes(readChatGPTPlanCredential(command.secret.trim())
+        ? normalizeProviderCredential(command.secret, provider.origin) : command.secret) },
     };
   }
   if (command.kind === "update-provider") {

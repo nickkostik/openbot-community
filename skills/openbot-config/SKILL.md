@@ -68,7 +68,7 @@ Prefer the panel's Add account wizard or `add-provider`, with `familyId`, displa
 
 Then fetch models for that returned ID, import the requested rows with `upsert-model` and explicitly select one only if authorized. Use `update-provider`/`set-secret` for an existing ID. Legacy `upsert-provider`/`custom` derives an ID from the name and changes mode/default; it is not independent account onboarding.
 
-OpenAI sign-in creates a temporary opaque credential draft; save it through `add-provider` without overwriting another login. Import exactly one selected credential-file account, not its unrelated wrapper. OAuth credentials go only to supported direct OpenAI origins. Keep subscription and API-key accounts separate; exhausted quota does not authorize a paid fallback, relay or account replacement. [Accounts and credentials](reference.md#accounts-and-credentials).
+Open the Computer's panel at `http://127.0.0.1:<panel port>` to use **Continue with ChatGPT**. In Add account, select **OpenAI**, then **ChatGPT plan**. Authorize OpenBot and return to save the independent account. For an existing direct OpenAI provider, use **Connect ChatGPT**, then **Save login** to update that provider's credential. Both saves preserve Official/Temporal mode and model selections. The credential uses direct OpenAI discovery and streaming Responses. [ChatGPT plan sign-in](reference.md#chatgpt-plan-sign-in). Keep API keys and imported Codex/OpenCode logins in their own accounts. For a credential-file import, select just the intended account. [Accounts and credentials](reference.md#accounts-and-credentials).
 
 ## Models, reasoning and limits
 

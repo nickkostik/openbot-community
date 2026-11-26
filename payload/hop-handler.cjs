@@ -21,6 +21,7 @@ var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
+var chatGPTPlan = require("./chatgpt-plan.cjs");
 
 var TIMEOUT_MS = Number(process.env.OPENBOT_HOP_TIMEOUT || "1800000");
 var HIGH_AGENT_MAX_TOKENS = 65536;
@@ -526,17 +527,24 @@ function openAIOAuthAccountId(credential) {
 
 function readOpenAIOAuthCredential(providerId) {
   var raw = loadStoredSecret(providerId);
+  var plan = chatGPTPlan.readCredential(raw);
+  if (plan) return plan;
   try {
     var parsed = JSON.parse(raw);
     return isRecord(parsed) && parsed.kind === "openai-oauth" ? parsed : null;
   } catch (err) { return null; }
 }
 
-function requestOAuthRefresh(refreshToken) {
+function requestOAuthRefresh(credential) {
   return new Promise(function (resolve, reject) {
-    var payload = Buffer.from("grant_type=refresh_token&client_id=app_EMoamEEZ73f0CkXaXp7hrann&refresh_token=" + encodeURIComponent(refreshToken), "utf8");
+    var plan = credential.kind === "chatgpt-plan";
+    var endpoint = new URL(plan ? chatGPTPlan.TOKEN_ENDPOINT : "https://auth.openai.com/oauth/token");
+    var refresh = new URLSearchParams({ grant_type: "refresh_token", refresh_token: credential.refreshToken,
+      client_id: plan ? credential.clientId : "app_EMoamEEZ73f0CkXaXp7hrann" });
+    if (plan) refresh.set("resource", chatGPTPlan.ORIGIN);
+    var payload = Buffer.from(refresh.toString(), "utf8");
     var req = https.request({
-      hostname: "auth.openai.com", path: "/oauth/token", method: "POST",
+      hostname: endpoint.hostname, path: endpoint.pathname, method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(payload.length), Accept: "application/json" },
     }, function (res) {
       collectResponse(res).then(function (out) {
@@ -558,18 +566,20 @@ function requestOAuthRefresh(refreshToken) {
 // Persist a rotated OAuth credential. Returns true when the new value is on
 // disk; a false return means the caller must treat the refresh as failed so a
 // later request never proceeds with an access token that was not persisted.
-function saveStoredSecret(providerId, value) {
+function saveStoredSecret(providerId, value, expected) {
+  var tmp = "";
   try {
     var file = secretsPath();
     var store = readJson(file) || { providers: {} };
     if (!isRecord(store.providers)) store.providers = {};
+    if (store.providers[providerId] !== expected) return false;
     store.providers[providerId] = value;
-    var tmp = file + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+    tmp = file + "." + nodeCrypto.randomUUID() + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
     fs.renameSync(tmp, file);
     return true;
-  } catch (err) { /* refresh persistence is best-effort; the request still uses the new token */ }
-  return false;
+  } catch (err) { return false; }
+  finally { if (tmp) try { fs.unlinkSync(tmp); } catch (err) { /* renamed or never created */ } }
 }
 
 // Per-provider single-flight refresh. Concurrent requests share one token
@@ -577,18 +587,23 @@ function saveStoredSecret(providerId, value) {
 // writer can overwrite it with credentials minted from the now-consumed token.
 var oauthRefreshFlights = {};
 
-function refreshOpenAIOAuthCredential(providerId, parsed) {
+function refreshOpenAIOAuthCredential(providerId, parsed, raw) {
   if (oauthRefreshFlights[providerId]) return oauthRefreshFlights[providerId];
-  var flight = requestOAuthRefresh(parsed.refreshToken)
+  var flight = requestOAuthRefresh(parsed)
     .then(function (refreshed) {
       var next = Object.assign({}, parsed, {
         accessToken: refreshed.access_token,
         refreshToken: refreshed.refresh_token || parsed.refreshToken,
         expiresAt: Math.floor(Date.now() / 1000) + Math.max(1, Number(refreshed.expires_in) || 3600),
       });
-      var refreshedAccountId = openAIOAuthAccountId({ idToken: refreshed.id_token, accessToken: refreshed.access_token });
-      if (refreshedAccountId) next.chatgptAccountId = refreshedAccountId;
-      if (!saveStoredSecret(providerId, JSON.stringify(next))) {
+      if (parsed.kind === "chatgpt-plan") {
+        if (refreshed.scope !== undefined) next.scopes = typeof refreshed.scope === "string" ? refreshed.scope.split(/\s+/).filter(Boolean) : [];
+        if (!chatGPTPlan.hasPlanScopes(next.scopes)) throw new Error("ChatGPT plan usage permission was not retained. Sign in again.");
+      } else {
+        var refreshedAccountId = openAIOAuthAccountId({ idToken: refreshed.id_token, accessToken: refreshed.access_token });
+        if (refreshedAccountId) next.chatgptAccountId = refreshedAccountId;
+      }
+      if (!saveStoredSecret(providerId, JSON.stringify(next), raw)) {
         throw new Error("openbot-hop: OpenAI OAuth credential was not persisted");
       }
       return next.accessToken;
@@ -600,19 +615,28 @@ function refreshOpenAIOAuthCredential(providerId, parsed) {
   return flight;
 }
 
-async function loadKey(providerId, provider) {
+async function loadKey(providerId, provider, expectedCredentialKind) {
   var raw = loadStoredSecret(providerId);
   if (!raw) return "";
-  var parsed;
-  try { parsed = JSON.parse(raw); } catch (err) { return raw; }
-  if (!isRecord(parsed) || parsed.kind !== "openai-oauth" || typeof parsed.accessToken !== "string") return raw;
+  var plan = chatGPTPlan.readCredential(raw);
+  var parsed = plan;
+  if (!parsed) {
+    try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
+  }
+  var legacyOAuth = isRecord(parsed) && parsed.kind === "openai-oauth" && typeof parsed.accessToken === "string";
+  var kind = plan ? plan.kind : (legacyOAuth ? "openai-oauth" : "api-key");
+  if (expectedCredentialKind !== undefined && expectedCredentialKind !== kind) {
+    throw new Error("Provider login changed while preparing the request. Retry the turn.");
+  }
+  if (kind === "api-key") return raw;
+  if (plan && !chatGPTPlan.isDirectOrigin(provider && provider.origin)) throw new Error("ChatGPT plan login requires the direct OpenAI API.");
   var expiresAt = Number(parsed.expiresAt || 0);
   if (expiresAt > Math.floor(Date.now() / 1000) + 60) return parsed.accessToken;
   if (typeof parsed.refreshToken !== "string" || !parsed.refreshToken) {
     throw new Error("openbot-hop: OpenAI OAuth credential is expired with no refresh token");
   }
   try {
-    return await refreshOpenAIOAuthCredential(providerId, parsed);
+    return await refreshOpenAIOAuthCredential(providerId, parsed, raw);
   } catch (err) {
     throw new Error("openbot-hop: OpenAI OAuth refresh failed (" + err.message + ")");
   }
@@ -788,6 +812,10 @@ function openUpstream(urlStr, body, key, inbound, apiType) {
   delete outboundBody.epochId;
   delete outboundBody.epoch_id;
   if (inbound && inbound.openaiOAuth === true) outboundBody = protocolConverters.prepareCodexResponses(outboundBody);
+  if (inbound && inbound.chatGPTPlan === true) {
+    outboundBody.store = false;
+    outboundBody.stream = true;
+  }
   var payload = Buffer.from(JSON.stringify(outboundBody), "utf8");
   var wantStream = outboundBody.stream === true;
   var headers = {
@@ -1987,8 +2015,9 @@ async function handleCompletionsInner(req, res) {
     fields.providerId = route.provider.id;
     fields.providerName = route.provider.name;
     var oauthCredential = readOpenAIOAuthCredential(route.provider.id);
-    var isOpenAIOAuth = oauthCredential !== null;
-    var apiType = protocolConverters.resolveApiType(route.model, route.provider, isOpenAIOAuth);
+    var isOpenAIOAuth = oauthCredential && oauthCredential.kind === "openai-oauth";
+    var isChatGPTPlan = oauthCredential && oauthCredential.kind === "chatgpt-plan";
+    var apiType = protocolConverters.resolveApiType(route.model, route.provider, Boolean(isOpenAIOAuth || isChatGPTPlan));
     body.model = route.model.slug;
     if (Array.isArray(body.messages)) {
       body.messages = toOpenAIMessages(body.messages);
@@ -2088,6 +2117,7 @@ async function handleCompletionsInner(req, res) {
       providerId: route.provider.id,
       providerOrigin: route.provider.origin,
       openaiOAuth: isOpenAIOAuth,
+      chatGPTPlan: isChatGPTPlan,
       chatgptAccountId: isOpenAIOAuth ? openAIOAuthAccountId(oauthCredential) : "",
       openaiSessionKey: isOpenAIOAuth && __cacheScope ? stableCacheKey(route.provider.id, __cacheScope, "") : "",
       opencodeSession: String(route.provider.id).indexOf("opencode") === 0
@@ -2096,7 +2126,7 @@ async function handleCompletionsInner(req, res) {
     };
     var key;
     try {
-      key = await loadKey(route.provider.id, route.provider);
+      key = await loadKey(route.provider.id, route.provider, oauthCredential ? oauthCredential.kind : "api-key");
     } catch (keyErr) {
       var refreshFailure = { error: { message: keyErr.message } };
       record({ status: 503, error: keyErr.message, responseBody: refreshFailure });
@@ -2109,7 +2139,7 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 503, noSecret);
       return;
     }
-    var upstream = resolveUpstreamUrl(route.provider, isOpenAIOAuth, apiType);
+    var upstream = isChatGPTPlan ? chatGPTPlan.ORIGIN + "/responses" : resolveUpstreamUrl(route.provider, isOpenAIOAuth, apiType);
     fields.upstreamEndpoint = upstream;
     var out;
     if (body.stream === true) {

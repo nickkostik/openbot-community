@@ -13,6 +13,51 @@ const maps = require(mapsPath) as {
   ) => string;
 };
 
+const zaiCodingPlan = "https://api.z.ai/api/coding/paas/v4";
+
+test("direct Z.AI GLM-5.3 uses the selected effort and enables thinking after a switch", () => {
+  const cases = [
+    ["glm-5.3", zaiCodingPlan, "low"],
+    ["glm-5.3-flash", zaiCodingPlan + "/", "high"],
+    ["glm-5.3", "https://api.z.ai/api/paas/v4", "max"],
+  ] as const;
+  for (const [model, baseUrl, effort] of cases) {
+    const body = { model, reasoning_effort: "medium", thinking: { type: "disabled", clear_thinking: false } };
+    maps.applyProviderReasoningControls(body, {
+      modelId: model, baseUrl, parameters: [{ id: "fast", value: "true" }, { id: "effort", value: effort }],
+    });
+    assert.deepEqual(body, { model, reasoning_effort: effort, thinking: { type: "enabled", clear_thinking: false } });
+  }
+});
+
+test("direct Z.AI GLM-5.3 drops unsupported inbound efforts and ignores legacy Off", () => {
+  const body: Record<string, unknown> = { model: "glm-5.3-flash", reasoning_effort: "none", thinking: { type: "disabled" } };
+  maps.applyProviderReasoningControls(body, {
+    modelId: "glm-5.3-flash", baseUrl: zaiCodingPlan, parameters: [{ id: "thinking", value: "false" }],
+  });
+  assert.deepEqual(body, { model: "glm-5.3-flash", thinking: { type: "enabled" } });
+});
+
+test("direct Z.AI GLM-5.3 preserves provider defaults and a valid inbound effort", () => {
+  const base = { model: "glm-5.3" };
+  maps.applyProviderReasoningControls(base, { modelId: base.model, baseUrl: zaiCodingPlan, parameters: [] });
+  assert.deepEqual(base, { model: "glm-5.3" });
+  const explicit = { model: "glm-5.3", reasoning_effort: "high" };
+  maps.applyProviderReasoningControls(explicit, { modelId: explicit.model, baseUrl: zaiCodingPlan, parameters: [] });
+  assert.deepEqual(explicit, { model: "glm-5.3", reasoning_effort: "high", thinking: { type: "enabled" } });
+});
+
+test("the direct Z.AI GLM-5.3 rule preserves Off for GLM-5.2 and other endpoints", () => {
+  const cases = [["glm-5.2", zaiCodingPlan], ["glm-5.3", "https://example.test/v1"]] as const;
+  for (const [model, baseUrl] of cases) {
+    const body = { model };
+    maps.applyProviderReasoningControls(body, {
+      modelId: model, baseUrl, parameters: [{ id: "thinking", value: "false" }],
+    });
+    assert.deepEqual(body, { model, thinking: { type: "disabled" } });
+  }
+});
+
 test("GLM maps do not default to fast true", () => {
   const body: Record<string, unknown> = { model: "glm-5.3-flash" };
   const result = maps.applyProviderReasoningControls(body, {

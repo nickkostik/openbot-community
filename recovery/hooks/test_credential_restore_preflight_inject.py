@@ -48,6 +48,8 @@ try {
         writer.exec('CREATE TABLE transcript_entries (seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)');
         if (request.scenario.wal) writer.exec('PRAGMA wal_checkpoint(TRUNCATE)');
         const insert = writer.prepare('INSERT INTO transcript_entries(seq,id,entry) VALUES(?,?,?)');
+        // Let the fixture insert report an unsafe lastInsertRowid without rounding it.
+        insert.setReadBigInts(true);
         for (const row of request.scenario.rows || [])
           insert.run(row.seq, row.id, row.raw !== undefined ? row.raw : JSON.stringify(row.entry));
         if (request.scenario.trigger) writer.exec('CREATE TRIGGER test_metadata_trigger AFTER INSERT ON transcript_entries BEGIN SELECT 1; END');

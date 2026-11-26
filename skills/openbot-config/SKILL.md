@@ -76,6 +76,8 @@ Canonical model IDs are `providerId:slug`; plan wildcard compatibility uses the 
 
 Reasoning order is `default · none · low · medium · high · xhigh · max`. Use only the routed model's supported levels; `default` differs from clearing a choice. Default output budget is 65536 with operational ceiling 131072; published output/context metadata is separate and does not authorize raising caps. Do not default to 8192 or force GLM `fast: true`.
 
+Direct Z.AI GLM-5.3 and GLM-5.3 Flash keep thinking enabled. Use Default or a supported `low`, `high` or `max` effort on these routes. [Direct Z.AI GLM-5.3 reasoning](reference.md#direct-zai-glm-53-reasoning).
+
 Use provider-scoped model discovery/catalog refresh. Do not borrow another origin's protocol/limits or merge accounts. Automatic refresh preserves mode/default, bot choices and existing routes; selected efforts hold an incompatible proposed allow-list. [Model schema and bot overrides](reference.md#models-and-bot-overrides). When authorized to maximize context, set only each existing model row’s `contextTokens` to its verified route/provider published maximum, including million-token windows; keep unknown limits unverified and unchanged. Keep working-window guidance and output budgets separate. In Official, edit the saved plan atomically; `upsert-model`/`use-model` activate Custom. Preserve all other settings; the hop hot-reads the JSON without a host restart. [Context-only procedure](reference.md#maximize-verified-model-context).
 
 ## Preserve identities during authorized recovery

@@ -19,6 +19,7 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
+var { isZaiGlm53Route } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
 
@@ -1976,7 +1977,13 @@ async function handleCompletionsInner(req, res) {
       // normal provider maps and protocol converter then serialize it.
       delete body.reasoning_effort;
       delete body.reasoning;
-      delete body.thinking;
+      if (isZaiGlm53Route(route.model.slug, route.provider.origin) && isRecord(body.thinking)
+          && typeof body.thinking.clear_thinking === "boolean") {
+        // This setting controls prior reasoning history independently of effort.
+        body.thinking = { clear_thinking: body.thinking.clear_thinking };
+      } else {
+        delete body.thinking;
+      }
       delete body.enable_thinking;
       if (isRecord(body.output_config)) {
         body.output_config = Object.assign({}, body.output_config);

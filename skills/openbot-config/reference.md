@@ -270,6 +270,14 @@ Only boolean false opts out; absent/malformed policy enables six-hour discovery.
 
 Refresh uses at most two direct provider calls concurrently and only existing credentials/accounts. It reads latest authority after awaits, preserves removed/changed accounts, default/bot settings/protocols/parameters and never deletes routes omitted by discovery. Explicit context stays; derived context may refresh. Saved output caps never rise and can fall to a smaller positive published limit. A new effort list excluding a selected bot/model effort is held. Plan merge is serialized and compare-checked; no reconcile or bounce.
 
+### Direct Z.AI GLM-5.3 reasoning
+
+The hop applies this reasoning map to `glm-5.3` and `glm-5.3-flash` on the `https://api.z.ai/api/paas/v4` standard base and the `https://api.z.ai/api/coding/paas/v4` Coding Plan base, with an optional trailing slash. Use Chat Completions. Z.AI requires thinking to be enabled and accepts `low`, `high` and `max` for these models. [Z.AI Chat Completion API reference](https://docs.z.ai/api-reference/llm/chat-completion).
+
+A supported selected effort sets `reasoning_effort` on the outgoing request and takes priority over any incoming value. The map ignores legacy Fast and Off settings on these routes. It preserves a supported incoming effort when no supported effort is selected, and removes an unsupported `reasoning_effort` so the provider default can apply.
+
+If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.

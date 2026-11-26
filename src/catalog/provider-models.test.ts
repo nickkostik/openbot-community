@@ -74,6 +74,38 @@ test("direct Kimi Code discovery applies the documented K3.1 Pro efforts", async
   }
 });
 
+test("direct NVIDIA lists expose documented Nemotron reasoning and preserve other models", async () => {
+  const origin = "https://integrate.api.nvidia.com/v1";
+  const entries = [
+    "nvidia/nemotron-3.5-bolt-e4b", "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3-super-120b-a12b",
+  ].map(id => ({ id, context_length: 128000 }));
+  const catalog = makeCatalog([
+    { id: "first", name: "First", origin }, { id: "second", name: "Second", origin },
+    { id: "other", name: "Other", origin: "https://example.test/v1" },
+  ]);
+  for (const provider of catalog.providers) {
+    const response = await fetchModelsForProvider({
+      providerId: provider.id, catalog,
+      secretStore: makeSecrets({ first: "fixture-first", second: "fixture-second", other: "fixture-other" }),
+      fetchFn: async (url, options) => {
+        assert.equal(url, modelsUrl(provider.origin));
+        assert.equal(new Headers(options?.headers).get("authorization"), "Bearer fixture-" + provider.id);
+        return jsonResponse(200, { data: entries });
+      },
+    });
+    assert.equal(response.status, 200);
+    const models = (response.body as { models: { reasoningLevels: string[]; apiType?: string; contextLength: number; maxOutputTokens: number | null }[] }).models;
+    const toggle = ["default", "none", "on"];
+    const expected = provider.id === "other" ? [[], [], [], []] : [toggle, toggle, ["default", "none", "low", "high"], []];
+    assert.deepEqual(models.map(model => model.reasoningLevels), expected);
+    assert.deepEqual(models.map(model => model.apiType), provider.id === "other"
+      ? [undefined, undefined, undefined, undefined] : ["chat-completions", "chat-completions", "chat-completions", undefined]);
+    assert.ok(models.every(model => model.contextLength === 128000));
+    assert.equal(models[1]?.maxOutputTokens, provider.id === "other" ? null : 32768);
+  }
+});
+
 test("normalizeProviderModels drops entries without an id as skipped", () => {
   const result = normalizeProviderModels({
     data: [

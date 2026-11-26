@@ -5,6 +5,7 @@ import {
   DEFAULT_REASONING_LEVELS,
   makeModel,
   modelSupportsChat,
+  parseMaxOutputTokens,
   parseModelType,
 } from "../domain/model.ts";
 import { parseModelId, parseModelSlug } from "../supervisor/plan.ts";
@@ -13,7 +14,7 @@ import { parseProviderId, parseSecretBytes } from "../supervisor/secrets.ts";
 import { customBoxFromCatalog, officialBox, parseExposeToken, parseUpstreamOrigin, slugify } from "./argv.ts";
 import { normalizeProviderCredential } from "../supervisor/credential-import.ts";
 import { isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
-import { canonicalKimiCodeProEffort, kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
+import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 import { readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 export type ModelLimitsInput = {
@@ -256,17 +257,18 @@ function modelFromLimits(input: {
   limits: ModelLimitsInput;
 }): Model {
   const existing = input.existing;
-  const kimiLevels = kimiCodeProReasoningLevels(input.slug, input.provider.origin);
+  const policy = documentedReasoningPolicy(input.slug, input.provider.origin);
   const requestedEffort = input.limits.activeReasoning ?? existing?.activeReasoning ?? "default";
+  const outputLimit = input.limits.maxOutputTokens ?? existing?.maxOutputTokens ?? HIGH_AGENT_MAX_TOKENS;
   return makeModel({
     id: input.id,
     providerId: input.provider.id,
     slug: input.slug,
     contextTokens: input.limits.contextTokens ?? existing?.contextTokens ?? DEFAULT_CONTEXT_TOKENS,
-    maxOutputTokens: input.limits.maxOutputTokens ?? existing?.maxOutputTokens ?? HIGH_AGENT_MAX_TOKENS,
-    reasoningLevels: kimiLevels ?? input.limits.reasoningLevels ?? existing?.reasoningLevels ?? DEFAULT_REASONING_LEVELS,
+    maxOutputTokens: policy?.maxOutputTokens ? Math.min(parseMaxOutputTokens(outputLimit), policy.maxOutputTokens) : outputLimit,
+    reasoningLevels: policy?.levels ?? input.limits.reasoningLevels ?? existing?.reasoningLevels ?? DEFAULT_REASONING_LEVELS,
     modalities: input.limits.modalities ?? existing?.modalities ?? DEFAULT_MODALITIES,
-    activeReasoning: kimiLevels ? canonicalKimiCodeProEffort(requestedEffort) ?? "default" : requestedEffort,
+    activeReasoning: policy ? documentedReasoningEffort(policy, requestedEffort) ?? "default" : requestedEffort,
     parameters: existing?.parameters ?? [],
     apiType: input.limits.apiType ?? existing?.apiType,
     modelType: parseModelType(input.limits.modelType) ?? existing?.modelType,

@@ -85,6 +85,58 @@ test("the direct Z.AI GLM-5.3 rule preserves Off for GLM-5.2 and other endpoints
 
 const alibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
+test("direct Nemotron Bolt and Lightning use the native thinking switch", () => {
+  const baseUrl = "https://integrate.api.nvidia.com/v1";
+  for (const modelId of ["nvidia/nemotron-3.5-bolt-e4b", "nvidia/nemotron-3.5-lightning-30b-a3b"]) {
+    const template = { enable_thinking: true, reasoning_budget: 256 };
+    const request = { model: modelId, reasoning_effort: "high", thinking: { type: "enabled" }, chat_template_kwargs: template };
+    for (const [id, value, expected] of [
+      ["thinking", "false", false], ["effort", "on", true], ["effort", "medium", true],
+    ] as const) {
+      const body = { ...request };
+      maps.applyProviderReasoningControls(body, { modelId, baseUrl, parameters: [{ id, value }] });
+      assert.deepEqual(body, { model: modelId, chat_template_kwargs: { enable_thinking: expected, reasoning_budget: 256 } });
+    }
+    assert.deepEqual(template, { enable_thinking: true, reasoning_budget: 256 });
+    const defaultBody = { model: modelId };
+    maps.applyProviderReasoningControls(defaultBody, { modelId, baseUrl, parameters: [] });
+    assert.deepEqual(defaultBody, { model: modelId });
+  }
+});
+
+test("direct Nemotron Super VL only sends its supported reasoning effort", () => {
+  const modelId = "nvidia/nemotron-3.5-super-vl-120b-a12b";
+  for (const [id, value, expected] of [
+    ["thinking", "false", "none"], ["effort", "low", "low"],
+    ["effort", "high", "high"], ["effort", "medium", "low"],
+  ] as const) {
+    const body = {
+      model: modelId, enable_thinking: false, reasoning: { effort: "medium" },
+      chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
+    };
+    maps.applyProviderReasoningControls(body, {
+      modelId, baseUrl: "https://integrate.api.nvidia.com/", parameters: [{ id, value }],
+    });
+    assert.deepEqual(body, {
+      model: modelId, reasoning_effort: expected, chat_template_kwargs: { preserve_thinking: true },
+    });
+  }
+  const external = { model: modelId };
+  maps.applyProviderReasoningControls(external, {
+    modelId, baseUrl: "https://example.test/v1", parameters: [{ id: "thinking", value: "false" }],
+  });
+  assert.deepEqual(external, { model: modelId, thinking: { type: "disabled" } });
+});
+
+test("hosted Lightning caps output at 32768 even at the default reasoning setting", () => {
+  const modelId = "nvidia/nemotron-3.5-lightning-30b-a3b";
+  for (const [limit, expected] of [[65536, 32768], [8192, 8192]]) {
+    const body = { model: modelId, max_tokens: limit };
+    maps.applyProviderReasoningControls(body, { modelId, baseUrl: "https://integrate.api.nvidia.com/v1", parameters: [] });
+    assert.equal(body.max_tokens, expected);
+  }
+});
+
 test("Alibaba Token Plan sends its native Off setting for Qwen 3.8 and Qwen4 Max", () => {
   for (const model of ["qwen3.8-max", "qwen3.8-flash", "qwen4-max"]) {
     const body: Record<string, unknown> = {

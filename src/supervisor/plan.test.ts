@@ -22,6 +22,27 @@ test("saved Kimi Code Pro routes display documented efforts and keep valid choic
   assert.ok(read.models.every(row => row.contextTokens === 262144 && row.maxOutputTokens === 8192));
 });
 
+test("NVIDIA saved reasoning choices normalize by hosted model without changing its limits", () => {
+  const origin = "https://integrate.api.nvidia.com/v1";
+  const providers = [{ id: "first", origin }, { id: "second", origin }, { id: "other", origin: "https://example.test/v1" }];
+  const models = [
+    ["first", "nvidia/nemotron-3.5-bolt-e4b", "medium"],
+    ["second", "nvidia/nemotron-3.5-lightning-30b-a3b", "none"],
+    ["first", "nvidia/nemotron-3.5-super-vl-120b-a12b", "medium"],
+    ["other", "nvidia/nemotron-3.5-bolt-e4b", "medium"],
+  ].map(([providerId, slug, activeReasoning]) => ({
+    id: providerId + ":" + slug, providerId, slug, activeReasoning,
+    reasoningLevels: ["default", "none", "medium"], contextTokens: 256000, maxOutputTokens: 16000,
+  }));
+  const raw = JSON.stringify({ kind: "custom", catalog: { providers, models, bindings: [] } });
+  const read = catalogFromPlanJson(raw);
+  assert.deepEqual(read.models.map(row => row.activeReasoning), ["on", "none", "low", "medium"]);
+  assert.deepEqual(read.models.map(row => row.reasoningLevels), [
+    ["default", "none", "on"], ["default", "none", "on"], ["default", "none", "low", "high"], ["default", "none", "medium"],
+  ]);
+  assert.ok(read.models.every(row => row.contextTokens === 256000 && row.maxOutputTokens === 16000));
+});
+
 test("catalogFromPlanJson fills model limits on old plan JSON", () => {
   const catalog = catalogFromPlanJson(
     JSON.stringify({

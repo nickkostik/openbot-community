@@ -5,7 +5,7 @@ import { secretFor, type SecretStore } from "../supervisor/secrets.ts";
 import { fetchedReasoningLevels, mapVendorEffort } from "./reasoning-efforts.ts";
 import { documentedOpenAIModel } from "../domain/openai-models.ts";
 import { isOpenCodeGoConsoleOrigin, isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
-import { kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
+import { documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 import { ORIGIN as CHATGPT_PLAN_ORIGIN, isDirectOrigin, readCredential as readChatGPTPlanCredential } from "../../payload/chatgpt-plan.cjs";
 
 /**
@@ -460,8 +460,13 @@ export async function fetchModelsForProvider(input: {
   let nativeOpenAI = false;
   try { nativeOpenAI = new URL(provider.origin).hostname === "api.openai.com"; } catch { /* Reported during fetch above. */ }
   const models = result.models.map((model) => {
-    const kimiLevels = kimiCodeProReasoningLevels(model.id, provider.origin);
-    if (kimiLevels) return { ...model, reasoningLevels: [...kimiLevels] };
+    const policy = documentedReasoningPolicy(model.id, provider.origin);
+    if (policy) return {
+      ...model,
+      reasoningLevels: [...policy.levels],
+      ...(policy.maxOutputTokens ? { maxOutputTokens: Math.min(model.maxOutputTokens ?? Infinity, policy.maxOutputTokens) } : {}),
+      ...(policy.kind !== "kimi-code-pro" ? { apiType: "chat-completions" as const } : {}),
+    };
     if (!nativeOpenAI) return model;
     const facts = documentedOpenAIModel(model.id);
     return {

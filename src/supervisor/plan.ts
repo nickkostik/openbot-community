@@ -10,7 +10,7 @@ import {
   type ModelSlug,
 } from "../domain/types.ts";
 import { makeModel, normalizeModel } from "../domain/model.ts";
-import { canonicalKimiCodeProEffort, kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
+import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 
 export type CompiledAgent = {
   readonly modelId: ModelSlug;
@@ -79,9 +79,10 @@ export function normalizeCatalog(catalog: Catalog): Catalog {
   for (const row of catalog.models) {
     const model = normalizeModel(row);
     if (!model) continue;
-    const reasoningLevels = kimiCodeProReasoningLevels(model.slug, origins.get(model.providerId) ?? "");
-    models.push(reasoningLevels ? makeModel({ ...model, reasoningLevels,
-      activeReasoning: canonicalKimiCodeProEffort(row.activeReasoning) ?? "default" }) : model);
+    const policy = documentedReasoningPolicy(model.slug, origins.get(model.providerId) ?? "");
+    models.push(policy ? makeModel({ ...model, reasoningLevels: policy.levels,
+      maxOutputTokens: Math.min(model.maxOutputTokens, policy.maxOutputTokens ?? Infinity),
+      activeReasoning: documentedReasoningEffort(policy, row.activeReasoning) ?? "default" }) : model);
   }
   return {
     providers: catalog.providers.map((provider) => ({

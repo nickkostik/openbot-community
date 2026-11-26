@@ -3,9 +3,9 @@
  * Single source of truth for the UI's view of `/api/state`, `/api/save`,
  * the log endpoints, and the §8 model-fetch/catalog endpoints.
  */
-import type { ModelType } from "../../../src/domain/types.ts";
+import type { ModelType, ReasoningLevel } from "../../../src/domain/types.ts";
 
-export type ReasoningLevel = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type { ReasoningLevel };
 export type Modality = "text" | "image" | "video" | "audio";
 export type LogChannel = "hop" | "official" | "custom-host";
 export type LogChannelFilter = "official" | "custom";
@@ -13,6 +13,7 @@ export type LogChannelFilter = "official" | "custom";
 export const REASONING_LEVELS: readonly ReasoningLevel[] = [
   "default",
   "none",
+  "on",
   "minimal",
   "low",
   "medium",

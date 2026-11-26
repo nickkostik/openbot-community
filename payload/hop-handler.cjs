@@ -19,7 +19,7 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
-var { canonicalKimiCodeProEffort, isZaiGlm53Route, kimiCodeProReasoningLevels } = require("./provider-maps.cjs");
+var { documentedReasoningEffort, documentedReasoningPolicy, isZaiGlm53Route } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
 var chatGPTPlan = require("./chatgpt-plan.cjs");
@@ -2005,15 +2005,17 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 400, unsupported);
       return;
     }
+    var reasoningPolicy = documentedReasoningPolicy(route.model.slug, route.provider.origin);
     var botReasoning = botSettings && botModels.resolveReasoning(body && body.messages, route.model, botSettings);
-    if (botReasoning && kimiCodeProReasoningLevels(route.model.slug, route.provider.origin)) {
-      var kimiBotEffort = canonicalKimiCodeProEffort(botReasoning.reasoningEffort);
-      if (kimiBotEffort) botReasoning.reasoningEffort = kimiBotEffort;
-      botReasoning.stale = !kimiBotEffort && botReasoning.reasoningEffort !== "default";
+    if (botReasoning && reasoningPolicy) {
+      var effectiveEffort = documentedReasoningEffort(reasoningPolicy, botReasoning.reasoningEffort);
+      if (effectiveEffort) botReasoning.reasoningEffort = effectiveEffort;
+      botReasoning.stale = !effectiveEffort;
     }
     if (botReasoning && !botReasoning.stale) {
       route = Object.assign({}, route, { model: Object.assign({}, route.model, {
         activeReasoning: botReasoning.reasoningEffort,
+        reasoningLevels: reasoningPolicy ? reasoningPolicy.levels : route.model.reasoningLevels,
         // Legacy fast mode disables thinking before the effort map runs.
         // An explicit bot effort must win over that model-wide shortcut.
         parameters: Array.isArray(route.model.parameters) ? route.model.parameters.filter(function (p) { return p && p.id !== "fast"; }) : [],
@@ -2030,6 +2032,12 @@ async function handleCompletionsInner(req, res) {
         delete body.thinking;
       }
       delete body.enable_thinking;
+      if (reasoningPolicy && reasoningPolicy.kind !== "kimi-code-pro" && isRecord(body.chat_template_kwargs)) {
+        body.chat_template_kwargs = Object.assign({}, body.chat_template_kwargs);
+        delete body.chat_template_kwargs.enable_thinking;
+        delete body.chat_template_kwargs.reasoning_effort;
+        if (!Object.keys(body.chat_template_kwargs).length) delete body.chat_template_kwargs;
+      }
       if (isRecord(body.output_config)) {
         body.output_config = Object.assign({}, body.output_config);
         delete body.output_config.effort;

@@ -18,24 +18,37 @@ var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
 var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
-var KIMI_CODE_PRO_LEVELS = Object.freeze(["default", "low", "high", "max"]);
-var KIMI_CODE_PRO_EFFORTS = Object.freeze({
-  low: "low", minimum: "low", light: "low",
-  high: "high", medium: "high",
-  max: "max", xhigh: "max", ultra: "max",
+var KIMI_CODE_PRO = Object.freeze({
+  kind: "kimi-code-pro",
+  levels: Object.freeze(["default", "low", "high", "max"]),
+  aliases: Object.freeze({ minimum: "low", light: "low", medium: "high", xhigh: "max", ultra: "max" }),
+});
+var NVIDIA_NEMOTRON_TOGGLE = Object.freeze({
+  kind: "nvidia-nemotron-toggle",
+  levels: Object.freeze(["default", "none", "on"]),
+  aliases: Object.freeze({ minimal: "on", low: "on", medium: "on", high: "on", xhigh: "on", max: "on" }),
+});
+var NVIDIA_LIGHTNING = Object.freeze(Object.assign({}, NVIDIA_NEMOTRON_TOGGLE, { maxOutputTokens: 32768 }));
+var NVIDIA_SUPER_VL = Object.freeze({
+  kind: "nvidia-super-vl",
+  levels: Object.freeze(["default", "none", "low", "high"]),
+  aliases: Object.freeze({ minimal: "low", medium: "low", on: "high", xhigh: "high", max: "high" }),
 });
 
-function canonicalKimiCodeProEffort(value) {
-  return typeof value === "string" && Object.prototype.hasOwnProperty.call(KIMI_CODE_PRO_EFFORTS, value)
-    ? KIMI_CODE_PRO_EFFORTS[value] : undefined;
+function documentedReasoningEffort(policy, value) {
+  if (typeof value !== "string") return undefined;
+  if (policy.levels.includes(value)) return value;
+  return Object.hasOwn(policy.aliases, value) ? policy.aliases[value] : undefined;
 }
 
-function kimiCodeProReasoningLevels(modelId, baseUrl) {
-  if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(String(baseUrl || ""))
-      && /^k3\.1-pro(?:-highspeed)?$/.test(String(modelId || ""))) {
-    return KIMI_CODE_PRO_LEVELS;
+function documentedReasoningPolicy(modelId, baseUrl) {
+  if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(baseUrl) && /^k3\.1-pro(?:-highspeed)?$/.test(modelId)) {
+    return KIMI_CODE_PRO;
   }
-  return undefined;
+  if (!/^https:\/\/integrate\.api\.nvidia\.com(?:\/v1)?\/*$/i.test(baseUrl)) return undefined;
+  if (modelId === "nvidia/nemotron-3.5-super-vl-120b-a12b") return NVIDIA_SUPER_VL;
+  if (modelId === "nvidia/nemotron-3.5-lightning-30b-a3b") return NVIDIA_LIGHTNING;
+  if (modelId === "nvidia/nemotron-3.5-bolt-e4b") return NVIDIA_NEMOTRON_TOGGLE;
 }
 
 function isGlmRoute(modelId, baseUrl) {
@@ -55,8 +68,9 @@ function thinkingOff(body) {
 }
 
 function applyKimiCodePro(body, parameters) {
-  var effort = canonicalKimiCodeProEffort(param(parameters, "effort")) || canonicalKimiCodeProEffort(body.reasoning_effort);
-  if (effort) body.reasoning_effort = effort;
+  var effort = documentedReasoningEffort(KIMI_CODE_PRO, param(parameters, "effort"))
+    || documentedReasoningEffort(KIMI_CODE_PRO, body.reasoning_effort);
+  if (effort && effort !== "default") body.reasoning_effort = effort;
   else delete body.reasoning_effort;
 
   // Both variants require thinking. Removing an unsupported control lets
@@ -64,7 +78,8 @@ function applyKimiCodePro(body, parameters) {
   if (body.thinking && body.thinking.type === "disabled") delete body.thinking;
   if (body.enable_thinking === false) delete body.enable_thinking;
   if (body.output_config && typeof body.output_config === "object" && !Array.isArray(body.output_config)) {
-    var outputEffort = canonicalKimiCodeProEffort(body.output_config.effort);
+    var outputEffort = documentedReasoningEffort(KIMI_CODE_PRO, body.output_config.effort);
+    if (outputEffort === "default") outputEffort = undefined;
     var output = body.output_config;
     if (outputEffort !== body.output_config.effort) {
       output = Object.assign({}, body.output_config);
@@ -75,6 +90,36 @@ function applyKimiCodePro(body, parameters) {
     else delete body.output_config;
   }
   return body.reasoning_effort === undefined ? "kimi-code-pro-default" : "kimi-code-pro-effort";
+}
+
+function applyNvidiaNemotron(body, parameters, policy) {
+  if (policy.maxOutputTokens && body.max_tokens > policy.maxOutputTokens) body.max_tokens = policy.maxOutputTokens;
+  var thinking = param(parameters, "thinking");
+  var effort = thinking === false || thinking === "false" ? "none"
+    : documentedReasoningEffort(policy, param(parameters, "effort"))
+      || documentedReasoningEffort(policy, body.reasoning_effort);
+
+  // Direct Nemotron uses a template switch or a documented Super VL enum.
+  // Remove controls carried over from another protocol before applying it.
+  delete body.thinking;
+  delete body.enable_thinking;
+  delete body.reasoning;
+  delete body.reasoning_effort;
+  if (!effort || effort === "default") return policy.kind;
+
+  var previous = body.chat_template_kwargs;
+  var options = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? Object.assign({}, previous) : {};
+  delete options.reasoning_effort;
+  if (policy.kind === "nvidia-nemotron-toggle") {
+    options.enable_thinking = effort === "on";
+  } else {
+    delete options.enable_thinking;
+    body.reasoning_effort = effort;
+  }
+  if (Object.keys(options).length) body.chat_template_kwargs = options;
+  else delete body.chat_template_kwargs;
+  return policy.kind;
 }
 
 function applyZaiGlm53(body, parameters) {
@@ -177,9 +222,11 @@ function applyProviderReasoningControls(body, ctx) {
   ctx = ctx || {};
   var modelId = String(ctx.modelId || "");
   var baseUrl = String(ctx.baseUrl || "");
-  if (kimiCodeProReasoningLevels(modelId, baseUrl)) {
+  var documented = documentedReasoningPolicy(modelId, baseUrl);
+  if (documented === KIMI_CODE_PRO) {
     return applyKimiCodePro(body, ctx.parameters);
   }
+  if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
@@ -196,8 +243,8 @@ function applyProviderReasoningControls(body, ctx) {
 }
 
 module.exports = {
-  canonicalKimiCodeProEffort: canonicalKimiCodeProEffort,
-  kimiCodeProReasoningLevels: kimiCodeProReasoningLevels,
+  documentedReasoningPolicy: documentedReasoningPolicy,
+  documentedReasoningEffort: documentedReasoningEffort,
   applyProviderReasoningControls: applyProviderReasoningControls,
   isGlmRoute: isGlmRoute,
   isZaiGlm53Route: isZaiGlm53Route,

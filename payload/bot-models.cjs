@@ -80,7 +80,7 @@ function resolveReasoning(messages, model, settings) {
   var reasoning = (settings || readBotSettings()).reasoning;
   var choices = reasoning[botId] || reasoning[botId.toLowerCase()];
   var effort = choices && Object.prototype.hasOwnProperty.call(choices, model.id) ? choices[model.id] : undefined;
-  if (["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"].indexOf(effort) < 0) return undefined;
+  if (["default", "none", "on", "minimal", "low", "medium", "high", "xhigh", "max"].indexOf(effort) < 0) return undefined;
   var levels = Array.isArray(model.reasoningLevels) && model.reasoningLevels.length ? model.reasoningLevels : ["default", "none", "low", "medium", "high"];
   return { botId: botId, reasoningEffort: effort, stale: levels.indexOf(effort) < 0 };
 }

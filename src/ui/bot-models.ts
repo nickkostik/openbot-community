@@ -4,7 +4,7 @@ import type http from "node:http";
 import { DEFAULT_REASONING_LEVELS, modelSupportsChat, REASONING_LEVELS } from "../domain/model.ts";
 import type { Catalog, ReasoningLevel } from "../domain/types.ts";
 import type { SupervisorDeps } from "../supervisor/observe.ts";
-import { canonicalKimiCodeProEffort, kimiCodeProReasoningLevels } from "../../payload/provider-maps.cjs";
+import { documentedReasoningEffort, documentedReasoningPolicy } from "../../payload/provider-maps.cjs";
 
 const EFFORTS: readonly string[] = REASONING_LEVELS;
 type Settings = { assignments: Record<string, string>; reasoning: Record<string, Record<string, ReasoningLevel>>; raw: Record<string, unknown> };
@@ -42,13 +42,12 @@ function writeSettings(current: SupervisorDeps, settings: Settings): void {
 
 function visibleReasoning(reasoning: Settings["reasoning"], catalog: Catalog): Settings["reasoning"] {
   const origins = new Map(catalog.providers.map(provider => [provider.id, provider.origin]));
-  const kimiIds = new Set<string>(catalog.models
-    .filter(model => kimiCodeProReasoningLevels(model.slug, origins.get(model.providerId) ?? ""))
-    .map(model => model.id));
-  if (kimiIds.size === 0) return reasoning;
+  const policies = new Map(catalog.models.map(model =>
+    [String(model.id), documentedReasoningPolicy(model.slug, origins.get(model.providerId) ?? "")] as const));
   return Object.fromEntries(Object.entries(reasoning).map(([botId, choices]) => {
     const effective = Object.entries(choices).map(([modelId, effort]) => {
-      return [modelId, kimiIds.has(modelId) ? canonicalKimiCodeProEffort(effort) ?? effort : effort];
+      const policy = policies.get(modelId);
+      return [modelId, policy ? documentedReasoningEffort(policy, effort) ?? effort : effort];
     });
     return [botId, Object.fromEntries(effective)];
   }));

@@ -17,6 +17,7 @@ export const MAX_TOKEN_CAP = 10_000_000 as const;
 export const REASONING_LEVELS: readonly ReasoningLevel[] = [
   "default",
   "none",
+  "on",
   "minimal",
   "low",
   "medium",

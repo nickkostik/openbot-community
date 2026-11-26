@@ -51,13 +51,14 @@ test("parseReasoningLevels prepends default on old catalogs", () => {
 test("REASONING_LEVELS orders minimal before low and xhigh before max", () => {
   assert.deepEqual(
     [...REASONING_LEVELS],
-    ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    ["default", "none", "on", "minimal", "low", "medium", "high", "xhigh", "max"],
   );
   assert.deepEqual(
     keepReasoningOrder(new Set(["max", "xhigh", "high", "default"])),
     ["default", "high", "xhigh", "max"],
   );
   assert.deepEqual(parseReasoningLevels(["max", "low", "minimal", "xhigh", "high"]), ["default", "minimal", "low", "high", "xhigh", "max"]);
+  assert.deepEqual(parseReasoningLevels(["on", "none"]), ["default", "none", "on"]);
 });
 
 test("parsePositiveTokens rejects zero, negative, and oversized values", () => {

@@ -269,7 +269,7 @@ Illustrative minimal plan; choose actual provider-supported models/limits privat
 
 `model.id` and bindings use canonical `providerId:slug`; wildcard `agents["*"].modelId` is the slug with its provider ID. Keep compatibility fields in sync. Model protocol overrides provider default, except mandatory native OpenAI/OAuth Responses. Preserve parameters and explicit protocols through edits. Invalid/missing plan yields hop 503, not authority to erase state.
 
-Reasoning order is `default, none, minimal, low, medium, high, xhigh, max`. Keep `default` and apply only supported levels. Operational output defaults to 65536, ceiling 131072; generic context defaults to 128000. Provider/model facts can differ. Do not default to 8192 or GLM fast mode. `parameters` are `{id:string,value:string}[]`; supported explicit bot effort clears conflicting inbound/legacy fast reasoning only for the request, not saved plan.
+Reasoning order is `default, none, on, minimal, low, medium, high, xhigh, max`. Keep `default` and apply only supported levels. Operational output defaults to 65536, ceiling 131072; generic context defaults to 128000. Provider/model facts can differ. Do not default to 8192 or GLM fast mode. `parameters` are `{id:string,value:string}[]`; supported explicit bot effort clears conflicting inbound/legacy fast reasoning only for the request, not saved plan.
 
 Use `minimal` where the routed model advertises it. Catalog normalization keeps it separate from `low`, while the legacy vendor shorthand `min` maps to `low`. The generic fallback remains `default, none, low, medium, high`. Generic Chat Completions sends the selected `reasoning_effort`, and the Responses converter carries it in `reasoning.effort`.
 
@@ -366,6 +366,15 @@ This policy applies to the model IDs `k3.1-pro` and `k3.1-pro-highspeed` on `htt
 OpenBot offers Default, Low, High and Max. The same allow-list applies to direct discovery, provider-scoped catalog lookups for the route, effective choices read from an older saved plan, and manual model imports. This takes priority when a catalog advertises Off. Existing supported selections are retained. An unsupported active effort in an older row resolves to Default when OpenBot reads the catalog.
 
 On the matching route, a selected Low, High or Max supplies the outgoing `reasoning_effort`. If there is no selected supported effort, a supported incoming value can still apply. The hop drops unsupported values from `reasoning_effort` and `output_config.effort`, removes `thinking.type: "disabled"` or `enable_thinking: false`, and keeps other output configuration. With no supported effort left, Kimi applies its default. K3 and routes at other origins use their existing provider behavior.
+
+### Direct NVIDIA Nemotron 3.5 reasoning
+
+The policy applies to these three Chat Completions models at `https://integrate.api.nvidia.com/v1`. The host-only base and trailing slashes are also accepted. Direct discovery, provider-scoped catalog lookup, manual imports and effective saved settings use the model's supported choices.
+
+- `nvidia/nemotron-3.5-bolt-e4b` and `nvidia/nemotron-3.5-lightning-30b-a3b` offer Default, Off and On. Off and On send `chat_template_kwargs.enable_thinking` as `false` and `true`, respectively. Legacy positive model and per-bot efforts resolve to On. For hosted Lightning, OpenBot caps outgoing `max_tokens` and the effective output cap shown in Models at 32,768, honoring lower manually configured caps. [NVIDIA Bolt E4B API reference](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-bolt-e4b-infer), [NVIDIA Lightning API reference](https://build.nvidia.com/nvidia/nemotron-3.5-lightning-30b-a3b/apireference).
+- `nvidia/nemotron-3.5-super-vl-120b-a12b` offers Default, Off, Low and High. OpenBot sends top-level `reasoning_effort` of `none`, `low` or `high` for explicit choices. Legacy Minimal and Medium resolve to Low. On, Extra high and Max resolve to High. [NVIDIA Super VL API reference](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-super-vl-120b-a12b-infer).
+
+Default adds no new reasoning control. NVIDIA supplies the model's default when the request has no supported control. An explicit choice uses the native control above and preserves unrelated template options.
 
 ### Maximize verified model context
 

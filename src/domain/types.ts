@@ -70,7 +70,7 @@ export type ProviderParameter = { readonly id: string; readonly value: string };
 export type ApiType = "chat-completions" | "responses" | "anthropic";
 
 /** default = omit thinking fields. none = send an explicit off. */
-export type ReasoningLevel = "default" | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningLevel = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Modality = "text" | "image" | "video" | "audio";
 
@@ -97,8 +97,11 @@ export type Provider = {
   readonly apiType?: ApiType;
 };
 
+export type ModelType = "chat" | "embedding" | "decision" | "image" | "other";
+
 export type Model = {
   readonly apiType?: ApiType;
+  readonly modelType?: ModelType;
   readonly id: ModelId;
   readonly providerId: ProviderId;
   readonly slug: ModelSlug;

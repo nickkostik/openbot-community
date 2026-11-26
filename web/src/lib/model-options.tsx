@@ -3,12 +3,13 @@ import type { BoxState, Model } from "../api/types";
 import { formatTokens } from "./format";
 import { hasKey } from "../api/client";
 import type { ListboxGroup } from "../components/Listbox";
+import { modelSupportsChat } from "../../../src/domain/model.ts";
 
 export function modelGroupsForState(state: BoxState, models: readonly Model[] = state.models): ListboxGroup[] {
   return state.providers.map((provider) => ({
     label: provider.name,
     options: models
-      .filter((model) => model.providerId === provider.id)
+      .filter((model) => model.providerId === provider.id && modelSupportsChat(model))
       .map((model) => ({
         value: model.id,
         label: model.slug,

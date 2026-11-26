@@ -1,8 +1,10 @@
 import { REASONING_LEVELS, type BoxState, type Model, type ReasoningLevel } from "../api/types.ts";
 import { labelReasoning } from "./format.ts";
+import { modelSupportsChat } from "../../../src/domain/model.ts";
 
 export function botModel(state: Pick<BoxState, "models" | "activeModelId">, assigned?: string): Model | undefined {
-  return state.models.find((model) => model.id === assigned) ?? state.models.find((model) => model.id === state.activeModelId);
+  const models = state.models.filter(modelSupportsChat);
+  return models.find((model) => model.id === assigned) ?? models.find((model) => model.id === state.activeModelId);
 }
 
 export function commonReasoningLevels(models: readonly Model[]): ReasoningLevel[] {

@@ -213,6 +213,18 @@ test("use-model switches the wildcard without dropping providers", () => {
   assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
 });
 
+test("an imported non-chat model remains in the catalog without becoming the active route", () => {
+  const initial = { ...twoProviderCatalog(), models: [], bindings: [] };
+  const added = parseUiProviderSave({ kind: "upsert-model", providerId: "openai", slug: "embedding",
+    modelType: "embedding" }, paths(), initial, { mode: "official" });
+  const saved = catalogAfterSave(added, initial);
+  assert.equal(added.desired.kind, "official");
+  assert.equal(saved.models[0]?.modelType, "embedding");
+  assert.deepEqual(saved.bindings, []);
+  assert.throws(() => parseUiProviderSave({ kind: "use-model", modelId: "openai:embedding" }, paths(), saved),
+    /embedding does not support bot chat/);
+});
+
 test("use-model records the selected reasoning level", () => {
   const parsed = parseUiProviderSave(
     { kind: "use-model", modelId: "openai:gpt-4.1", reasoning: "high" },
@@ -314,6 +326,21 @@ test("remove one provider keeps the other and rebinds if needed", () => {
   assert.equal(parsed.desired.catalog.providers.length, 1);
   assert.equal(parsed.desired.catalog.providers[0]?.id, "openai");
   assert.equal(parsed.desired.catalog.bindings[0]?.modelId, "openai:gpt-4.1");
+});
+
+test("removing the last chat provider keeps the remaining inventory in Official", () => {
+  const original = twoProviderCatalog();
+  const inventoryOnly = {
+    ...original,
+    models: original.models.map((model) => model.providerId === "openai"
+      ? { ...model, modelType: "embedding" as const }
+      : model),
+  };
+  const parsed = parseUiProviderSave({ kind: "remove-provider", providerId: "zhipu" }, paths(), inventoryOnly);
+  assert.equal(parsed.desired.kind, "official");
+  assert.deepEqual(parsed.catalogWrite?.providers.map(row => row.id), ["openai"]);
+  assert.deepEqual(parsed.catalogWrite?.models.map(row => row.modelType), ["embedding"]);
+  assert.deepEqual(parsed.catalogWrite?.bindings, []);
 });
 
 test("set-secret stays custom and never puts the key on DesiredState", () => {
@@ -641,10 +668,16 @@ test("adding a first account does not activate a made-up model or change explici
   }
 });
 
-test("new Go accounts enforce the direct endpoint and Alibaba accounts require Coding Plan keys", () => {
-  const go = { kind: "add-provider", familyId: "opencode-go", name: "OpenCode Go", origin: "https://opencode.ai/zen/go/v1", secret: "fixture-go" };
-  assert.equal(parseUiProviderSave(go, paths(), zhipuCatalog()).createdProviderId, "opencode-go");
-  for (const origin of ["https://n5.example/v1", "https://opencode.ai/zen/v1", "https://other.example/zen/go/v1"]) {
+test("new Go accounts enforce direct Go origins and Alibaba accounts require Coding Plan keys", () => {
+  const go = { kind: "add-provider", familyId: "opencode-go", name: "OpenCode Go", origin: "https://opencode.ai/inference/go", secret: "fixture-go" };
+  for (const origin of [go.origin, `${go.origin}/openai/v1`, `${go.origin}/anthropic/v1`, "https://opencode.ai/zen/go/v1"]) {
+    const saved = parseUiProviderSave({ ...go, origin }, paths(), zhipuCatalog());
+    assert.equal(saved.createdProviderId, "opencode-go");
+    assert.equal(saved.catalogWrite?.providers.find(row => row.id === "opencode-go")?.origin, origin);
+  }
+  for (const origin of ["https://n5.example/v1", "https://opencode.ai/zen/v1", "https://other.example/zen/go/v1",
+    "https://opencode.ai/inference/openai/v1", "https://opencode.ai.example/inference/go", "http://opencode.ai/inference/go",
+    "https://opencode.ai:9443/inference/go"]) {
     assert.throws(() => parseUiProviderSave({ ...go, origin }, paths(), zhipuCatalog()), /Go accounts must use/);
   }
   const alibaba = { kind: "add-provider", familyId: "alibaba-token-plan", name: "Alibaba", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", secret: "sk-sp-plan-fixture" };

@@ -32,7 +32,7 @@ import type {
   SaveResult,
 } from "../api/types";
 import { formatInteger, formatTime, formatTokens, reasoningListLabel } from "../lib/format";
-import { OPENCODE_ZEN_FREE_MODELS, OPENCODE_ZEN_PROVIDER_ID } from "../lib/presets";
+import { hasOpenCodeZenFreeModels, OPENCODE_ZEN_FREE_MODELS } from "../lib/presets";
 import { enrichCatalogModels, modelImportFields, modelRefreshFields } from "../lib/import-models";
 import { navigate } from "../lib/router";
 import { useApp, useBoxState } from "../store";
@@ -42,6 +42,9 @@ import { ConfirmDialog } from "../components/overlays";
 import { EditProviderDialog, ReplaceKeyDialog } from "../components/ProviderDialogs";
 import { Badge, Button, EmptyState, IconButton, ParamChip, Spinner } from "../components/ui";
 import { Listbox } from "../components/Listbox";
+import { modelSupportsChat } from "../../../src/domain/model.ts";
+
+const MODEL_TYPE_LABELS = { chat: "Chat", embedding: "Embedding", decision: "Decision", image: "Image", other: "Other API" };
 
 function usedMessage(result: SaveResult): string {
   const model = result.models.find((m) => m.id === result.activeModelId);
@@ -52,7 +55,7 @@ function usedMessage(result: SaveResult): string {
 }
 
 function fallbackAfterDelete(all: Model[], deleted: Model): Model | undefined {
-  const remaining = all.filter((row) => row.id !== deleted.id);
+  const remaining = all.filter((row) => row.id !== deleted.id && modelSupportsChat(row));
   return remaining.find((row) => row.providerId === deleted.providerId) ?? remaining[0];
 }
 
@@ -323,7 +326,7 @@ export function Models({ providerId }: { providerId?: string }) {
   const removeConsequences = (() => {
     if (!selected) return [];
     const last = providers.length === 1;
-    const survivor = state.models.find((m) => m.id !== state.activeModelId && m.providerId !== selected.id);
+    const survivor = state.models.find((m) => m.id !== state.activeModelId && m.providerId !== selected.id && modelSupportsChat(m));
     const list: string[] = [];
     if (last) {
       list.push("The box returns to Official Grok and the plan file is deleted.");
@@ -450,12 +453,14 @@ export function Models({ providerId }: { providerId?: string }) {
                 <tbody>
                   {models.map((m) => {
                     const isActive = m.id === state.activeModelId;
+                    const chat = modelSupportsChat(m);
                     const rowBusy = refreshingIds.has(m.id);
                     return (
                       <tr key={m.id}>
                         <td className="cell-primary" data-label="Model">
                           <span className="mono">{m.slug}</span>{" "}
-                          {m.providerId === OPENCODE_ZEN_PROVIDER_ID && OPENCODE_ZEN_FREE_MODELS.some((free) => free.id === m.slug) ? <Badge tone="success">Free</Badge> : null}{" "}
+                          {!chat && m.modelType ? <Badge>{MODEL_TYPE_LABELS[m.modelType]}</Badge> : null}{" "}
+                          {hasOpenCodeZenFreeModels(selected) && OPENCODE_ZEN_FREE_MODELS.some((free) => free.id === m.slug) ? <Badge tone="success">Free</Badge> : null}{" "}
                           {isActive ? <Zap style={{ width: 12, height: 12, color: "var(--primary-strong)", verticalAlign: -2 }} aria-hidden="true" /> : null}
                         </td>
                         <td className="mono" data-label="Context" title={m.catalogLimits?.sourceUrl ?? "Configured context; published limit is unknown"}>
@@ -468,28 +473,28 @@ export function Models({ providerId }: { providerId?: string }) {
                           {m.catalogLimits?.outputModalities.length ? <span className="muted"> · {m.catalogLimits.outputModalities.join(" · ")}</span> : null}
                         </td>
                         <td className="mono" data-label="Reasoning" style={{ color: "var(--muted)", fontSize: 11 }}>
-                          {reasoningListLabel(m.reasoningLevels)}
+                          {chat ? reasoningListLabel(m.reasoningLevels) : "—"}
                         </td>
                         <td data-label="Active">
-                          <ParamChip isStatic>{m.activeReasoning}</ParamChip>
+                          {chat ? <ParamChip isStatic>{m.activeReasoning}</ParamChip> : "—"}
                         </td>
                         <td data-label="Modalities">{m.modalities.join(" · ")}</td>
                         <td className="cell-actions" data-label="Actions">
                           <span className="model-row-actions">
-                            {isActive ? (
+                            {chat && (isActive ? (
                               <Badge tone="accent">Active</Badge>
                             ) : (
                               <Button variant="ghost-sm" onClick={() => void useModel(m)}>
                                 Use
                               </Button>
-                            )}
+                            ))}
                             <IconButton
                               label="Refresh from catalog"
                               icon={RefreshCw}
                               loading={rowBusy}
                               onClick={() => void refreshFromCatalog(m)}
                             />
-                            <IconButton label="Edit model" icon={Pencil} onClick={() => setModelDialog({ open: true, model: m })} />
+                            {chat ? <IconButton label="Edit model" icon={Pencil} onClick={() => setModelDialog({ open: true, model: m })} /> : null}
                             <IconButton
                               label={`Remove ${m.slug}`}
                               icon={Trash2}
@@ -518,7 +523,7 @@ export function Models({ providerId }: { providerId?: string }) {
               <Button variant="ghost" icon={Plus} onClick={() => setModelDialog({ open: true, model: null })}>
                 Add model
               </Button>
-              {selected.id === OPENCODE_ZEN_PROVIDER_ID ? (
+              {hasOpenCodeZenFreeModels(selected) ? (
                 <Button
                   variant="ghost"
                   loading={seedBusy}

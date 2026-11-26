@@ -4,6 +4,26 @@ import test from "node:test";
 import { anthropicSseToChat, anthropicToChat, chatToAnthropic, chatToResponses, mapUpstreamError, responsesSseToChat, responsesToChat, resolveApiType } from "./protocol-converters.ts";
 const require = createRequire(import.meta.url);
 const cjsConverters: any = require("../../payload/protocol-converters.cjs");
+const { resolveUpstreamUrl } = require("../../payload/hop-handler.cjs") as {
+  resolveUpstreamUrl(provider: { origin: string }, oauth: boolean, apiType: string): string;
+};
+
+test("all supported Go bases use current protocol-specific Console URLs", () => {
+  const base = "https://opencode.ai/inference/go";
+  const legacy = "https://opencode.ai/zen/go/v1";
+  for (const [apiType, consolePath] of [
+    ["chat-completions", "/openai/v1/chat/completions"],
+    ["responses", "/openai/v1/responses"],
+    ["anthropic", "/anthropic/v1/messages"],
+  ] as const) {
+    for (const origin of [base, `${base}/openai/v1/`, `${base}/anthropic/v1`]) {
+      assert.equal(resolveUpstreamUrl({ origin }, false, apiType), base + consolePath);
+    }
+    assert.equal(resolveUpstreamUrl({ origin: legacy }, false, apiType), base + consolePath);
+  }
+  assert.equal(resolveUpstreamUrl({ origin: "https://provider.example/inference/go" }, false, "responses"),
+    "https://provider.example/inference/go/v1/responses");
+});
 
 test("native modern OpenAI routes retain Responses despite legacy catalog settings", () => {
   for (const slug of ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.3-codex", "gpt-5.6-sol"]) {

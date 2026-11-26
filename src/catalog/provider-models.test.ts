@@ -217,19 +217,89 @@ test("Codex descriptors retain their advertised context and supported efforts", 
   assert.ok(normalized.models[0]?.reasoningLevels.includes("max"));
 });
 
-test("fetch-models reuses a stable OpenCode session across requests", async () => {
-  const catalog = makeCatalog([{ id: "opencode", name: "OpenCode", origin: "https://opencode.ai/zen/v1" }]);
-  const sessions: string[] = [];
-  const fetchFn: FetchLike = async (_url, init) => {
-    sessions.push(init?.headers?.["x-opencode-session"] ?? "");
-    return jsonResponse(200, { data: [{ id: "big-pickle" }] });
+test("fetch-models uses the Go catalog and separate stable sessions for both accounts", async () => {
+  const catalog = makeCatalog([
+    { id: "opencode", name: "Go 1", origin: "https://opencode.ai/zen/go/v1" },
+    { id: "opencode-2", name: "Go 2", origin: "https://opencode.ai/inference/go/anthropic/v1" },
+  ]);
+  const sessions = new Map<string, string>();
+  const secretStore = makeSecrets({ opencode: "fixture-go-1", "opencode-2": "fixture-go-2" });
+  for (const [providerId, url, token] of [
+    ["opencode", "https://opencode.ai/inference/go/v1/models", "fixture-go-1"],
+    ["opencode-2", "https://opencode.ai/inference/go/v1/models", "fixture-go-2"],
+  ] as const) {
+    const fetchFn: FetchLike = async (requested, init) => {
+      assert.equal(requested, url);
+      assert.equal(init?.headers?.Authorization, `Bearer ${token}`);
+      const session = init?.headers?.["x-opencode-session"];
+      assert.ok(session);
+      if (sessions.has(providerId)) assert.equal(session, sessions.get(providerId));
+      sessions.set(providerId, session);
+      return jsonResponse(200, { data: [{ id: "deepseek-v4.1-flash" }] });
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal((await fetchModelsForProvider({ providerId, catalog, secretStore, fetchFn })).status, 200);
+    }
+  }
+  assert.notEqual(sessions.get("opencode"), sessions.get("opencode-2"));
+});
+
+test("both direct Go lists preserve advertised chat capabilities and independent session headers", async () => {
+  const catalog = makeCatalog([
+    { id: "opencode", name: "Go 1", origin: "https://opencode.ai/zen/go/v1" },
+    { id: "opencode-2", name: "Go 2", origin: "https://opencode.ai/inference/go" },
+  ]);
+  const secretStore = makeSecrets({ opencode: "fixture-go-1", "opencode-2": "fixture-go-2" });
+  const sessions = new Map<string, string>();
+  const fixture = {
+    data: [
+      { id: "muse-spark-1.3-contributor", type: "chat", recommended_api: "responses",
+        limit: { context: 1048576, output: 131072 },
+        modalities: { input: ["text", "image/jpeg", "image/png", "application/pdf", "video/mp4", "audio/wav"] },
+        capabilities: { reasoning: { supported: true, effort: ["xhigh", "low", "minimal", "medium", "high"] } } },
+      { id: "qwen4-max", type: "chat", recommended_api: "messages",
+        limit: { output: 262144 }, capabilities: { reasoning: { supported: true, toggle: true, effort: ["high", "xhigh"] } } },
+      { id: "plain-chat", type: "chat", recommended_api: "chat-completions", capabilities: { reasoning: { supported: false } } },
+      { id: "interactions-chat", type: "chat", recommended_api: "interactions" },
+      { id: "kept-embedding", type: "embedding", recommended_api: "embeddings" },
+      { id: "kept-decision", type: "decision", recommended_api: "systemone" },
+    ],
   };
-  const input = { providerId: "opencode", catalog, secretStore: makeSecrets({ opencode: "zen-key" }), fetchFn };
-  assert.equal((await fetchModelsForProvider(input)).status, 200);
-  assert.equal((await fetchModelsForProvider(input)).status, 200);
-  assert.equal(sessions.length, 2);
-  assert.ok(sessions[0]);
-  assert.equal(sessions[0], sessions[1]);
+  for (const [index, provider] of catalog.providers.entries()) {
+    const fetchFn: FetchLike = async (url, init) => {
+      assert.equal(url, "https://opencode.ai/inference/go/v1/models");
+      assert.equal(init?.headers?.Authorization, `Bearer fixture-go-${index + 1}`);
+      assert.equal(init?.headers?.["User-Agent"], "OpenBot/catalog");
+      const session = init?.headers?.["x-opencode-session"];
+      assert.ok(session);
+      if (sessions.has(provider.id)) assert.equal(session, sessions.get(provider.id));
+      sessions.set(provider.id, session);
+      return jsonResponse(200, fixture);
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await fetchModelsForProvider({ providerId: provider.id, catalog, secretStore, fetchFn });
+      assert.equal(result.status, 200);
+      const { models } = result.body as { models: NonNullable<ReturnType<typeof normalizeProviderModels>>["models"] };
+      assert.equal(models.length, 6);
+      assert.deepEqual(models[0], { id: "muse-spark-1.3-contributor", name: null, contextLength: 1048576,
+        maxOutputTokens: 131072, modalities: ["text", "image", "video", "audio"],
+        reasoningLevels: ["default", "minimal", "low", "medium", "high", "xhigh"], apiType: "responses", modelType: "chat", providerMetadata: "opencode-go" });
+      assert.equal(models[1]?.apiType, "anthropic");
+      assert.equal(models[1]?.maxOutputTokens, 262144);
+      assert.deepEqual(models[1]?.reasoningLevels, ["default", "none", "high", "xhigh"]);
+      assert.equal(models[2]?.apiType, "chat-completions");
+      assert.deepEqual(models[2]?.reasoningLevels, ["default"]);
+      assert.equal(models[3]?.apiType, undefined);
+      assert.deepEqual(models.slice(4).map(row => [row.modelType, row.apiType, row.reasoningLevels]), [
+        ["embedding", undefined, []], ["decision", undefined, []],
+      ]);
+    }
+  }
+  assert.equal(new Set(sessions.values()).size, 2);
+  const generic = normalizeProviderModels(fixture)?.models[0];
+  assert.equal(generic?.contextLength, null);
+  assert.equal(generic?.apiType, undefined);
+  assert.deepEqual(generic?.reasoningLevels, []);
 });
 
 test("fetch-models returns 404 provider-not-found", async () => {

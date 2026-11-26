@@ -11,7 +11,7 @@ import { customBoxFromCatalog, officialBox } from "../parse/argv.ts";
 import { fetchModelsForProvider } from "../catalog/provider-models.ts";
 import { createCatalogManager } from "../catalog/model-catalog.ts";
 import { createModelRefresh } from "../catalog/model-refresh.ts";
-import { catalogAfterSave, parseUiProviderSave } from "../parse/ui.ts";
+import { catalogAfterSave, parseUiProviderSave, UnsupportedChatModelError } from "../parse/ui.ts";
 import { renderQrAscii } from "../qrcode.ts";
 import { boxPathsFrom, joinAbs } from "../supervisor/paths.ts";
 import { discoverNativeHostMain } from "../supervisor/host-location.ts";
@@ -1141,11 +1141,11 @@ export async function handleRequest(req: http.IncomingMessage, res: http.ServerR
     const type = TYPES[ext] ?? "application/octet-stream";
     send(res, 200, body, type);
   } catch (err) {
-    // A handler (sync or async) threw: return a structured 500 rather than
-    // letting the rejection escape into an uncaught exception.
+    // Return a structured response rather than letting a rejection escape.
     const message = err instanceof Error ? err.message : "internal error";
     if (!res.headersSent) {
-      sendJson(res, 500, { error: { kind: "internal", message } });
+      const unsupported = err instanceof UnsupportedChatModelError;
+      sendJson(res, unsupported ? 400 : 500, { error: { kind: unsupported ? "model_not_chat" : "internal", message } });
     }
   }
 }

@@ -4,7 +4,9 @@ var fs = require("fs");
 var path = require("path");
 var requestLog = require("./request-log.cjs");
 var { managedService } = require("./version.cjs");
-var { nvidiaEmbeddingInputs } = require("./provider-maps.cjs");
+// The managed adapter ships without the Node hop's provider maps.
+// The Rust hop checks these saved routes before opening an upstream connection.
+var nvidiaEmbeddingInputs = managedService ? undefined : require("./provider-maps.cjs").nvidiaEmbeddingInputs;
 
 function botModelsPath() {
   if (managedService) return path.join(managedService.sandData, "openbot-bot-models.json");
@@ -48,7 +50,7 @@ function extractBotId(messages) {
 }
 
 function modelSupportsChat(model, origin) {
-  return (model.modelType === undefined || model.modelType === "chat") && !nvidiaEmbeddingInputs(model.slug, origin);
+  return (model.modelType === undefined || model.modelType === "chat") && !nvidiaEmbeddingInputs?.(model.slug, origin);
 }
 
 function modelInPlan(plan, modelId) {

@@ -119,7 +119,7 @@ impl Store {
     }
 }
 
-fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
+pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),

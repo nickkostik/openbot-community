@@ -23,11 +23,14 @@ rust/target/release/openbot-runtime --sand-data /home/box/sand-data \
 
 The command prints the selected provider ID, protocol, endpoint, and reasoning choice from the saved catalog and preferences. Credential kind is a simulation input. Add `--bot` with a bot ID to preview its saved overrides.
 
+Add `--request path/to/fixture.json` to encode a canonical request for one selected model. The fixture uses the normalized Chat Completions shape after provider reasoning controls. The output shows the serialized Chat Completions, Responses, or Messages body. The Messages encoder preserves text and images in order and groups parallel tool results. [Messages image formats](https://platform.claude.com/docs/en/build-with-claude/vision) · [Responses request schema](https://developers.openai.com/api/reference/resources/responses/methods/create)
+
 ## Cutover checklist
 
 - [x] Compare the native bot settings API and route resolver with the deployed JavaScript service. Verify writes and restart against a disposable copy.
+- [x] Port request serialization and verify tool IDs, ordering, and mixed text and image content across Chat Completions, Responses, and Messages.
 - [ ] Port the catalog, credential drafts and refresh, and both OpenAI sign-in paths. Exercise the desktop callback and save the resulting account under its existing provider ID in a disposable installation.
-- [ ] Connect the resolver to native provider headers, request and response conversion, streamed tool calls and images, reconnect, and upstream error handling. Compare the exact payloads across Chat Completions, Responses, and Messages. Exercise both direct OpenCode Go accounts independently.
+- [ ] Connect the resolver and encoder to native provider headers, request delivery, response decoding, streamed tool calls, reconnect, and upstream error handling. Compare the exact payloads across Chat Completions, Responses, and Messages. Exercise both direct OpenCode Go accounts independently.
 - [ ] Port log settings and retention, usage, compaction, and provider-specific cache identifiers. Replay representative long histories with structured tool results and compare content and cache counters.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.

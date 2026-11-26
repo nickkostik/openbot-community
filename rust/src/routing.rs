@@ -2,6 +2,7 @@ use std::fmt;
 
 use clap::ValueEnum;
 use serde::Serialize;
+use serde_json::Value;
 use url::Url;
 
 use crate::{
@@ -29,6 +30,28 @@ pub struct Route {
     upstream: String,
     reasoning_effort: Effort,
     stale_assignment: bool,
+}
+
+impl Route {
+    pub fn encode_request(
+        &self,
+        mut body: Value,
+        credential: CredentialKind,
+    ) -> Result<Value, &'static str> {
+        let values = body
+            .as_object_mut()
+            .ok_or("chat request must be an object")?;
+        values.insert("model".into(), Value::String(self.model.clone()));
+        let deepseek = Url::parse(&self.upstream)
+            .ok()
+            .is_some_and(|url| url.host_str() == Some("api.deepseek.com"));
+        crate::wire::encode(
+            self.protocol,
+            body,
+            deepseek,
+            credential == CredentialKind::OpenAiOauth,
+        )
+    }
 }
 
 #[derive(Debug)]

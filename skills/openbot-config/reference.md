@@ -230,6 +230,30 @@ The initial outgoing brief can use local excerpts while an eligible background s
 
 With request logging enabled, the chat record's `compaction` fields show estimated input and retained sizes, target, configured context, covered messages and summary source when available. Summary requests appear in separate records with `purpose: "compaction"` for usage reporting. Provider-reported usage is measured separately from the compaction estimates.
 
+#### Linux managed Rust service
+
+Use the Linux command as the owner of an existing OpenBot systemd user service with its configured fixed port. Rehearse against the service and state set aside for verification. Substitute the actual data directory, unit, built panel directory and full Git revision.
+
+```bash
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service status
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service \
+  install --ui-dir BUILT_UI --revision FULL_GIT_SHA
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback --original
+```
+
+`status` checks that systemd's `MainPID`, `openbot-ui.pid` and the actual IPv4 loopback socket identify one process. It verifies `/healthz` and checks process identity again. Install stages the invoking binary and the four built assets, then restarts the existing unit and verifies the new command and listener. The managed native process publishes its PID after binding the fixed port.
+
+| Location | Purpose |
+| --- | --- |
+| `DIR/.openbot-rust-releases/<bundle-hash>/` | Content-verified `openbot-runtime`, `revision` and `ui/{index.html,app.js,styles.css,favicon.svg}`. The bundle digest covers the binary, assets and revision. |
+| `$XDG_CONFIG_HOME/systemd/user/<unit>.d/90-openbot-native-runtime.conf` | The managed command override. With the default user configuration path, it is under `~/.config/systemd/user/`. |
+| `DIR/.openbot-rust-deployment.json` | Recovery journal with the original selection, preceding deployment and any pending change. |
+
+`rollback` restores the preceding verified selection or recovers an interrupted change. `rollback --original` restores the command saved at the first native install. The managed drop-in is removed when the restored selection used the original unit command. A pending change is recovered on install or rollback after ownership and drop-in checks.
+
+The deployment transaction preserves the saved mode, plan, credentials and routine settings. Once the native process starts, its refresh and retention workers use the saved policies. Use the existing Node production path and stock Official/Temporal delivery. Production promotion and remaining panel control routes are separate from the managed-service rehearsal.
+
 ### Official controls without logging rewrap
 
 For an already selected literal Official mode, the reviewed installed CLI can recover the owned panel independently of optional native logging compatibility:

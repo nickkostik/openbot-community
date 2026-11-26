@@ -29,6 +29,14 @@ const ASSETS: [(&str, &str, &str); 4] = [
     ("/favicon.svg", "favicon.svg", "image/svg+xml"),
 ];
 
+#[cfg(target_os = "linux")]
+pub(crate) fn release_assets(root: &Path) -> io::Result<Vec<(&'static str, Bytes)>> {
+    ASSETS
+        .into_iter()
+        .map(|(_, name, _)| Ok((name, read_asset(root, name)?)))
+        .collect()
+}
+
 #[derive(Clone)]
 struct PanelReadback {
     credentials: CredentialStore,

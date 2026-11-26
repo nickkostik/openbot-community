@@ -25,6 +25,30 @@ The command prints the selected provider ID, protocol, endpoint, and reasoning c
 
 Add `--request path/to/fixture.json` to encode a canonical request for one selected model. The fixture uses the normalized Chat Completions shape after provider reasoning controls. The output shows the serialized Chat Completions, Responses, or Messages body. The Messages encoder preserves text and images in order and groups parallel tool results. [Messages image formats](https://platform.claude.com/docs/en/build-with-claude/vision) · [Responses request schema](https://developers.openai.com/api/reference/resources/responses/methods/create)
 
+## Install into an existing Linux user service
+
+Use a disposable copy of the OpenBot state and an existing `openbot-*.service` user unit on a dedicated loopback port. Build the panel with `npm ci` and `npm run build`. Build the candidate as above and select the matching Git revision.
+
+~~~sh
+native="$PWD/rust/target/release/openbot-runtime"
+revision="$(git rev-parse HEAD)"
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" status
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" \
+  install --ui-dir "$PWD/ui" --revision "$revision"
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" status
+~~~
+
+The installer verifies that systemd's main PID, OpenBot's published PID, and the actual listening socket identify the same process. It pins the binary and the four served panel assets by content under `.openbot-rust-releases/` and selects the release through `90-openbot-native-runtime.conf`. The existing unit and its other drop-ins continue to supply the service policy and environment. The restarted process must own the same listener and answer `/healthz` with the expected command identity. Reinstalling the same healthy bundle returns its running PID.
+
+The deployment receipt in `.openbot-rust-deployment.json` records the previous selection before a restart. An unsuccessful restart restores that selection. If the installer itself stops during deployment, the next `install` or `rollback` first restores the pending baseline. The command retries a rate-limited start once for the selected user unit and the configured port. [systemd user unit lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
+
+~~~sh
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" rollback
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" rollback --original
+~~~
+
+The first command restores the preceding release. Use `--original` to restore the service that originally owned the port, even after several native upgrades. Both operations reuse the saved state directory. Keep its existing backup and the original service's code until the recovery rehearsal has passed. The managed runtime reads the selected mode and applies the saved refresh and log-retention policies when it runs. Complete mode and host control parity and verify the authenticated panel routes before promoting the production unit.
+
 ## Rehearse inference
 
 Start the candidate with `--enable-hop` and point `--sand-data` at a disposable Custom state directory. The candidate binds an available loopback port, serves `GET /healthz`, and accepts canonical Chat Completions requests at `POST /v1/chat/completions`. Add `--write-bot-settings` to rehearse settings writes in that directory.
@@ -83,7 +107,8 @@ With request logging enabled, chat records show the estimated input, estimated r
 - [x] Port log settings, scheduled retention, cleanup, Strip Bodies, and Clear. Rehearse all operations against disposable history.
 - [x] Port compaction. Rehearse structured tool results, matching legacy briefs, native checkpoint restart, and an eligible direct OpenCode Go cache hit.
 - [x] Port active model and effort saves and gateway and bot pauses. Verify the next turn through one attached stock adapter session in disposable state.
-- [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
+- [x] Stage and select the native panel and hop as one existing Linux user service. Verify ownership, a failed restart, an interrupted install, and rollback to the prior and original service.
+- [ ] Finish mode and host lifecycle commands. Verify watcher recovery and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.
 

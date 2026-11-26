@@ -11,6 +11,7 @@ mod panel;
 mod reasoning;
 mod routing;
 mod server;
+mod service;
 mod wire;
 
 use std::{
@@ -54,6 +55,9 @@ struct Args {
     /// Serve the built OpenBot web assets from this directory.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
+    /// Publish ownership after binding the configured loopback port.
+    #[arg(long, requires = "ui_dir")]
+    managed_service: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -72,10 +76,30 @@ enum Command {
         #[arg(long)]
         request: Option<PathBuf>,
     },
+    #[cfg(target_os = "linux")]
+    /// Install or roll back the runtime of an existing OpenBot user service.
+    Service {
+        #[arg(long)]
+        unit: String,
+        #[command(subcommand)]
+        action: service::deploy::Action,
+    },
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    #[cfg(target_os = "linux")]
+    if let Some(Command::Service { unit, action }) = &args.command {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(service::deploy::run(
+                &args.sand_data,
+                args.port,
+                unit,
+                action,
+            ));
+    }
     if let Some(Command::Resolve {
         model,
         bot,
@@ -122,11 +146,18 @@ async fn serve(args: Args) -> io::Result<()> {
         enable_request_logs,
         enable_compaction,
         ui_dir,
+        managed_service,
         ..
     } = args;
+    if managed_service && port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a managed service requires a fixed loopback port",
+        ));
+    }
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let state =
         server::State::with_catalog_writer(sand_data, write_bot_settings, enable_model_refresh)?;
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?;
     let authority = if address.port() == 80 {
         address.ip().to_string()
@@ -175,6 +206,9 @@ async fn serve(args: Args) -> io::Result<()> {
         .filter(|_| enable_model_refresh);
     let catalog = (status.serves_ui || enable_model_refresh)
         .then(|| aggregate::CatalogService::new(state.clone(), refresh))
+        .transpose()?;
+    let _owner = managed_service
+        .then(|| service::PublishedOwner::publish(state.root()))
         .transpose()?;
     if let Some(catalog) = &catalog {
         catalog.start();

@@ -19,6 +19,8 @@ jobs:
           python-version: "3.13"
       - run: npm ci
       - run: npm run build
+      - name: Verify the checked-in panel bundle
+        run: git diff --exit-code --stat -- ui/app.js
       - name: Verify public product export
         run: node scripts/export-shareable.mjs --destination "$RUNNER_TEMP/openbot-shareable" --repository "$GITHUB_REPOSITORY"
       - name: Scan public source for private state

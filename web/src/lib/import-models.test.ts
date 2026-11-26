@@ -34,6 +34,19 @@ test("refresh corrects legacy generic limits while preserving custom caps and su
   assert.equal(modelRefreshFields(model, { ...meta, maxOutputTokens: 4000 }).maxOutputTokens, 4000);
 });
 
+test("embedding import and refresh retain direct input types over public metadata", () => {
+  const direct: FetchedModel = { ...fetched, modelType: "embedding", modalities: ["text", "image"] };
+  const publicMetadata = { ...meta, modalities: ["text"] };
+  assert.deepEqual(modelImportFields(direct, publicMetadata).modalities, ["text", "image"]);
+
+  const refreshed = modelRefreshFields({
+    slug: direct.id, modelType: "embedding", contextTokens: 8192, maxOutputTokens: 1024,
+    modalities: direct.modalities, reasoningLevels: ["default"],
+  }, publicMetadata);
+  assert.equal(refreshed.modelType, "embedding");
+  assert.deepEqual(refreshed.modalities, ["text", "image"]);
+});
+
 test("catalog enrichment processes more than 40 models with bounded concurrency and keeps the account family", async t => {
   let inflight = 0, maxInflight = 0;
   const calls: URL[] = [];

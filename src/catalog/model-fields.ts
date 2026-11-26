@@ -70,6 +70,7 @@ export function modelImportFields(
 ): {
   slug: string;
   apiType?: CatalogModel["apiType"];
+  modelType?: ModelType;
   contextTokens?: number;
   maxOutputTokens?: number;
   reasoningLevels?: readonly string[];
@@ -108,6 +109,7 @@ export function modelImportFields(
 /** Refresh published facts without resetting a user's context/output caps. */
 export function modelRefreshFields(model: ModelMetadataInput, catalog: CatalogMetadata): ReturnType<typeof modelImportFields> {
   const fields = modelImportFields({ id: model.slug, name: null, contextLength: null, maxOutputTokens: null,
+    ...(model.modelType ? { modelType: model.modelType } : {}),
     modalities: [...model.modalities], reasoningLevels: [...model.reasoningLevels] }, catalog);
   const derivedContext = model.contextTokens === 128000 || model.contextTokens === model.catalogLimits?.contextTokens;
   return { ...fields,

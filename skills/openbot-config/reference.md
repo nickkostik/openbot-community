@@ -193,7 +193,40 @@ Send credentials privately to the owned loopback API. `familyId` matches `/^[a-z
 
 Allocation reserves catalog and orphan secret IDs, using the base then available numbered suffixes. Success returns `createdProviderId`; use it for model fetch/import/edit. Adds a zero-model account and preserves mode/default/pins/efforts/models/other secrets. `update-provider` and `set-secret` address an existing ID. Legacy `upsert-provider`/`custom` slugifies the display name and can change mode/default.
 
-OpenAI sign-in: `POST /api/oauth/openai/start` with `{}` returns `{sessionId,authorizationUrl,expiresIn:1800}`. Complete privately with `{sessionId,callbackUrl}` at `/api/oauth/openai/complete`; it returns only `{ok:true,credentialId,expiresIn:1800}`. Matching state/PKCE/code is required. A blank localhost callback page can be expected when browser and Computer differ. Drafts are in memory for 30 minutes; restart/expiry requires new login.
+### ChatGPT plan sign-in
+
+Open OpenBot on the Computer at `http://127.0.0.1:<panel port>` (normally port 9280). In Add account, choose **OpenAI**, **ChatGPT plan** and **Continue with ChatGPT**. Follow **Authorize OpenBot in ChatGPT**, then return to the panel after the browser finishes the loopback callback. Choose **Add account** to save. For a saved direct OpenAI provider, choose **Connect ChatGPT**, complete the same authorization and choose **Save login**. This saves the credential under the existing provider ID. Both saves preserve the current Official/Temporal or Custom mode, selected model, existing model rows and bot settings.
+
+The ChatGPT sign-in controls and endpoints require the numeric loopback address and its local HTTP origin. The browser returns the authorization result to `http://127.0.0.1:<panel port>/auth/callback`. OpenBot requests its own dynamic app registration for a new login. It creates `<sand-data root>/openbot-chatgpt-host-id` as a 0600 text file containing a local `urn:uuid:` identifier and reuses it across restarts. Preserve that file with private configuration during upgrades. The callback matches the local attempt, exchanges the one-use code with PKCE and verifies the signed account identity. Renewal of an already linked ChatGPT plan checks the same registered app and account.
+
+| Loopback endpoint | Request and result |
+|---|---|
+| `POST /api/oauth/chatgpt/start` | `{}` for a new account or `{providerId}` for an existing direct OpenAI provider. Returns `{sessionId, authorizationUrl, expiresIn:1800}`. |
+| `GET /auth/callback` | The authorization browser follows the registered loopback URL. The callback returns brief status text. |
+| `POST /api/oauth/chatgpt/status` | `{sessionId}` returns `phase` of `pending`, `expired`, `failed` with an error, or `ready` with an opaque `credentialId`. |
+
+The attempt and completed draft live in memory, each for up to 30 minutes. Restarting the service clears unsaved attempts and drafts. A new-account draft can be saved through `POST /api/save` with the following fields.
+
+```json
+{
+  "kind": "add-provider",
+  "familyId": "openai",
+  "name": "ChatGPT plan",
+  "origin": "https://api.openai.com/v1",
+  "apiType": "responses",
+  "credentialId": "<opaque login draft>"
+}
+```
+
+For **Save login**, send `{"kind":"set-secret","providerId":"<same provider ID>","credentialId":"<opaque login draft>"}` to the same save endpoint. Use just `credentialId` as the credential input. A provider-bound draft can only renew the provider that started it. Successful saves consume the draft and persist the credential privately under the allocated or existing provider ID. Keep authorization links, callback values, draft IDs and credential contents private.
+
+The private `secrets.json` entry at `providers[providerId]` holds a JSON-encoded `kind: "chatgpt-plan"` record with a registered `clientId`, verified `subject`, `idToken`, `accessToken`, `refreshToken`, `expiresAt` in epoch seconds, and the granted `scopes`. The store uses mode 0600. Discovery uses `https://api.openai.com/v1/models` and marks the fetched plan rows as Responses. Built-in facts fill missing limits for known OpenAI models. A plan's advertised list takes priority when it includes an effort beyond Default. Inference uses `https://api.openai.com/v1/responses` with upstream `stream: true` and `store: false`. Refresh targets the saved account and persists rotation there before using the new token. Existing `openai-oauth` credentials and supported Codex/OpenCode login imports continue to use the legacy Codex path. API-key accounts use their own credential and configured API route.
+
+The local flow and simulated Responses can verify the OpenBot integration. Live OpenAI consent, model access and quota require verification using the connected account.
+
+### Legacy Codex sign-in and imports
+
+For legacy Codex sign-in, `POST /api/oauth/openai/start` with `{}` returns `{sessionId,authorizationUrl,expiresIn:1800}`. Complete privately with `{sessionId,callbackUrl}` at `/api/oauth/openai/complete`; it returns only `{ok:true,credentialId,expiresIn:1800}`. Matching state/PKCE/code is required. A blank localhost callback page can be expected when browser and Computer differ. Drafts are in memory for 30 minutes; restart/expiry requires new login.
 
 Save that opaque draft using `add-provider`, `familyId:"openai"`, supported direct OpenAI origin and `credentialId`, with `secret` absent. It persists only the new allocated account and consumes the draft after successful save; refusal retains the unexpired draft. Never put an `oauth` sentinel into `secret` or expose callback/token contents.
 
@@ -206,6 +239,15 @@ Credential-file import sends exactly one chosen supported entry, not unrelated a
 ```
 
 Known presets use their direct origins and correct credential family. Use the `https://opencode.ai/inference/go` preset for new Go accounts and keep each subscription under its own saved provider ID. [OpenCode Go routes and catalog](#opencode-go-routes-and-catalog). Native OpenAI/OAuth uses Responses. Preserve existing IDs/protocols; preset names are not migration authority. Automatic refresh excludes blocked intermediary families/origins under the existing product guards.
+
+### Alibaba subscription accounts
+
+| Preset | `familyId` | Direct Chat Completions base |
+|---|---|---|
+| Alibaba Token Plan | `alibaba-token-plan` | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` |
+| Alibaba Coding Plan | `alibaba-coding-plan` | `https://coding-intl.dashscope.aliyuncs.com/v1` |
+
+Use the dedicated `sk-sp-` key for the matching subscription. Add one account per subscription. The presets apply to new accounts, and existing providers retain their assigned IDs and configured origins. The Qwen effort mapping uses the Singapore Token Plan Chat Completions base. [Alibaba Cloud base URLs](https://www.alibabacloud.com/help/en/model-studio/base-url) · [Qwen reasoning](#alibaba-token-plan-qwen-reasoning).
 
 ## Models and bot overrides
 
@@ -301,26 +343,45 @@ An explicit provider type is saved as optional `modelType`. Recognized values ar
 The managed public cache shares Go metadata across accepted direct Go bases. Account-specific discovery uses the selected provider's credential and can update an existing row's reported type and reasoning list even when the public catalog is unavailable. Saved explicit protocols take priority. A proposed effort list that would exclude a saved selected effort is held for that route. The optional transfer advisor applies its own saved-origin and effort rules. [Transfer advisor scope](#optional-tool-free-transfer-advisor).
 
 
+### Direct Z.AI GLM-5.3 reasoning
+
+The hop applies this reasoning map to `glm-5.3` and `glm-5.3-flash` on the `https://api.z.ai/api/paas/v4` standard base and the `https://api.z.ai/api/coding/paas/v4` Coding Plan base, with an optional trailing slash. Use Chat Completions. Z.AI requires thinking to be enabled and accepts `low`, `high` and `max` for these models. [Z.AI Chat Completion API reference](https://docs.z.ai/api-reference/llm/chat-completion).
+
+A supported selected effort sets `reasoning_effort` on the outgoing request and takes priority over any incoming value. The map ignores legacy Fast and Off settings on these routes. It preserves a supported incoming effort when no supported effort is selected, and removes an unsupported `reasoning_effort` so the provider default can apply.
+
+If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
+
+### Alibaba Token Plan Qwen reasoning
+
+The hop uses this mapping for the Chat Completions base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` with an optional trailing slash and the model slugs `qwen4-max`, `qwen3.8-max`, `qwen3.8-max-0902`, `qwen3.8-flash`, `qwen3.8-2.4t-a95b` and `qwen3.8-27b`. Choose an effort from the saved model's `reasoningLevels`.
+
+Off sends `reasoning_effort: "none"`. An explicit effort sends the selected value. Both choices remove the top-level `thinking`, `enable_thinking` and `thinking_budget` fields. Default leaves the caller's reasoning and thinking fields in place at this mapping step.
+
+Alibaba treats `none` as Off for these models and makes `reasoning_effort` and `thinking_budget` mutually exclusive. The provider can map compatible effort values to the same model-specific level. [Alibaba Cloud Chat Completions parameters](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions).
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.
 
-For a context-only edit to a chat route while Official, edit the saved plan directly. A chat model `upsert-model` or `use-model` activates Custom. Back up the private saved plan, check expected original bytes and current mode, then atomically update only the affected existing model rows’ `contextTokens` in the resolved `openbot-plan.json`. Preserve mode, catalog IDs/providers, defaults, bot pins, reasoning, operational output budgets and compaction settings; do not rewrite mode or invoke reconcile. Validate/read back the plan and `GET /api/state`, comparing other settings before/after. The per-request hop reads the new JSON without a native host restart or mode save. Saved configuration and panel API readback establish configuration, not full-context provider acceptance or a native million-token turn.
+For a context-only edit while Official, update the model's saved limit with `upsert-model`. That save keeps Official. `use-model` explicitly activates Custom. For a direct file edit, back up the private saved plan, check expected original bytes and current mode, then atomically update only the affected existing model rows’ `contextTokens` in the resolved `openbot-plan.json`. Preserve mode, catalog IDs/providers, defaults, bot pins, reasoning, operational output budgets and compaction settings; do not rewrite mode or invoke reconcile. Validate/read back the plan and `GET /api/state`, comparing other settings before/after. The per-request hop reads the new JSON without a native host restart or mode save. Saved configuration and panel API readback establish configuration, not full-context provider acceptance or a native million-token turn.
 
 ## Save and HTTP contracts
 
 Loopback `POST /api/save`, `Content-Type: application/json`:
+
+`add-provider`, `upsert-model`, `update-provider`, `remove-model`, `remove-provider` and ordinary `set-secret` keep Official when it is selected. `use-model` and the intentional legacy `upsert-provider`/`custom` activation commands select Custom.
 
 | `kind` | Fields / behavior |
 |---|---|
 | `official` | Select stock delivery; retain catalog/secrets/local engine. |
 | `add-provider` | `familyId,name,origin`, optional `apiType`; `secret` or OpenAI `credentialId`. Independent zero-model account. |
 | `upsert-provider`, `custom` | `name,origin,modelSlug,secret`, optional limits. Legacy name-derived activation. |
-| `upsert-model` | Existing `providerId,slug`, optional `apiType`, `modelType`, limits, reasoning, modalities and metadata. A typed non-chat import preserves Official and stays in inventory without becoming a chat default. |
-| `use-model` | Canonical chat-capable `modelId`, optional `reasoning`. Changes the wildcard. Intentional bot pins still win. A known non-chat model returns HTTP 400 with `model_not_chat`. |
-| `update-provider` | `providerId,name,origin`, optional `secret,apiType`; retains ID. |
-| `set-secret` | Existing `providerId,secret`; preserve account identity. |
-| `remove-provider`, `remove-model` | Explicit `providerId` or `modelId`. Fallback selection uses chat-capable rows. Removing a provider with no chat-capable models left selects Official and retains the remaining inventory. Removing the last account can remove the plan. |
+| `upsert-model` | Existing `providerId,slug`, optional `apiType`, `modelType`, limits, reasoning, modalities and metadata. Keeps Official. A typed non-chat row stays in inventory without becoming a chat default. |
+| `use-model` | Canonical chat-capable `modelId`, optional `reasoning`. Activates Custom and changes the wildcard. Intentional bot pins still win. A known non-chat model returns HTTP 400 with `model_not_chat`. |
+| `update-provider` | `providerId,name,origin`, optional `secret,apiType`. Keeps the account ID and explicit Official. |
+| `set-secret` | Existing `providerId` with either `secret` or a ChatGPT plan `credentialId` bound to that provider. Keeps the account ID and explicit Official. |
+| `remove-provider` | Existing `providerId`. Keeps remaining inventory and provider accounts, including accounts with zero models. Uses a surviving chat-capable model for the wildcard when needed. With none left, selects Official and retains surviving inventory. Removing the final provider removes the plan. |
+| `remove-model` | Canonical `modelId`. Keeps provider accounts and explicit Official. If replacing the wildcard, prefers a surviving chat-capable model under the same provider. |
 | `set-expose` | `expose:"cloudflare"` or `"off"`. |
 
 Success returns `{ok,wrapBytesChanged,snapshot,providers,models,keyedProviders,activeModelId,logSettings}`, with `createdProviderId` for additive onboarding. Saves use reconcile and serialized state authority. Refusals include `host-missing`, foreign listener/wrap, `census-refused`, `syntax-check-failed`, `listen-failed`, `mode-changed`, `source-changed` and `local-engine-refused` with a reason. Refusal is not permission to adopt, force ownership or reset configuration. An invalid selected engine can refuse before any mode or plan write; preserve its policy and artifacts for review instead of deleting the pin or hand-writing Custom.

@@ -142,7 +142,7 @@ export function Setup() {
           {credentialOptions.map((option) => <button key={option.id} type="button" aria-pressed={credentialMode === option.id} className={credentialMode === option.id ? "is-active" : ""}
             onClick={() => { setCredentialMode(option.id); setFieldError(null); if (option.id === "oauth") { setOrigin(preset.origin); setApiType("responses"); } }}>{option.label}</button>)}
         </div>
-        {credentialMode === "api-key" ? <Field label="API key" htmlFor="f-key" helper="Saved on this computer only after you add the account."><PasswordInput id="f-key" large value={secret} onChange={setSecret} placeholder={preset.id === "alibaba-token-plan" ? "sk-sp-…" : "Paste your key"} /></Field> : null}
+        {credentialMode === "api-key" ? <Field label="API key" htmlFor="f-key" helper="Saved on this computer only after you add the account."><PasswordInput id="f-key" large value={secret} onChange={setSecret} placeholder={preset.id.startsWith("alibaba-") ? "sk-sp-…" : "Paste your key"} /></Field> : null}
         {credentialMode === "oauth" ? <ChatGPTSignIn ready={credentialId !== null} onReady={setCredentialId} /> : null}
         {credentialMode === "file" ? <div className="credential-drop" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }} onDrop={(e) => { e.preventDefault(); void readCredentialFile(e.dataTransfer.files[0]); }}>
           <Field label="Saved login file" htmlFor="credential-file" helper="Drop or choose Codex auth.json or OpenCode auth.json (up to 256 KiB). Only your selected account is imported. OpenAI OAuth tokens need a direct OpenAI endpoint.">

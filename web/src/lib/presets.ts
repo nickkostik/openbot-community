@@ -1,6 +1,7 @@
 /** Curated provider presets for setup and add-provider flows. */
 
 import { OPENCODE_GO_ORIGIN } from "../../../src/domain/opencode-go.ts";
+import { ALIBABA_TOKEN_PLAN_ORIGIN } from "../../../src/domain/types.ts";
 
 export type FreeModel = { id: string; name: string };
 
@@ -60,7 +61,12 @@ export const PRESETS: readonly Preset[] = [
     hint: "One API key, many providers. OpenRouter receives the standard referer and title headers.",
   },
   {
-    id: "alibaba-token-plan", name: "Alibaba Coding Plan", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", model: "",
+    id: "alibaba-token-plan", name: "Alibaba Token Plan", origin: ALIBABA_TOKEN_PLAN_ORIGIN, model: "",
+    hint: "Use the sk-sp- key for your Singapore Token Plan. Add each subscription as a separate account.",
+    docsUrl: "https://www.alibabacloud.com/help/en/model-studio/base-url",
+  },
+  {
+    id: "alibaba-coding-plan", name: "Alibaba Coding Plan", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", model: "",
     hint: "Use your Coding Plan sk-sp- key. The international endpoint deducts Coding Plan quota.",
     docsUrl: "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/coding-plan",
   },

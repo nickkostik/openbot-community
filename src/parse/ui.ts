@@ -299,6 +299,11 @@ export function applyUiCommand(input: {
 }): UiSave {
   const { command, catalog, paths } = input;
   const expose = input.expose ?? loopbackExpose();
+  function saveCatalog(next: Catalog): UiSave {
+    return input.mode === "official"
+      ? { desired: officialBox(paths, expose), catalogWrite: next }
+      : { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+  }
   if (command.kind === "add-provider") {
     const name = command.name.trim();
     if (!name || name.length > 128) throw new Error("OpenBot: account name must contain 1 to 128 characters");
@@ -319,8 +324,8 @@ export function applyUiCommand(input: {
       throw new Error(`OpenBot: OpenCode Go accounts must use ${OPENCODE_GO_ORIGIN} directly`);
     }
     const credential = normalizeProviderCredential(command.secret, origin);
-    if (base.startsWith("alibaba-token-plan") && !credential.startsWith("sk-sp-")) {
-      throw new Error("OpenBot: Alibaba Coding Plan requires its sk-sp- key, not a pay-as-you-go key");
+    if (/^alibaba-(token|coding)-plan(?:-|$)/.test(base) && !credential.startsWith("sk-sp-")) {
+      throw new Error("OpenBot: Alibaba plans require an sk-sp- subscription key");
     }
     const provider: Provider = { id: providerId, name, origin,
       apiType: parseApiType(command.apiType), maxTokensDefault: HIGH_AGENT_MAX_TOKENS, mapFile: "provider-maps.cjs" };
@@ -376,13 +381,8 @@ export function applyUiCommand(input: {
       origin,
       apiType: parseApiType(command.apiType),
     });
-    if (command.secret !== undefined) {
-      return {
-        desired: customBoxFromCatalog({ paths, catalog: next, expose }),
-        secret: { providerId, bytes: parseSecretBytes(command.secret) },
-      };
-    }
-    return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+    const save = saveCatalog(next);
+    return command.secret === undefined ? save : { ...save, secret: { providerId, bytes: parseSecretBytes(command.secret) } };
   }
   if (command.kind === "upsert-provider") {
     const providerId = parseProviderId(slugify(command.name));
@@ -439,11 +439,7 @@ export function applyUiCommand(input: {
     const modelId = parseModelId(`${providerId}:${command.slug}`);
     const existing = catalog.models.find((row) => row.id === modelId);
     const model = modelFromLimits({ id: modelId, providerId, slug, existing, limits: command });
-    const next = upsertModelRow(catalog, model);
-    if (input.mode === "official" && !modelSupportsChat(model)) {
-      return { desired: officialBox(paths, expose), catalogWrite: next };
-    }
-    return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+    return saveCatalog(upsertModelRow(catalog, model));
   }
   if (command.kind === "use-model") {
     const modelId = parseModelId(command.modelId);
@@ -489,18 +485,12 @@ export function applyUiCommand(input: {
         ];
       }
     }
-    return {
-      desired: customBoxFromCatalog({
-        paths,
-        catalog: { providers: catalog.providers, models, bindings },
-        expose,
-      }),
-    };
+    return saveCatalog({ providers: catalog.providers, models, bindings });
   }
   const providerId = parseProviderId(command.providerId);
   const providers = catalog.providers.filter((row) => row.id !== providerId);
   const models = catalog.models.filter((row) => row.providerId !== providerId);
-  if (providers.length === 0 || models.length === 0) {
+  if (providers.length === 0) {
     return { desired: officialBox(paths, expose), catalogWrite: emptyCatalog() };
   }
   const active = catalog.bindings.find((row) => row.conversation.kind === "wildcard");
@@ -514,7 +504,7 @@ export function applyUiCommand(input: {
     models,
     bindings: [{ conversation: { kind: "wildcard" }, modelId: stillBound && active ? active.modelId : fallback.id }],
   };
-  return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
+  return saveCatalog(next);
 }
 
 export function catalogAfterSave(parsed: UiSave, fromDisk: Catalog): Catalog {

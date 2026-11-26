@@ -29,7 +29,11 @@ fn incoming(body: &Body, key: &str) -> Option<Effort> {
     body.get(key)?.as_str().and_then(Effort::parse)
 }
 
-fn apply_cap(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
+pub(crate) fn output_budget(
+    body: &Body,
+    selection: &Selection<'_>,
+    protocol: Protocol,
+) -> (&'static str, u64) {
     let mut cap = selection.model.max_output_tokens;
     if matches!(selection.model.policy(), Some(PolicyKind::NvidiaToggle))
         && selection.model.slug == "nvidia/nemotron-3.5-lightning-30b-a3b"
@@ -54,6 +58,11 @@ fn apply_cap(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
         })
         .filter(|tokens| tokens.is_finite() && *tokens >= 1.0)
         .map_or(cap, |tokens| tokens.min(cap as f64) as u64);
+    (key, requested)
+}
+
+fn apply_cap(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
+    let (key, requested) = output_budget(body, selection, protocol);
     remove(
         body,
         &["max_tokens", "max_completion_tokens", "max_output_tokens"],

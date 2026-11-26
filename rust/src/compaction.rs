@@ -18,16 +18,17 @@ use tokio::{sync::Semaphore, task::JoinHandle, time::Instant};
 
 use crate::{
     auth::unique_id,
-    catalog::{Catalog, Effort, Model, Provider},
+    catalog::{Catalog, Effort, Model, Protocol, Provider},
     hop::Hop,
     lease::Lease,
+    reasoning,
     routing::{Selection, is_direct_provider},
 };
 
 use self::{
     history::{
         History, Receipt, digest, estimate_text, excerpt, keep_identifiers, message_tokens,
-        transcript,
+        request_tokens, transcript,
     },
     store::{Brief, Pending, Saved, Store},
 };
@@ -90,12 +91,13 @@ pub struct Job {
 
 struct Plan {
     window: usize,
+    output_tokens: usize,
     routes: Vec<SummaryRoute>,
     routing_key: String,
 }
 
 impl Plan {
-    fn for_selection(catalog: &Catalog, selection: &Selection<'_>) -> Self {
+    fn for_selection(catalog: &Catalog, selection: &Selection<'_>, output_tokens: usize) -> Self {
         let target = selection.model;
         let provider = selection.provider;
         let window = target.context_tokens;
@@ -150,6 +152,7 @@ impl Plan {
         ));
         Self {
             window,
+            output_tokens,
             routes,
             routing_key,
         }
@@ -216,6 +219,7 @@ impl Compactor {
         bot: Option<String>,
         catalog: &Catalog,
         selection: &Selection<'_>,
+        protocol: Protocol,
     ) -> (Map<String, Value>, Option<Compacted>) {
         if selection.model.context_tokens == 0
             || body.get("openbot_internal_auxiliary") == Some(&Value::Bool(true))
@@ -224,7 +228,10 @@ impl Compactor {
         {
             return (body, None);
         }
-        let plan = Plan::for_selection(catalog, selection);
+        let (output_field, output_tokens) = reasoning::output_budget(&body, selection, protocol);
+        let output_tokens = output_tokens as usize;
+        let window = selection.model.context_tokens;
+        let plan = Plan::for_selection(catalog, selection, output_tokens);
         let service = self.clone();
         // Retain the original body if the worker cannot inspect or persist
         // optional compaction state. Arc avoids a second history copy.
@@ -235,21 +242,32 @@ impl Compactor {
         })
         .await;
         let mut body = Arc::unwrap_or_clone(inbound);
-        match compacted {
+        let compacted = match compacted {
             Ok(Ok(Some((messages, compacted)))) => {
                 body.insert("messages".into(), Value::Array(messages));
-                (body, Some(compacted))
+                Some(compacted)
             }
-            Ok(Ok(None)) => (body, None),
+            Ok(Ok(None)) => None,
             Ok(Err(error)) => {
                 eprintln!("OpenBot could not prepare compaction ({:?}).", error.kind());
-                (body, None)
+                None
             }
             Err(error) => {
                 eprintln!("OpenBot compaction worker unavailable ({error}).");
-                (body, None)
+                None
+            }
+        };
+        let estimated_input = compacted
+            .as_ref()
+            .map(|result| result.measurement.estimated_retained_tokens)
+            .or_else(|| request_tokens(&body));
+        if let Some(estimated_input) = estimated_input {
+            let available = window.saturating_sub(estimated_input).max(1);
+            if available < output_tokens {
+                body.insert(output_field.into(), Value::from(available as u64));
             }
         }
+        (body, compacted)
     }
 
     fn plan(
@@ -313,8 +331,12 @@ impl Compactor {
         }
 
         let before = history.tokens_from(0);
-        let trigger = plan.window * 85 / 100;
         let target = plan.window * 35 / 100;
+        // A large requested completion can consume the space normally left
+        // by the 85% trigger. Keep the trim target and limit the completion
+        // if the retained instructions or latest turn need more room.
+        let trigger = (plan.window * 85 / 100)
+            .min(plan.window.saturating_sub(plan.output_tokens).max(target));
         // Keep the full latest turn even when it alone exceeds the target.
         let shrank = previous_window > plan.window && before > target;
         let summary_budget = (target / 4).clamp(48, 8192);

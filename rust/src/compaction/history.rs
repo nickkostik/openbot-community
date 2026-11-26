@@ -158,6 +158,25 @@ pub fn message_tokens(message: &Value) -> usize {
     .sum::<usize>()
 }
 
+fn request_messages(body: &Map<String, Value>) -> Option<&[Value]> {
+    if body.get("input").is_some_and(|value| !value.is_null())
+        || body
+            .get("previous_response_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+    body.get("messages")?.as_array().map(Vec::as_slice)
+}
+
+pub fn request_tokens(body: &Map<String, Value>) -> Option<usize> {
+    let messages = request_messages(body)?;
+    Some(
+        messages.iter().map(message_tokens).sum::<usize>()
+            + body.get("tools").map_or(0, estimate_value),
+    )
+}
+
 pub struct History<'a> {
     pub head: &'a [Value],
     pub rest: &'a [Value],
@@ -169,14 +188,7 @@ pub struct History<'a> {
 
 impl<'a> History<'a> {
     pub fn from_body(body: &'a Map<String, Value>) -> Option<Self> {
-        if body.get("input").is_some_and(|value| !value.is_null())
-            || body
-                .get("previous_response_id")
-                .is_some_and(|value| !value.is_null())
-        {
-            return None;
-        }
-        let messages = body.get("messages")?.as_array()?;
+        let messages = request_messages(body)?;
         let head_len = messages
             .iter()
             .take_while(|message| is_instruction(message))

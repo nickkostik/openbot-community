@@ -21,6 +21,7 @@ use super::*;
 fn model(window: usize) -> Plan {
     Plan {
         window,
+        output_tokens: 0,
         routes: Vec::new(),
         routing_key: format!("fixture-{window}"),
     }
@@ -432,6 +433,51 @@ async fn http_compaction_uses_direct_fallback_only_on_overflow_and_reads_saved_b
 }
 
 #[tokio::test]
+async fn completion_reserve_compacts_before_the_normal_trigger_and_keeps_the_latest_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = Arc::new(Upstream::default());
+    let shared = mock.clone();
+    let upstream =
+        Listener::start(move |_| Router::new().fallback(post(upstream)).with_state(shared)).await;
+    let window = 6400;
+    save_fixture(dir.path(), &upstream.base, window, false);
+    let (runtime, compactor, _) = start_runtime(dir.path()).await;
+
+    let mut request = chat(20, 400);
+    request["model"] = json!("fixture:staged-model");
+    request["max_tokens"] = json!(4096);
+    let before = request_tokens(request.as_object().unwrap()).unwrap();
+    assert!(before < window * 85 / 100 && before + 4096 > window);
+    turn(&runtime, &request).await;
+
+    let single = json!({"model":"fixture:staged-model","max_tokens":4096,
+        "conversationId":"one-turn",
+        "messages":[{"role":"system","content":"x".repeat(12_000)},
+                    {"role":"user","content":"Keep my question and reply briefly."}]});
+    let minimum = request_tokens(single.as_object().unwrap()).unwrap();
+    assert!(minimum + 4096 > window && minimum < window);
+    turn(&runtime, &single).await;
+
+    {
+        let chats = mock.chats.lock().unwrap();
+        let compacted = &chats[0];
+        let after = request_tokens(compacted.as_object().unwrap()).unwrap();
+        assert!(after < before && after + 4096 <= window);
+        assert_eq!(compacted["max_tokens"], 4096);
+        assert_eq!(compacted["messages"][0], request["messages"][0]);
+        assert_eq!(
+            compacted["messages"].as_array().unwrap().last(),
+            request["messages"].as_array().unwrap().last()
+        );
+        assert_eq!(chats[1]["messages"], single["messages"]);
+        assert_eq!(chats[1]["max_tokens"], window - minimum);
+    }
+    compactor.stop();
+    runtime.stop().await;
+    upstream.stop().await;
+}
+
+#[tokio::test]
 async fn completed_chunk_resumes_after_restart_without_resending_it() {
     let dir = tempfile::tempdir().unwrap();
     let mock = Arc::new(Upstream::default());
@@ -489,6 +535,7 @@ fn editing_history_or_switching_effort_retires_only_the_superseded_checkpoint() 
     let mut input = chat(22, 600);
     let plans = |effort| Plan {
         window: 6000,
+        output_tokens: 0,
         routes: vec![SummaryRoute {
             model_id: "fixture:staged-model".into(),
             origin: "http://127.0.0.1:1".into(),
@@ -541,6 +588,7 @@ async fn only_new_checkpoint_is_committed_after_a_concurrent_request_invalidates
     let mut input = chat(24, 700);
     let plans = || Plan {
         window: 6500,
+        output_tokens: 0,
         routes: vec![SummaryRoute {
             model_id: "fixture:staged-model".into(),
             origin: "http://127.0.0.1:1".into(),

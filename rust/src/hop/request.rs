@@ -184,7 +184,14 @@ impl Prepared {
             Intent::Chat(Some(compactor), _) => {
                 let conversation = conversation.map(str::to_owned);
                 compactor
-                    .apply(body, conversation, bot.clone(), &catalog, &selection)
+                    .apply(
+                        body,
+                        conversation,
+                        bot.clone(),
+                        &catalog,
+                        &selection,
+                        route.protocol,
+                    )
                     .await
             }
             _ => (body, None),

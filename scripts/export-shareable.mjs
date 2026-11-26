@@ -13,9 +13,9 @@ const rootFiles = new Set([
   'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts',
   'install.sh', 'uninstall.sh', 'quickstart.sh',
 ]);
-const roots = ['src/', 'web/', 'ui/', 'payload/', 'skills/', '.github/', 'scripts/', 'docs/', 'agent-box/', 'recovery/hooks/', 'recovery/desktop-sidebar-authority/'];
+const roots = ['src/', 'rust/', 'web/', 'ui/', 'payload/', 'skills/', '.github/', 'scripts/', 'docs/', 'agent-box/', 'recovery/hooks/', 'recovery/desktop-sidebar-authority/'];
 const publicDocs = new Set(['agent-install.md', 'models-and-tools.md', 'portable-installation.md',
-  'portable-recovery.md', 'public-release.md', 'troubleshooting.md', 'updating.md', 'same-id-live-restoration.md',
+  'portable-recovery.md', 'public-release.md', 'rust-transition.md', 'troubleshooting.md', 'updating.md', 'same-id-live-restoration.md',
   'shareable-readme.md', 'shareable-readme.zh-CN.md']);
 const publicDocuments = new Map([
   ['README.md', 'docs/shareable-readme.md'],

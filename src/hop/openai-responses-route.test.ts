@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { normalizeProviderCredential } from "../supervisor/credential-import.ts";
+import { SCOPES } from "../../payload/chatgpt-plan.cjs";
 
 const require = createRequire(import.meta.url);
 const https = require("node:https");
@@ -19,8 +20,10 @@ async function listen(handler: http.RequestListener) {
   return { server, port: address.port };
 }
 
-for (const mode of ["json", "stream", "oauth"] as const) {
+for (const mode of ["json", "stream", "oauth", "plan-json", "plan-stream"] as const) {
   test(`native OpenAI ${mode} hop keeps tools, selected effort, and credential headers`, async (t) => {
+    const plan = mode.startsWith("plan-");
+    const clientStreaming = mode.endsWith("stream");
     const captured: { url: string; headers: http.IncomingHttpHeaders; body: any }[] = [];
     const upstream = await listen((req, res) => {
       const chunks: Buffer[] = [];
@@ -28,12 +31,14 @@ for (const mode of ["json", "stream", "oauth"] as const) {
       req.on("end", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString());
         captured.push({ url: req.url!, headers: req.headers, body });
-        if (mode === "stream") {
+        if (clientStreaming || plan) {
           res.writeHead(200, { "content-type": "text/event-stream" });
           for (const event of [
             { type: "response.created", response: { id: "resp_fixture", model: "gpt-6.1-sol" } },
             { type: "response.output_text.delta", delta: "PASS" },
-            { type: "response.completed", response: { status: "completed", output: [], usage: { input_tokens: 12, output_tokens: 1, input_tokens_details: { cached_tokens: 8 } } } },
+            { type: "response.completed", response: { status: "completed",
+              output: [{ type: "message", content: [{ type: "output_text", text: "PASS" }] }],
+              usage: { input_tokens: 12, output_tokens: 1, input_tokens_details: { cached_tokens: 8 } } } },
           ]) res.write(`data: ${JSON.stringify(event)}\n\n`);
           res.end();
         } else {
@@ -63,14 +68,16 @@ for (const mode of ["json", "stream", "oauth"] as const) {
     } }));
     const jwt = (claims: unknown) => `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
     const oauthAccess = jwt({ exp: Math.floor(Date.now()/1000)+3600, "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } });
-    const secret = mode === "oauth" ? normalizeProviderCredential(JSON.stringify({ tokens: {
+    const secret = plan ? JSON.stringify({ kind: "chatgpt-plan", clientId: "oaiapp_fixture", subject: "subject-fixture",
+      accessToken: "plan-access-fixture", refreshToken: "plan-refresh-fixture", idToken: "plan-id-fixture", expiresAt: 9999999999, scopes: SCOPES })
+      : mode === "oauth" ? normalizeProviderCredential(JSON.stringify({ tokens: {
       access_token: oauthAccess, refresh_token: "fixture-refresh", id_token: jwt({ "https://api.openai.com/auth": {} }),
     } }), "https://api.openai.com/v1") : "sk-fixture";
     if (mode === "oauth") assert.equal(JSON.parse(secret).chatgptAccountId, "fixture-account");
     writeFileSync(env.OPENBOT_SECRETS, JSON.stringify({ providers: { openai: secret } }));
     const service = await listen((req, res) => { void hop.handleHopRequest(req, res); });
     t.after(() => service.server.close());
-    const request: any = { model: "openai:gpt-6.1-sol", stream: mode === "stream", max_tokens: 2048,
+    const request: any = { model: "openai:gpt-6.1-sol", stream: clientStreaming, max_tokens: 2048,
       conversationId: "official-route-fixture",
       messages: [{ role: "user", content: "Call lookup" }],
       tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: { optional: { type: "string" } } } } }],
@@ -81,11 +88,14 @@ for (const mode of ["json", "stream", "oauth"] as const) {
     }
     const response = await send();
     assert.equal(response.status, 200);
-    if (mode === "stream") {
+    if (clientStreaming) {
       const stream = await response.text();
       assert.match(stream, /"content":"PASS"/);
       assert.match(stream, /"cached_tokens":8/);
       assert.match(stream, /data: \[DONE\]/);
+    } else if (plan) {
+      const result: any = await response.json();
+      assert.equal(result.choices[0].message.content, "PASS");
     } else {
       const first: any = await response.json();
       assert.equal(first.choices[0].finish_reason, "tool_calls");
@@ -107,7 +117,13 @@ for (const mode of ["json", "stream", "oauth"] as const) {
     assert.equal(outbound.body.max_tokens, undefined);
     assert.equal(outbound.body.tools[0].strict, false);
     assert.deepEqual(outbound.body.tool_choice, { type: "function", name: "lookup" });
-    assert.equal(outbound.headers.authorization, mode === "oauth" ? "Bearer " + oauthAccess : "Bearer sk-fixture");
+    assert.equal(outbound.headers.authorization, plan ? "Bearer plan-access-fixture" : mode === "oauth" ? "Bearer " + oauthAccess : "Bearer sk-fixture");
+    if (plan) {
+      assert.equal(outbound.body.store, false);
+      assert.equal(outbound.body.stream, true);
+      assert.equal(outbound.headers["chatgpt-account-id"], undefined);
+      assert.equal(outbound.headers.originator, undefined);
+    }
     if (mode === "oauth") {
       assert.equal(outbound.body.store, false);
       assert.equal(outbound.body.stream, true);

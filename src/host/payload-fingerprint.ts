@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
  */
 export const PAYLOAD_FINGERPRINT_FILES = [
   "bot-models.cjs",
+  "chatgpt-plan.cjs",
   "context-truncate.cjs",
   "hop-handler.cjs",
   "hop-server.cjs",

@@ -3,6 +3,7 @@ import test from "node:test";
 import { type Catalog, type SecretBytes } from "../domain/types.ts";
 import { type SecretStore } from "../supervisor/secrets.ts";
 import { fetchModelsForProvider, modelsUrl, normalizeProviderModels, OPENAI_CODEX_MODELS_URL, type FetchLike } from "./provider-models.ts";
+import { ORIGIN, SCOPES } from "../../payload/chatgpt-plan.cjs";
 
 type ResponseStub = { readonly status: number; readonly ok: boolean; text(): Promise<string> };
 
@@ -204,6 +205,30 @@ test("native OpenAI identity-only listings receive documented Sol capabilities",
   const model = (result.body as any).models[0];
   assert.equal(model.contextLength, 1_050_000);
   assert.deepEqual(model.reasoningLevels, ["default", "low", "medium", "high", "xhigh", "max"]);
+});
+
+test("ChatGPT plan model discovery lists only visible models through the public API", async () => {
+  const credential = { kind: "chatgpt-plan", clientId: "oaiapp_fixture", subject: "subject-fixture", idToken: "id-fixture",
+    accessToken: "access-old-fixture", refreshToken: "refresh-fixture", scopes: SCOPES, expiresAt: 1 };
+  const catalog = makeCatalog([{ id: "openai", name: "OpenAI", origin: ORIGIN }]);
+  const result = await fetchModelsForProvider({ providerId: "openai", catalog, secretStore: makeSecrets({ openai: JSON.stringify(credential) }),
+    refreshOAuth: async id => {
+      assert.equal(id, "openai");
+      return JSON.stringify({ ...credential, accessToken: "access-new-fixture", expiresAt: 9999999999 });
+    },
+    fetchFn: async (url, init) => {
+      assert.equal(url, `${ORIGIN}/models`);
+      assert.equal(init?.headers?.Authorization, "Bearer access-new-fixture");
+      assert.equal(init?.headers?.originator, undefined);
+      return jsonResponse(200, { models: [{ slug: "private-fixture", visibility: "hide" },
+        { slug: "gpt-6.2-sol", visibility: "list", display_name: "GPT 6.2 Sol" },
+        { slug: "gpt-6.2-astra", visibility: "list", display_name: "GPT 6.2 Astra" }] });
+    } });
+  assert.equal(result.status, 200);
+  const rows = (result.body as { models: { id: string; apiType: string; contextLength: number; maxOutputTokens: number; reasoningLevels: string[] }[] }).models;
+  assert.deepEqual(rows.map(row => [row.id, row.apiType]), [["gpt-6.2-sol", "responses"], ["gpt-6.2-astra", "responses"]]);
+  assert.ok(rows.every(row => row.contextLength === 1_050_000 && row.maxOutputTokens === 128000));
+  assert.ok(rows.every(row => row.reasoningLevels.join(",") === "default,low,medium,high,xhigh,max"));
 });
 
 test("Codex descriptors retain their advertised context and supported efforts", async () => {

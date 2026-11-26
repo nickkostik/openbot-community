@@ -193,7 +193,41 @@ Send credentials privately to the owned loopback API. `familyId` matches `/^[a-z
 
 Allocation reserves catalog and orphan secret IDs, using the base then available numbered suffixes. Success returns `createdProviderId`; use it for model fetch/import/edit. Adds a zero-model account and preserves mode/default/pins/efforts/models/other secrets. `update-provider` and `set-secret` address an existing ID. Legacy `upsert-provider`/`custom` slugifies the display name and can change mode/default.
 
-OpenAI sign-in: `POST /api/oauth/openai/start` with `{}` returns `{sessionId,authorizationUrl,expiresIn:1800}`. Complete privately with `{sessionId,callbackUrl}` at `/api/oauth/openai/complete`; it returns only `{ok:true,credentialId,expiresIn:1800}`. Matching state/PKCE/code is required. A blank localhost callback page can be expected when browser and Computer differ. Drafts are in memory for 30 minutes; restart/expiry requires new login.
+### ChatGPT plan sign-in
+
+Open OpenBot on the Computer at `http://127.0.0.1:<panel port>` (normally port 9280). In Add account, choose **OpenAI**, **ChatGPT plan** and **Continue with ChatGPT**. Follow **Authorize OpenBot in ChatGPT**, then return to the panel after the browser finishes the loopback callback. Choose **Add account** to save. For a saved direct OpenAI provider, choose **Connect ChatGPT**, complete the same authorization and choose **Save login**. This saves the credential under the existing provider ID. Both saves preserve the current Official/Temporal or Custom mode, selected model, existing model rows and bot settings.
+
+The ChatGPT sign-in controls and endpoints require the numeric loopback address and its local HTTP origin. The browser returns the authorization result to `http://127.0.0.1:<panel port>/auth/callback`. OpenBot requests its own dynamic app registration for a new login. It creates `<sand-data root>/openbot-chatgpt-host-id` as a 0600 text file containing a local `urn:uuid:` identifier and reuses it across restarts. Preserve that file with private configuration during upgrades. The callback matches the local attempt, exchanges the one-use code with PKCE and verifies the signed account identity. Renewal of an already linked ChatGPT plan checks the same registered app and account.
+
+| Loopback endpoint | Request and result |
+|---|---|
+| `POST /api/oauth/chatgpt/start` | `{}` for a new account or `{providerId}` for an existing direct OpenAI provider. Returns `{sessionId, authorizationUrl, expiresIn:1800}`. |
+| `GET /auth/callback` | The authorization browser follows the registered loopback URL. The callback returns brief status text. |
+| `POST /api/oauth/chatgpt/status` | `{sessionId}` returns `phase` of `pending`, `expired`, `failed` with an error, or `ready` with an opaque `credentialId`. |
+
+The attempt and completed draft live in memory, each for up to 30 minutes. Restarting the service clears unsaved attempts and drafts. A new-account draft can be saved through `POST /api/save` with the following fields.
+
+```json
+{
+  "kind": "add-provider",
+  "familyId": "openai",
+  "name": "ChatGPT plan",
+  "origin": "https://api.openai.com/v1",
+  "apiType": "responses",
+  "credentialId": "<opaque login draft>"
+}
+```
+
+For **Save login**, send `{"kind":"set-secret","providerId":"<same provider ID>","credentialId":"<opaque login draft>"}` to the same save endpoint. Use just `credentialId` as the credential input. A provider-bound draft can only renew the provider that started it. Successful saves consume the draft and persist the credential privately under the allocated or existing provider ID. Keep authorization links, callback values, draft IDs and credential contents private.
+
+The private `secrets.json` entry at `providers[providerId]` holds a JSON-encoded `kind: "chatgpt-plan"` record with a registered `clientId`, verified `subject`, `idToken`, `accessToken`, `refreshToken`, `expiresAt` in epoch seconds, and the granted `scopes`. The store uses mode 0600. Discovery uses `https://api.openai.com/v1/models`. Inference uses `https://api.openai.com/v1/responses` with upstream `stream: true` and `store: false`. Refresh targets the saved account and persists rotation there before using the new token. Existing `openai-oauth` credentials and supported Codex/OpenCode login imports continue to use the legacy Codex path. API-key accounts use their own credential and configured API route.
+
+The local flow and simulated Responses can verify the OpenBot integration. Live OpenAI consent, model access and quota require verification using the connected account.
+
+### Legacy Codex sign-in and imports
+
+
+For legacy Codex sign-in, `POST /api/oauth/openai/start` with `{}` returns `{sessionId,authorizationUrl,expiresIn:1800}`. Complete privately with `{sessionId,callbackUrl}` at `/api/oauth/openai/complete`; it returns only `{ok:true,credentialId,expiresIn:1800}`. Matching state/PKCE/code is required. A blank localhost callback page can be expected when browser and Computer differ. Drafts are in memory for 30 minutes; restart/expiry requires new login.
 
 Save that opaque draft using `add-provider`, `familyId:"openai"`, supported direct OpenAI origin and `credentialId`, with `secret` absent. It persists only the new allocated account and consumes the draft after successful save; refusal retains the unexpired draft. Never put an `oauth` sentinel into `secret` or expose callback/token contents.
 
@@ -288,7 +322,7 @@ Loopback `POST /api/save`, `Content-Type: application/json`:
 | `upsert-model` | Existing `providerId,slug`, optional protocol/limits/reasoning/modalities/metadata. No separate update-model kind. |
 | `use-model` | Canonical `modelId`, optional `reasoning`; changes wildcard, intentional bot pins still win. |
 | `update-provider` | `providerId,name,origin`, optional `secret,apiType`; retains ID. |
-| `set-secret` | Existing `providerId,secret`; preserve account identity. |
+| `set-secret` | Existing `providerId` and either `secret` or a ChatGPT plan `credentialId` bound to that provider. Preserves the current mode. |
 | `remove-provider`, `remove-model` | Explicit `providerId`/`modelId`; last account/model removal can choose Official and remove the plan. |
 | `set-expose` | `expose:"cloudflare"` or `"off"`. |
 

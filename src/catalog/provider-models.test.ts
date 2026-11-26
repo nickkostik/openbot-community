@@ -221,11 +221,14 @@ test("ChatGPT plan model discovery lists only visible models through the public 
       assert.equal(init?.headers?.Authorization, "Bearer access-new-fixture");
       assert.equal(init?.headers?.originator, undefined);
       return jsonResponse(200, { models: [{ slug: "private-fixture", visibility: "hide" },
-        { slug: "gpt-6.1-sol", visibility: "list", display_name: "GPT 6.1 Sol" }] });
+        { slug: "gpt-6.2-sol", visibility: "list", display_name: "GPT 6.2 Sol" },
+        { slug: "gpt-6.2-astra", visibility: "list", display_name: "GPT 6.2 Astra" }] });
     } });
   assert.equal(result.status, 200);
-  const rows = (result.body as { models: { id: string; apiType: string }[] }).models;
-  assert.deepEqual(rows.map(row => [row.id, row.apiType]), [["gpt-6.1-sol", "responses"]]);
+  const rows = (result.body as { models: { id: string; apiType: string; contextLength: number; maxOutputTokens: number; reasoningLevels: string[] }[] }).models;
+  assert.deepEqual(rows.map(row => [row.id, row.apiType]), [["gpt-6.2-sol", "responses"], ["gpt-6.2-astra", "responses"]]);
+  assert.ok(rows.every(row => row.contextLength === 1_050_000 && row.maxOutputTokens === 128000));
+  assert.ok(rows.every(row => row.reasoningLevels.join(",") === "default,low,medium,high,xhigh,max"));
 });
 
 test("Codex descriptors retain their advertised context and supported efforts", async () => {

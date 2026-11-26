@@ -428,6 +428,7 @@ export async function fetchModelsForProvider(input: {
       ...model,
       ...(isChatGPTPlan ? { apiType: "responses" as const } : {}),
       ...(facts ? { contextLength: model.contextLength ?? facts.contextTokens,
+        maxOutputTokens: model.maxOutputTokens ?? facts.maxOutputTokens ?? null,
         reasoningLevels: isChatGPTPlan && model.reasoningLevels.length > 1 ? model.reasoningLevels : [...facts.reasoningLevels] } : {}),
     };
   }) : result.models;

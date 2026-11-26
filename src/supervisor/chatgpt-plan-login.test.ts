@@ -10,7 +10,7 @@ import { ORIGIN, SCOPES, TOKEN_ENDPOINT, readCredential, type ChatGPTPlanCredent
 
 const ISSUER = "https://auth.openai.com";
 const CALLBACK = "http://127.0.0.1:9280/auth/callback";
-const HOST = "urn:uuid:00000000-1111-4222-8333-000000000001";
+const HOST = "urn:uuid:00000000-0000-4000-8000-000000000001";
 const CLIENT = "oaiapp_fixture";
 const SUBJECT = "subject-fixture";
 const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });

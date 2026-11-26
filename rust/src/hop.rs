@@ -22,7 +22,10 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::server::{State, read_json};
+use crate::{
+    auth::CredentialStore,
+    server::{State, read_json},
+};
 
 use self::{
     failure::Failure,
@@ -36,12 +39,13 @@ const MAX_ERROR_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct Hop {
     state: State,
+    credentials: CredentialStore,
     client: reqwest::Client,
     version: String,
 }
 
 impl Hop {
-    pub fn new(state: State) -> io::Result<Self> {
+    pub fn new(state: State, credentials: CredentialStore) -> io::Result<Self> {
         let timeout = std::env::var("OPENBOT_HOP_TIMEOUT")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -58,6 +62,7 @@ impl Hop {
             .map_err(io::Error::other)?;
         Ok(Self {
             state,
+            credentials,
             client,
             version: version(),
         })
@@ -170,18 +175,8 @@ async fn completions(
             )
         }
     })?;
-    let state = hop.state.clone();
-    let version = hop.version.clone();
     let prepared =
-        tokio::task::spawn_blocking(move || Prepared::load(&state, body, &headers, &version))
-            .await
-            .map_err(|_| {
-                Failure::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "unavailable_settings",
-                    "OpenBot could not prepare the request.",
-                )
-            })??;
+        Prepared::load(&hop.state, &hop.credentials, body, &headers, &hop.version).await?;
     hop.dispatch(&prepared).await
 }
 

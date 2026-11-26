@@ -7,6 +7,8 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+use crate::auth::AuthError;
+
 #[derive(Debug)]
 pub struct Failure {
     status: StatusCode,
@@ -26,6 +28,19 @@ enum Retry {
 }
 
 impl Failure {
+    pub fn credential(error: AuthError) -> Self {
+        let code = if error.status == StatusCode::NOT_FOUND {
+            "missing_credential"
+        } else {
+            "provider_sign_in_required"
+        };
+        let mut failure = Self::new(StatusCode::SERVICE_UNAVAILABLE, code, &error.message);
+        failure.upstream_status = error
+            .upstream
+            .and_then(|status| StatusCode::from_u16(status).ok());
+        failure
+    }
+
     pub fn new(status: StatusCode, code: &str, message: &str) -> Self {
         Self {
             status,

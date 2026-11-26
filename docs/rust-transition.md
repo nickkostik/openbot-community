@@ -1,6 +1,6 @@
 # OpenBot Rust transition
 
-The Rust candidate implements `/api/bot-models`, model routing, and the provider hop. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
+The Rust candidate implements bot settings, model routing, provider inference, and OpenAI account handling. It reads the installed catalog and bot preferences, validates writes against the available chat models, and preserves per-model reasoning choices and unknown fields. The listener binds to IPv4 loopback and defaults to comparison mode.
 
 ## Build and compare
 
@@ -29,16 +29,23 @@ Add `--request path/to/fixture.json` to encode a canonical request for one selec
 
 Start the candidate with `--enable-hop` and point `--sand-data` at a disposable Custom state directory. The candidate binds an available loopback port, serves `GET /healthz`, and accepts canonical Chat Completions requests at `POST /v1/chat/completions`. Add `--write-bot-settings` to rehearse settings writes in that directory.
 
-Each turn reads the saved mode, pause flags, model selection, effort, and provider credential. The two Go families use distinct session IDs. Anthropic uses its API-key header, direct OpenAI uses Responses, and the current saved OpenAI OAuth formats can authenticate while their access tokens are valid. Expired OpenAI credentials produce `provider_sign_in_required`.
+Each turn reads the saved mode, pause flags, model selection, effort, and provider credential. The two Go families use distinct session IDs. Anthropic uses its API-key header and direct OpenAI uses Responses. The inference-only listener reads both existing OpenAI OAuth formats and reports expired credentials as `provider_sign_in_required`.
 
 All three protocols yield Chat Completions-compatible JSON or incremental server-sent events. A provider's 503 can retry before the first output. An interrupted stream reports the failure on the current turn and releases the upstream connection. Messages usage reports cache-read and cache-creation tokens separately. [Responses streaming events](https://developers.openai.com/api/reference/responses/streaming-events) · [Messages streaming events](https://platform.claude.com/docs/en/build-with-claude/streaming)
+
+## Rehearse OpenAI accounts
+
+Add `--enable-accounts` in disposable state to enable the account routes and credential writes. Send `POST /api/oauth/chatgpt/start` on the exact loopback origin. Pass `providerId` to reconnect an existing direct OpenAI account. Open the returned authorization URL in a browser that can reach the same loopback port. The `/auth/callback` endpoint verifies the sign-in and `POST /api/oauth/chatgpt/status` returns a one-time credential ID when ready. An explicit `POST /api/save` adds a separate OpenAI account or saves the draft under the provider ID that initiated sign-in. This listener also supports the existing pasted callback flow at `/api/oauth/openai/start` and `/api/oauth/openai/complete`. [OpenAI registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+
+Each successful refresh stores the replacement credentials atomically in the existing `secrets.json`. Concurrent turns for one provider share that refresh. The runtime waits for in-flight renewals during normal shutdown. Use synthetic tokens in rehearsals. A refresh can replace the renewable session's token at OpenAI, so running two services on copies of the same live token can break the session. Run the Rust tests with OpenSSL available for the ephemeral signing fixture. [OpenAI accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
 
 ## Cutover checklist
 
 - [x] Compare the native bot settings API and route resolver with the deployed JavaScript service. Verify writes and restart against a disposable copy.
 - [x] Port request serialization and verify tool IDs, ordering, and mixed text and image content across Chat Completions, Responses, and Messages.
 - [x] Exercise the native HTTP provider hop against loopback fixtures and direct Go and NVIDIA endpoints. Verify model switches, native effort controls, streaming tool arguments, usage, error reporting, and reconnect in the disposable setup.
-- [ ] Port the catalog, credential drafts and refresh, and both OpenAI sign-in paths. Exercise the desktop callback and save the resulting account under its existing provider ID in a disposable installation.
+- [x] Port credential drafts, refresh, and both OpenAI sign-in paths. Verify signed account renewal under the existing provider ID, independent registration, and refresh persistence in disposable state.
+- [ ] Port provider discovery and complete account authorization with the live desktop browser.
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [ ] Port log settings and retention, usage, compaction, and provider-specific cache identifiers. Replay representative long histories with structured tool results and compare content and cache counters.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.

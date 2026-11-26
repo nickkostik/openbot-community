@@ -80,6 +80,7 @@ async fn shadow_reads_both_go_accounts_and_provider_specific_efforts() {
         State::new(dir.path().into(), false).unwrap(),
         HOST.into(),
         None,
+        None,
     );
     let (status, actual) = call(&app, Method::GET, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
@@ -113,6 +114,7 @@ async fn batch_switch_validates_all_models_and_keeps_effort_per_route() {
     let app = router(
         State::new(dir.path().into(), true).unwrap(),
         HOST.into(),
+        None,
         None,
     );
     let before = fs::read(&file).unwrap();
@@ -171,7 +173,12 @@ async fn batch_switch_validates_all_models_and_keeps_effort_per_route() {
 async fn simultaneous_writes_survive_restart() {
     let dir = fixture();
     let root = dir.path().to_owned();
-    let app = router(State::new(root.clone(), true).unwrap(), HOST.into(), None);
+    let app = router(
+        State::new(root.clone(), true).unwrap(),
+        HOST.into(),
+        None,
+        None,
+    );
     assert!(State::new(root.clone(), true).is_err());
     let (first, second) = tokio::join!(
         call(
@@ -189,7 +196,7 @@ async fn simultaneous_writes_survive_restart() {
     assert_eq!(second.0, StatusCode::OK);
     drop(app);
 
-    let reopened = router(State::new(root, true).unwrap(), HOST.into(), None);
+    let reopened = router(State::new(root, true).unwrap(), HOST.into(), None, None);
     let (status, view) = call(&reopened, Method::GET, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["assignments"]["bot-b"], "opencode:example");
@@ -204,6 +211,7 @@ async fn corrupt_state_can_be_read_but_a_save_cannot_replace_it() {
     let app = router(
         State::new(dir.path().into(), true).unwrap(),
         HOST.into(),
+        None,
         None,
     );
     let (status, view) = call(&app, Method::GET, Value::Null).await;
@@ -237,6 +245,7 @@ async fn rejects_cross_origin_and_non_loopback_host() {
     let app = router(
         State::new(dir.path().into(), false).unwrap(),
         HOST.into(),
+        None,
         None,
     );
     for (host, origin) in [

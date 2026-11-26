@@ -135,10 +135,15 @@ impl Fixture {
         );
         fs::write(dir.path().join("openbot-mode"), "custom\n").unwrap();
         let state = State::new(dir.path().into(), true).unwrap();
-        let hop = Hop::new(state.clone()).unwrap();
-        let rust =
-            TestServer::start(move |authority| server::router(state, authority.into(), Some(hop)))
-                .await;
+        let hop = Hop::new(
+            state.clone(),
+            CredentialStore::new(state.root(), false).unwrap(),
+        )
+        .unwrap();
+        let rust = TestServer::start(move |authority| {
+            server::router(state, authority.into(), Some(hop), None)
+        })
+        .await;
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(8))
@@ -608,8 +613,8 @@ async fn credentials_are_never_forwarded_across_redirects() {
     fixture.mock.inspect(|seen| assert_eq!(seen.len(), 1));
 }
 
-#[test]
-fn saved_openai_credentials_are_scoped_to_the_existing_outbound_contracts() {
+#[tokio::test]
+async fn saved_openai_credentials_are_scoped_to_the_existing_outbound_contracts() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("openbot-mode"), "custom\n").unwrap();
     file(
@@ -633,7 +638,16 @@ fn saved_openai_credentials_are_scoped_to_the_existing_outbound_contracts() {
             "secrets.json",
             json!({"providers":{"openai":saved.to_string()}}),
         );
-        let prepared = Prepared::load(&state, body.clone(), &HeaderMap::new(), "fixture").unwrap();
+        let credentials = CredentialStore::new(state.root(), false).unwrap();
+        let prepared = Prepared::load(
+            &state,
+            &credentials,
+            body.clone(),
+            &HeaderMap::new(),
+            "fixture",
+        )
+        .await
+        .unwrap();
         let outbound: Value = serde_json::from_slice(&prepared.body).unwrap();
         assert!(!prepared.client_stream);
         assert!(prepared.upstream_stream);
@@ -717,7 +731,7 @@ async fn abandoning_a_stream_releases_the_upstream_connection() {
     fixture.mock.inspect(|seen| assert_eq!(seen.len(), 1));
 }
 
-fn direct_body(
+async fn direct_body(
     origin: &str,
     slug: &str,
     protocol: &str,
@@ -746,12 +760,15 @@ fn direct_body(
         json!({"reasoning": { (PROFILE): {"direct:model":saved_effort} }}),
     );
     let state = State::new(dir.path().into(), false).unwrap();
-    let prepared = Prepared::load(&state, request, &HeaderMap::new(), "fixture").unwrap();
+    let credentials = CredentialStore::new(state.root(), false).unwrap();
+    let prepared = Prepared::load(&state, &credentials, request, &HeaderMap::new(), "fixture")
+        .await
+        .unwrap();
     serde_json::from_slice(&prepared.body).unwrap()
 }
 
-#[test]
-fn direct_provider_efforts_keep_their_native_fields_and_limits() {
+#[tokio::test]
+async fn direct_provider_efforts_keep_their_native_fields_and_limits() {
     let mut request = user_request("direct:model", false);
     request["max_tokens"] = json!(65536);
     request["thinking"] = json!({"type":"disabled", "clear_thinking":false});
@@ -764,7 +781,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "chat-completions",
         "high",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(
         zai["thinking"],
         json!({"clear_thinking":false,"type":"enabled"})
@@ -776,7 +794,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "chat-completions",
         "none",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(qwen["reasoning_effort"], "none");
     assert!(qwen.get("thinking_budget").is_none());
     assert!(qwen.get("thinking").is_none());
@@ -789,7 +808,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "chat-completions",
         "high",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(
         nvidia["chat_template_kwargs"],
         json!({"custom_flag":true,"enable_thinking":true})
@@ -802,7 +822,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "chat-completions",
         "medium",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(
         super_vl["chat_template_kwargs"],
         json!({"custom_flag":true})
@@ -815,7 +836,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "chat-completions",
         "xhigh",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(kimi["reasoning_effort"], "max");
     assert!(kimi.get("thinking").is_none());
     let deepseek = direct_body(
@@ -824,7 +846,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "responses",
         "none",
         request.clone(),
-    );
+    )
+    .await;
     assert_eq!(deepseek["reasoning"]["effort"], "none");
     let deepseek = direct_body(
         "https://api.deepseek.com/v1",
@@ -832,7 +855,8 @@ fn direct_provider_efforts_keep_their_native_fields_and_limits() {
         "anthropic",
         "max",
         request,
-    );
+    )
+    .await;
     assert_eq!(deepseek["output_config"]["effort"], "max");
     assert_eq!(deepseek["thinking"]["type"], "enabled");
 }

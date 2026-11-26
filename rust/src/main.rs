@@ -1,3 +1,4 @@
+mod auth;
 mod bot_models;
 mod catalog;
 mod hop;
@@ -17,7 +18,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     version,
-    about = "OpenBot Rust candidate for bot settings and provider inference"
+    about = "OpenBot Rust candidate for bot settings, provider accounts, and inference"
 )]
 struct Args {
     /// Directory containing the existing OpenBot plan and bot settings.
@@ -32,6 +33,9 @@ struct Args {
     /// Enable provider inference in a disposable Custom state directory.
     #[arg(long)]
     enable_hop: bool,
+    /// Enable local OpenAI sign-in, credential writes, and renewal in disposable state.
+    #[arg(long)]
+    enable_accounts: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -91,10 +95,17 @@ fn main() -> io::Result<()> {
             args.port,
             args.write_bot_settings,
             args.enable_hop,
+            args.enable_accounts,
         ))
 }
 
-async fn serve(sand_data: PathBuf, port: u16, writable: bool, enable_hop: bool) -> io::Result<()> {
+async fn serve(
+    sand_data: PathBuf,
+    port: u16,
+    writable: bool,
+    enable_hop: bool,
+    enable_accounts: bool,
+) -> io::Result<()> {
     let state = server::State::new(sand_data, writable)?;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?;
@@ -103,13 +114,27 @@ async fn serve(sand_data: PathBuf, port: u16, writable: bool, enable_hop: bool) 
     } else {
         address.to_string()
     };
-    let hop = enable_hop
-        .then(|| hop::Hop::new(state.clone()))
+    let credentials = (enable_hop || enable_accounts)
+        .then(|| auth::CredentialStore::new(state.root(), enable_accounts))
+        .transpose()?;
+    let hop = credentials
+        .clone()
+        .filter(|_| enable_hop)
+        .map(|store| hop::Hop::new(state.clone(), store))
+        .transpose()?;
+    let accounts = credentials
+        .clone()
+        .filter(|_| enable_accounts)
+        .map(|store| auth::Accounts::new(store, &authority))
         .transpose()?;
     println!("OpenBot Rust listening on http://{authority}");
-    axum::serve(listener, server::router(state, authority, hop))
+    let result = axum::serve(listener, server::router(state, authority, hop, accounts))
         .with_graceful_shutdown(shutdown())
-        .await
+        .await;
+    if let Some(credentials) = credentials {
+        credentials.wait_for_renewals().await;
+    }
+    result
 }
 
 async fn shutdown() {

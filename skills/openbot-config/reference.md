@@ -128,9 +128,26 @@ Dispatch rereads files in the directory passed to `--sand-data` on each request:
 
 The hop generates the selected protocol's headers and converts upstream Chat Completions, Responses and Messages JSON or SSE into the caller's Chat Completions shape. Provider-specific session and cache identifiers are scoped to the selected account and available conversation or bot context. Eligible transient errors and temporary rate limits get bounded retries before client output. A later upstream error ends the original stream with the error.
 
-For saved OpenAI OAuth and ChatGPT plan sign-ins, the candidate uses valid saved access tokens. Expired tokens or tokens expiring within 60 seconds return HTTP 503 `provider_sign_in_required`. Use the current panel for sign-in and renewal. Candidate credential renewal and panel cutover are pending.
+With `--enable-hop` alone, the candidate uses valid saved OpenAI access tokens. An expired login returns HTTP 503 `provider_sign_in_required`. To rehearse renewal, enable the account flow below.
 
 Use the Node installer and unified supervisor for the live panel and hop on port 9280. Official uses stock server/Temporal delivery. Use `/healthz` for candidate listener readiness and a completion for candidate inference verification.
+
+#### Rust account sign-in and renewal
+
+Add `--enable-accounts` to the candidate command to rehearse credential saves and renewal in the same disposable directory. Include `--enable-hop` when checking renewal during inference. The account listener uses the printed IPv4 loopback address. Open sign-in in a browser that can reach that exact `http://127.0.0.1:<bound-port>` address.
+
+1. Send `POST /api/oauth/chatgpt/start` with `{}` for a new account or `{"providerId":"openai-2"}` to reauthorize that saved direct OpenAI provider. Open the returned `authorizationUrl` and keep the response’s `sessionId` for polling. The candidate uses the local callback `GET /auth/callback` on its bound port and reuses the private `openbot-chatgpt-host-id` in the disposable state.
+2. Send `POST /api/oauth/chatgpt/status` with `{"sessionId":"<session-id>"}`. A response with `phase: "ready"` provides an expiring, process-local `credentialId`. Use this draft in an explicit account save.
+3. Send `POST /api/save` with one of these JSON bodies. A successful save consumes the draft.
+
+| Intent | Save body |
+| --- | --- |
+| Add an independent OpenAI account | `{"kind":"add-provider","familyId":"openai","name":"Fixture OpenAI","origin":"https://api.openai.com/v1","apiType":"responses","credentialId":"<credential-id>"}` |
+| Reauthorize the provider that started sign-in | `{"kind":"set-secret","providerId":"openai-2","credentialId":"<credential-id>"}` |
+
+An add returns `createdProviderId` for the next available `openai` account ID. Use that ID when configuring a model in the disposable catalog. A targeted draft saves under the original provider ID after checking the saved account revision. A direct credential save uses `secret` in place of `credentialId`. Legacy Codex OAuth uses `POST /api/oauth/openai/start` and `POST /api/oauth/openai/complete` with the attempt's `sessionId` and its `http://localhost:1455/auth/callback` URL as `callbackUrl`. Save the resulting legacy draft as a new account.
+
+With both flags active, inference can renew a due OpenAI login when its renewal window permits. Concurrent requests for the same provider ID share one renewal. The candidate rereads the current credential and persists refreshed credentials only while the original value still matches. It atomically replaces the compatible `secrets.json` file, keeping the credential as a JSON-encoded string under `providers[providerId]`. The account routes and inference share the candidate writer guarded by `.openbot-rust-secrets.lock`. If a login is unusable, the hop returns HTTP 503 `provider_sign_in_required`. Use the existing Node panel for live account sign-in and renewal.
 
 ### Official controls without logging rewrap
 

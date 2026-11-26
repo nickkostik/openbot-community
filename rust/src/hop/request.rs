@@ -1,19 +1,15 @@
-use std::{
-    io,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{io, path::Path};
 
 use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
+    auth::{Authorized, CredentialStore},
     catalog::Protocol,
     reasoning,
     routing::{self, CredentialKind},
@@ -57,20 +53,13 @@ const INTERNAL_FIELDS: &[&str] = &[
 ];
 
 impl Prepared {
-    pub fn load(
+    pub async fn load(
         state: &State,
+        credentials: &CredentialStore,
         body: Value,
         incoming: &HeaderMap,
         version: &str,
     ) -> Result<Self, Failure> {
-        let root = state.root();
-        if !custom_mode(root).map_err(|_| config_failure())? {
-            return Err(Failure::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "official_mode",
-                "OpenBot uses the stock model in Official mode.",
-            ));
-        }
         let Value::Object(mut body) = body else {
             return Err(Failure::new(
                 StatusCode::BAD_REQUEST,
@@ -79,7 +68,21 @@ impl Prepared {
             ));
         };
         let bot = bot_id(&body).map(str::to_owned);
-        check_paused(root, bot.as_deref())?;
+        let staged = state.clone();
+        let pause_bot = bot.clone();
+        let (catalog, settings) = tokio::task::spawn_blocking(move || {
+            if !custom_mode(staged.root()).map_err(|_| config_failure())? {
+                return Err(Failure::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "official_mode",
+                    "OpenBot uses the stock model in Official mode.",
+                ));
+            }
+            check_paused(staged.root(), pause_bot.as_deref())?;
+            staged.saved().map_err(|_| config_failure())
+        })
+        .await
+        .map_err(|_| config_failure())??;
         let requested = body
             .get("model")
             .and_then(Value::as_str)
@@ -94,13 +97,14 @@ impl Prepared {
         let selected_bot = bot
             .as_deref()
             .filter(|_| body.get("openbot_internal_model") != Some(&Value::Bool(true)));
-        let (catalog, settings) = state.saved().map_err(|_| config_failure())?;
         let selection =
             routing::select(&catalog, &settings, requested, selected_bot).map_err(|err| {
                 Failure::new(StatusCode::BAD_REQUEST, "invalid_model", &err.to_string())
             })?;
-        let credential =
-            Credential::read(root, &selection.provider.id, &selection.provider.origin)?;
+        let credential = credentials
+            .authorize(&selection.provider.id, &selection.provider.origin)
+            .await
+            .map_err(Failure::credential)?;
         let route = selection.route(credential.kind);
         let client_stream = body.get("stream") == Some(&Value::Bool(true));
         let conversation = CONVERSATION_FIELDS.iter().find_map(|key| {
@@ -301,12 +305,6 @@ fn opencode_session(provider: &str, scope: &str) -> String {
     )
 }
 
-struct Credential {
-    kind: CredentialKind,
-    token: String,
-    account: Option<String>,
-}
-
 struct Metadata<'a> {
     provider: &'a str,
     go: bool,
@@ -315,101 +313,7 @@ struct Metadata<'a> {
     stream: bool,
 }
 
-impl Credential {
-    fn read(root: &Path, provider: &str, origin: &str) -> Result<Self, Failure> {
-        let store = read_json(&root.join("secrets.json"), 4 * 1024 * 1024)
-            .map_err(|_| config_failure())?
-            .unwrap_or_default();
-        let raw = store["providers"][provider]
-            .as_str()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                Failure::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "missing_credential",
-                    "No credential for this provider.",
-                )
-            })?;
-        if raw.starts_with('{') {
-            let record = serde_json::from_str::<Value>(raw)
-                .map_err(|_| sign_in("The saved provider credential is invalid."))?;
-            match record["kind"].as_str() {
-                Some("openai-oauth") => {
-                    return Self::oauth(record, CredentialKind::OpenAiOauth, origin);
-                }
-                Some("chatgpt-plan") => {
-                    return Self::oauth(record, CredentialKind::ChatGptPlan, origin);
-                }
-                _ => return Err(sign_in("The saved provider credential is unsupported.")),
-            }
-        }
-        Ok(Self {
-            kind: CredentialKind::ApiKey,
-            token: raw.into(),
-            account: None,
-        })
-    }
-
-    fn oauth(record: Value, kind: CredentialKind, origin: &str) -> Result<Self, Failure> {
-        if kind == CredentialKind::ChatGptPlan {
-            if !matches!(
-                origin.trim_end_matches('/'),
-                "https://api.openai.com" | "https://api.openai.com/v1"
-            ) {
-                return Err(sign_in(
-                    "ChatGPT plan sign-in requires the direct OpenAI API.",
-                ));
-            }
-            let valid_client = record["clientId"].as_str().is_some_and(|client| {
-                client.len() <= 256
-                    && client.strip_prefix("oaiapp_").is_some_and(|suffix| {
-                        !suffix.is_empty()
-                            && suffix.bytes().all(|byte| {
-                                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-                            })
-                    })
-            });
-            let valid_scopes = record["scopes"].as_array().is_some_and(|scopes| {
-                ["resource.invoke", "chatgpt.tokens.use.direct"]
-                    .iter()
-                    .all(|scope| scopes.iter().any(|value| value == *scope))
-            });
-            if !valid_client
-                || !valid_scopes
-                || ["subject", "idToken", "refreshToken"].iter().any(|key| {
-                    record[key]
-                        .as_str()
-                        .is_none_or(|value| value.trim().is_empty())
-                })
-            {
-                return Err(sign_in("The saved ChatGPT plan sign-in is incomplete."));
-            }
-        }
-        let token = record["accessToken"]
-            .as_str()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| sign_in("The saved OpenAI sign-in is incomplete."))?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if record["expiresAt"].as_u64().unwrap_or(0) <= now.saturating_add(60) {
-            return Err(sign_in(
-                "The saved OpenAI sign-in has expired. Renew it in the current panel.",
-            ));
-        }
-        let account = (kind == CredentialKind::OpenAiOauth)
-            .then(|| account_id(&record))
-            .flatten();
-        Ok(Self {
-            kind,
-            token: token.into(),
-            account,
-        })
-    }
-
+impl Authorized {
     fn headers(
         &self,
         incoming: &HeaderMap,
@@ -511,25 +415,6 @@ impl Credential {
         }
         Ok(headers)
     }
-}
-
-fn account_id(record: &Value) -> Option<String> {
-    if let Some(account) = record["chatgptAccountId"]
-        .as_str()
-        .map(str::trim)
-        .filter(|account| !account.is_empty())
-    {
-        return Some(account.into());
-    }
-    ["idToken", "accessToken"].iter().find_map(|key| {
-        let payload = record[key].as_str()?.split('.').nth(1)?;
-        let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
-        Some(
-            claims["https://api.openai.com/auth"]["chatgpt_account_id"]
-                .as_str()?
-                .to_owned(),
-        )
-    })
 }
 
 fn sign_in(message: &str) -> Failure {

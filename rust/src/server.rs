@@ -16,13 +16,14 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::{
+    auth::Accounts,
     bot_models::{Settings, View},
     catalog::Catalog,
     hop::Hop,
     routing::{self, CredentialKind, Route},
 };
 
-const PLAN_MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub const PLAN_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const BOT_MODELS_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -146,13 +147,21 @@ pub fn read_json(path: &Path, maximum: u64) -> io::Result<Option<Value>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-pub fn router(state: State, authority: String, hop: Option<Hop>) -> Router {
+pub fn router(
+    state: State,
+    authority: String,
+    hop: Option<Hop>,
+    accounts: Option<Accounts>,
+) -> Router {
     let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
         .layer(DefaultBodyLimit::max(BOT_MODELS_MAX_BYTES as usize))
         .with_state(state);
     if let Some(hop) = hop {
         router = router.merge(hop.routes());
+    }
+    if let Some(accounts) = accounts {
+        router = router.merge(accounts.routes());
     }
     router.layer(middleware::from_fn_with_state(authority, local_requests))
 }
@@ -181,6 +190,10 @@ async fn local_requests(
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
     );
     response
 }

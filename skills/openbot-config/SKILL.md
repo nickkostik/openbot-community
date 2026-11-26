@@ -9,7 +9,7 @@ Use this skill on the authenticated Grok Bot Computer. OpenBot supervises the se
 
 Official uses stock server/Temporal delivery and Grok quota. Temporal is vendor managed; OpenBot does not deploy that cloud service. Custom uses the owned local BOX/OpenBot runtime and its saved provider route. A failed Custom request never falls back to Official/Temporal. `openbot-mode` is authority; a retained catalog does not imply Custom. Official preserves the plan, credentials and saved local engine.
 
-One owned loopback process on `127.0.0.1:9280` serves the panel, `/api/*` and Custom `POST /v1/chat/completions`. Mutations that change mode/wrap/tunnel use `DesiredState` and reconcile. Never adopt a foreign listener, start a second hop or launch a tokenless native host. The [Rust hop candidate](reference.md#rust-hop-candidate) is an opt-in loopback check against disposable state. Use the Node installer and supervisor for the live service.
+One owned loopback process on `127.0.0.1:9280` serves the panel, `/api/*` and Custom `POST /v1/chat/completions`. Mutations that change mode/wrap/tunnel use `DesiredState` and reconcile. Never adopt a foreign listener, start a second hop or launch a tokenless native host. Use the [Rust hop candidate](reference.md#rust-hop-candidate) to rehearse inference on loopback against disposable state. Add `--enable-accounts` for [account sign-in and renewal](reference.md#rust-account-sign-in-and-renewal). Use the Node installer and supervisor for the live service.
 
 ## Inspect before changing
 

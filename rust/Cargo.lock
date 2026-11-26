@@ -764,6 +764,7 @@ dependencies = [
  "futures-util",
  "httpdate",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

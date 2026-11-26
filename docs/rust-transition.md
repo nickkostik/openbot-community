@@ -38,7 +38,7 @@ revision="$(git rev-parse HEAD)"
 "$native" --sand-data "$fixture" --port "$port" service --unit "$unit" status
 ~~~
 
-The installer verifies that systemd's main PID, OpenBot's published PID, and the actual listening socket identify the same process. It pins the binary and the four served panel assets by content under `.openbot-rust-releases/` and selects the release through `90-openbot-native-runtime.conf`. The existing unit and its other drop-ins continue to supply the service policy and environment. The restarted process must own the same listener and answer `/healthz` with the expected command identity. Reinstalling the same healthy bundle returns its running PID.
+The installer verifies that systemd's main PID, OpenBot's published PID, and the actual listening socket identify the same process. It pins the binary, the four served panel assets, and any selected adapter and Access configuration by content under `.openbot-rust-releases/`. It selects the release through `90-openbot-native-runtime.conf`. The existing unit and its other drop-ins continue to supply the service policy and environment. The restarted process must own the same listener and answer `/healthz` with the expected command identity. Reinstalling the same healthy bundle returns its running PID.
 
 The deployment receipt in `.openbot-rust-deployment.json` records the previous selection before a restart. An unsuccessful restart restores that selection. If the installer itself stops during deployment, the next `install` or `rollback` first restores the pending baseline. The command retries a rate-limited start once for the selected user unit and the configured port. [systemd user unit lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
 
@@ -47,7 +47,7 @@ The deployment receipt in `.openbot-rust-deployment.json` records the previous s
 "$native" --sand-data "$fixture" --port "$port" service --unit "$unit" rollback --original
 ~~~
 
-The first command restores the preceding release. Use `--original` to restore the service that originally owned the port, even after several native upgrades. Both operations reuse the saved state directory. Keep its existing backup and the original service's code until the recovery rehearsal has passed. The managed runtime reads the selected mode and applies the saved refresh and log-retention policies when it runs. The installer still needs wiring for the Computer adapter and authenticated ingress before promoting the production unit.
+The first command restores the preceding release. Use `--original` to restore the service that originally owned the port, even after several native upgrades. Both operations reuse the saved state directory. Keep its existing backup and the original service's code until the recovery rehearsal has passed. The managed runtime reads the selected mode and applies the saved refresh and log-retention policies when it runs. Verify the original protected URLs and the remaining Settings controls before promoting the production unit.
 
 ## Rehearse inference
 
@@ -95,7 +95,33 @@ Use a supervised fixture Node host and the installed adapter from the same relea
 
 Choose a model in the panel or send `POST /api/save` with `kind` set to `use-model`. The service verifies a configured direct chat model and credential, syntax-checks changes with Node, and publishes the plan with the managed loopback endpoint before selecting Custom. Use `--host-node` to select a particular Node executable. Switching to Official preserves the plan and credentials. The host keeps its stock logging adapter while logging is enabled and returns to its original bytes when logging is disabled.
 
-The watcher repairs the supported wrapper after a compatible host update. It records a pending restart in `.openbot-rust-host-reload.json`, waits for the native hop and legacy lease to show no active requests and reach the quiet window, then signals only the matching Node process. The fixture or Computer supervisor starts the replacement. A pending reload from the legacy service takes precedence. The staged installer does not yet activate this controller or configure public ingress.
+The watcher repairs the supported wrapper after a compatible host update. It records a pending restart in `.openbot-rust-host-reload.json`, waits for the native hop and legacy lease to show no active requests and reach the quiet window, then signals only the matching Node process. The fixture or Computer supervisor starts the replacement. A pending reload from the legacy service takes precedence.
+
+Pass the adapter source and Node Computer entrypoint together to include this controller in a pinned installation. The installed adapter reads the state and port from its release and uses the systemd-owned Rust hop when the service restarts.
+
+~~~sh
+"$native" --sand-data "$fixture" --port "$port" service --unit "$unit" \
+  install --ui-dir "$PWD/ui" --revision "$revision" \
+  --payload-dir "$PWD/payload" --host-main "$fixture_host" --host-node "$node"
+~~~
+
+## Verify Cloudflare Access ingress
+
+Use the existing named Cloudflare Tunnel and self-hosted Access applications. Preserve each public Host when forwarding to the loopback listener. Provide the verifier with `--access-config` on the server or the installer. The first `origin` is the address shown in Phone access. An origin needs its exact HTTPS hostname and its Access application’s AUD tag. [Cloudflare origin parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/) · [Cloudflare JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
+
+~~~json
+{
+  "teamDomain": "https://example-team.cloudflareaccess.com",
+  "origins": [
+    {
+      "origin": "https://openbot.example.com",
+      "audience": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}
+~~~
+
+Public panel requests need a valid application assertion from the configured Cloudflare team. Saves also need the site's Origin. The panel validates the signature, issuer, audience, token type, and expiry and refreshes its cached signing keys. Open the loopback panel to finish account sign-in or call inference. `OPENBOT_PUBLIC_URL` is a display setting. The existing connector continues to route both canonical and alias domains, and the chosen service must be verified through a signed-in browser.
 
 ## Rehearse request recording
 
@@ -130,7 +156,8 @@ With request logging enabled, chat records show the estimated input, estimated r
 - [x] Port provider and model management. Verify an endpoint change and key replacement, imported model settings, active-model fallback, and removal through the existing panel.
 - [x] Stage and select the native panel and hop as one existing Linux user service. Verify ownership, a failed restart, an interrupted install, and rollback to the prior and original service.
 - [x] Observe the Computer and rehearse Official and Custom switching, lease-aware Node reload, and host drift repair with the stock adapter.
-- [ ] Finish managed adapter installation and authenticated ingress. Verify the original public URLs through the prepared service.
+- [x] Include the host adapter and Access verifier in the managed release. Verify the systemd install and rollback and the signed-request gates with disposable fixtures.
+- [ ] Port Delivery Follow-up and the Grok Bot Skill controls. Verify the Settings page, then open the original public URLs through the prepared service with a signed-in browser.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.
 

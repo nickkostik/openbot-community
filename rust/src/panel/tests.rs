@@ -14,6 +14,7 @@ const STATUS: ListenerStatus = ListenerStatus {
     port: 42880,
     serves_ui: true,
     serves_hop: false,
+    public_access: None,
 };
 
 fn app(root: &Path) -> Router {

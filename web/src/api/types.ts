@@ -82,6 +82,7 @@ export type Alignment =
 export type TunnelState =
   | { kind: "off" }
   | { kind: "cloudflare-quick"; url: string; internal: string; pid: number; qr?: string }
+  | { kind: "cloudflare-managed"; url: string; internal: string; accessProtected?: boolean }
   | { kind: "error"; message: string };
 
 export type Snapshot = {

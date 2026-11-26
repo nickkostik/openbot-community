@@ -21,13 +21,8 @@ const JOURNAL: &str = ".openbot-rust-deployment.json";
 pub(crate) enum Action {
     /// Prove which process owns the configured OpenBot listener.
     Status,
-    /// Stage this binary and its built panel, then restart the existing unit.
-    Install {
-        #[arg(long)]
-        ui_dir: PathBuf,
-        #[arg(long)]
-        revision: String,
-    },
+    /// Stage a release and restart the existing unit.
+    Install(bundle::Install),
     /// Restore the preceding verified service, or recover an interrupted install.
     Rollback {
         /// Restore the service that was running before the first native install.
@@ -105,9 +100,7 @@ pub(crate) async fn run(data: &Path, port: u16, unit: &str, action: &Action) -> 
     }
 
     let after = match action {
-        Action::Install { ui_dir, revision } => {
-            bundle::stage(&data, ui_dir, revision, port, &std::env::current_exe()?)?
-        }
+        Action::Install(options) => bundle::stage(&data, options, port, &std::env::current_exe()?)?,
         Action::Rollback { original } => if *original {
             deploy.journal.original.as_ref()
         } else {

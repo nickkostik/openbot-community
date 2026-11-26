@@ -1,3 +1,5 @@
+mod adapter;
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -6,19 +8,43 @@ use std::{
 };
 
 use axum::body::Bytes;
+use clap::Args;
 use sha2::{Digest, Sha256};
 
 use super::{Selection, drift, platform::Identity};
 
 const BINARY: &str = "openbot-runtime";
+const ACCESS: &str = "access.json";
+
+#[derive(Args)]
+pub(crate) struct Install {
+    /// Built panel assets for this revision.
+    #[arg(long)]
+    ui_dir: PathBuf,
+    /// Full Git revision for the release.
+    #[arg(long)]
+    revision: String,
+    /// Project payload directory containing the stock Computer adapter.
+    #[arg(long, requires = "host_main")]
+    payload_dir: Option<PathBuf>,
+    /// Standalone Node Computer entrypoint managed by this release.
+    #[arg(long, requires = "payload_dir")]
+    host_main: Option<PathBuf>,
+    /// Absolute Node executable path for the staged source check.
+    #[arg(long, requires = "host_main")]
+    host_node: Option<PathBuf>,
+    /// Optional configuration for Cloudflare Access at public panel origins.
+    #[arg(long)]
+    access_config: Option<PathBuf>,
+}
 
 pub(super) fn stage(
     data: &Path,
-    ui_dir: &Path,
-    revision: &str,
+    options: &Install,
     port: u16,
     source: &Path,
 ) -> io::Result<Selection> {
+    let revision = options.revision.as_str();
     if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(io::Error::new(
@@ -26,10 +52,21 @@ pub(super) fn stage(
             "a full Git revision is required",
         ));
     }
+    let payload = options
+        .payload_dir
+        .as_ref()
+        .map(|directory| adapter::Payload::stage(directory, revision, port))
+        .transpose()?;
     let files = Files {
         executable: fs::read(source)?,
-        assets: crate::panel::release_assets(ui_dir)?,
+        assets: crate::panel::release_assets(&options.ui_dir)?,
         revision,
+        payload,
+        access: options
+            .access_config
+            .as_deref()
+            .map(crate::ingress::release_config)
+            .transpose()?,
     };
     let releases = data.join(".openbot-rust-releases");
     fs::create_dir_all(&releases)?;
@@ -37,7 +74,7 @@ pub(super) fn stage(
         return Err(drift("the release store must be a directory"));
     }
     let release = releases.join(files.digest());
-    let argv = command(&release, data, port)?;
+    let argv = command(&release, data, port, options)?;
     let quoted = argv
         .iter()
         .map(|arg| quote(arg))
@@ -58,6 +95,8 @@ struct Files<'a> {
     executable: Vec<u8>,
     assets: Vec<(&'static str, Bytes)>,
     revision: &'a str,
+    payload: Option<adapter::Payload>,
+    access: Option<Vec<u8>>,
 }
 
 pub(super) fn validate_installed(executable: &Path) -> io::Result<()> {
@@ -67,6 +106,8 @@ pub(super) fn validate_installed(executable: &Path) -> io::Result<()> {
         executable: fs::read(executable)?,
         assets: crate::panel::release_assets(&release.join("ui"))?,
         revision: &revision,
+        payload: adapter::Payload::read_installed(release)?,
+        access: read_access(release)?,
     };
     if !release.symlink_metadata()?.file_type().is_dir()
         || !release.join("ui").symlink_metadata()?.file_type().is_dir()
@@ -86,6 +127,13 @@ impl Files<'_> {
         for (name, bytes) in &self.assets {
             hash.update(Sha256::digest(name));
             hash.update(Sha256::digest(bytes));
+        }
+        if let Some(payload) = &self.payload {
+            payload.hash(&mut hash);
+        }
+        if let Some(access) = &self.access {
+            hash.update(Sha256::digest(ACCESS));
+            hash.update(Sha256::digest(access));
         }
         format!("{:x}", hash.finalize())
     }
@@ -109,6 +157,12 @@ impl Files<'_> {
         for (name, bytes) in &self.assets {
             write_new(path.join("ui").join(name), bytes, 0o600)?;
         }
+        if let Some(payload) = &self.payload {
+            payload.install(path)?;
+        }
+        if let Some(access) = &self.access {
+            write_new(path.join(ACCESS), access, 0o600)?;
+        }
         File::open(path.join("ui"))?.sync_all()?;
         File::open(path)?.sync_all()?;
         fs::rename(path, release)?;
@@ -127,7 +181,24 @@ impl Files<'_> {
                 return Err(drift("the existing staged panel has changed"));
             }
         }
+        if adapter::Payload::read_installed(release)? != self.payload {
+            return Err(drift("the existing staged host adapter has changed"));
+        }
+        if read_access(release)? != self.access {
+            return Err(drift(
+                "the existing staged panel access configuration has changed",
+            ));
+        }
         Ok(())
+    }
+}
+
+fn read_access(release: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path = release.join(ACCESS);
+    match path.symlink_metadata() {
+        Ok(_) => crate::ingress::release_config(&path).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -146,7 +217,7 @@ fn matches_bytes(path: &Path, expected: &[u8]) -> io::Result<bool> {
         && crate::server::read_bytes(path, expected.len() as u64)?.as_deref() == Some(expected))
 }
 
-fn command(release: &Path, data: &Path, port: u16) -> io::Result<Vec<String>> {
+fn command(release: &Path, data: &Path, port: u16, options: &Install) -> io::Result<Vec<String>> {
     let path = |path: &Path| {
         path.to_str()
             .map(str::to_owned)
@@ -173,6 +244,30 @@ fn command(release: &Path, data: &Path, port: u16) -> io::Result<Vec<String>> {
         ]
         .map(str::to_owned),
     );
+    if let Some(host) = options.host_main.as_deref() {
+        if !host.is_absolute() || !host.symlink_metadata()?.file_type().is_file() {
+            return Err(drift("select an absolute regular Computer entrypoint"));
+        }
+        argv.extend([
+            "--host-main".into(),
+            path(host)?,
+            "--host-adapter".into(),
+            path(&release.join("payload/runtime.cjs"))?,
+        ]);
+        if let Some(node) = options.host_node.as_deref() {
+            use std::os::unix::fs::PermissionsExt;
+            if !node.is_absolute()
+                || !node.is_file()
+                || node.metadata()?.permissions().mode() & 0o111 == 0
+            {
+                return Err(drift("select an absolute Node executable"));
+            }
+            argv.extend(["--host-node".into(), path(node)?]);
+        }
+    }
+    if options.access_config.is_some() {
+        argv.extend(["--access-config".into(), path(&release.join(ACCESS))?]);
+    }
     Ok(argv)
 }
 
@@ -208,12 +303,16 @@ mod tests {
         fs::write(ui.join(".env"), "must not copy").unwrap();
         let executable = data.join(BINARY);
         fs::write(&executable, "fixture executable").unwrap();
-        let revision = "a".repeat(40);
-        let first = stage(data, &ui, &revision, 9280, &executable).unwrap();
-        assert_eq!(
-            stage(data, &ui, &revision, 9280, &executable).unwrap(),
-            first
-        );
+        let options = Install {
+            ui_dir: ui.clone(),
+            revision: "a".repeat(40),
+            payload_dir: None,
+            host_main: None,
+            host_node: None,
+            access_config: None,
+        };
+        let first = stage(data, &options, 9280, &executable).unwrap();
+        assert_eq!(stage(data, &options, 9280, &executable).unwrap(), first);
         let staged = fs::read_dir(data.join(".openbot-rust-releases"))
             .unwrap()
             .next()
@@ -224,12 +323,9 @@ mod tests {
         validate_installed(&staged.join(BINARY)).unwrap();
         fs::write(staged.join("ui/app.js"), "tampered").unwrap();
         assert!(validate_installed(&staged.join(BINARY)).is_err());
-        assert!(stage(data, &ui, &revision, 9280, &executable).is_err());
+        assert!(stage(data, &options, 9280, &executable).is_err());
         fs::write(ui.join("app.js"), "change").unwrap();
-        assert_ne!(
-            stage(data, &ui, &revision, 9280, &executable).unwrap(),
-            first
-        );
+        assert_ne!(stage(data, &options, 9280, &executable).unwrap(), first);
     }
 
     #[test]

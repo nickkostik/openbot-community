@@ -266,16 +266,17 @@ On this listener, `POST /api/save` with `kind: "use-model"` checks the installed
 
 The deferred reload receipt `.openbot-rust-host-reload.json` holds the expected source digest and Node process identities. Only the exact Node entrypoint with a still-matching PID and start time is eligible for a deferred SIGTERM and supervised restart. The Desktop PID is for observation. The reload waits at least 120 seconds from arming and respects native in-flight turns and `openbot-turn-lease.json`. Quiet time is 90 seconds when the legacy lease records `stop` and 300 seconds otherwise. An existing `openbot-pending-bounce.json` halts native reconciliation until the prior managed reload is resolved.
 
-The panel's HTTPS `OPENBOT_PUBLIC_URL` or observed quick tunnel status is advisory. Ingress mutations and wiring host management into the native install are separate work. Continue to use the current Node production path and Official/Temporal delivery.
+The [Linux managed service](#linux-managed-rust-service) can install the same adapter from the source payload. The separate [Access configuration](#rust-cloudflare-access-panel) is for protected panel ingress.
 
 #### Linux managed Rust service
 
-Use the Linux command as the owner of an existing OpenBot systemd user service with its configured fixed port. Rehearse against the service and state set aside for verification. Substitute the actual data directory, unit, built panel directory and full Git revision.
+Use the Linux command as the owner of an existing OpenBot systemd user service with its configured fixed port. Rehearse against the service and state set aside for verification. Substitute the actual data directory, unit, built panel directory and full Git revision. Add the source payload directory and absolute supervised Computer entrypoint together to enable host management.
 
 ```bash
 openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service status
 openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service \
-  install --ui-dir BUILT_UI --revision FULL_GIT_SHA
+  install --ui-dir BUILT_UI --revision FULL_GIT_SHA \
+  --payload-dir PAYLOAD_DIR --host-main /path/to/host-main.cjs
 openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback
 openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback --original
 ```
@@ -284,13 +285,34 @@ openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.servi
 
 | Location | Purpose |
 | --- | --- |
-| `DIR/.openbot-rust-releases/<bundle-hash>/` | Content-verified `openbot-runtime`, `revision` and `ui/{index.html,app.js,styles.css,favicon.svg}`. The bundle digest covers the binary, assets and revision. |
+| `DIR/.openbot-rust-releases/<bundle-hash>/` | Content-verified `openbot-runtime`, `revision` and `ui/{index.html,app.js,styles.css,favicon.svg}`. Optional `payload/` and `access.json` are staged in the same release. |
 | `$XDG_CONFIG_HOME/systemd/user/<unit>.d/90-openbot-native-runtime.conf` | The managed command override. With the default user configuration path, it is under `~/.config/systemd/user/`. |
 | `DIR/.openbot-rust-deployment.json` | Recovery journal with the original selection, preceding deployment and any pending change. |
+
+Use `--host-node /absolute/node` to select a different Node executable for staged source validation. Use `--access-config /path/to/access.json` on `install` to bundle [Cloudflare Access settings](#rust-cloudflare-access-panel). The payload and host entrypoint arguments are optional as a pair. Earlier releases without add-ons remain eligible for normal rollback.
+
+The release digest covers the binary, UI assets and revision, plus the optional `access.json` and the adapter modules, vendored JPEG and PNG dependencies and `payload/version.json` when bundled. The adapter selects the Rust loopback port from that stamp and derives the state directory from the release location. Systemd is the sole supervisor for the managed hop.
 
 `rollback` restores the preceding verified selection or recovers an interrupted change. `rollback --original` restores the command saved at the first native install. The managed drop-in is removed when the restored selection used the original unit command. A pending change is recovered on install or rollback after ownership and drop-in checks.
 
 The deployment transaction preserves the saved mode, plan, credentials and routine settings. Once the native process starts, its refresh and retention workers use the saved policies. Use the existing Node production path and stock Official/Temporal delivery. Production promotion and remaining panel control routes are separate from the managed-service rehearsal.
+
+#### Rust Cloudflare Access panel
+
+Use `--access-config /path/to/access.json` with `--ui-dir` on a standalone Rust candidate, or pass it to the Linux user-service `install` command. Set `teamDomain` to the exact HTTPS Cloudflare team origin. Each `origins` entry uses an exact HTTPS public hostname and the corresponding Access application's 64-hex-character AUD. Use the scheme and hostname for both origins and replace the placeholders before use. [Cloudflare JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
+
+```json
+{
+  "teamDomain": "https://<team>.cloudflareaccess.com",
+  "origins": [
+    {"origin": "https://panel.example.test", "audience": "<Access application AUD>"}
+  ]
+}
+```
+
+Keep the existing Cloudflare service as the connector to the fixed loopback listener. The external proxy must preserve the original public `Host` and forward `Cf-Access-Jwt-Assertion`. Rust verifies the signature against the team's signing keys and checks the issuer, audience, application token type and validity times. Public browser writes require the matching `Origin`. The hop and OAuth routes, including the sign-in callback, use loopback. [Cloudflare Tunnel origin parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/).
+
+The first configured origin appears as the protected panel URL. `OPENBOT_PUBLIC_URL` alone is advisory. For a rehearsal, check loopback health and read back `/api/state` in an authenticated browser at the configured public origin. Quick-tunnel lifecycle uses the existing controls.
 
 ### Official controls without logging rewrap
 

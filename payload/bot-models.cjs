@@ -3,8 +3,10 @@
 var fs = require("fs");
 var path = require("path");
 var requestLog = require("./request-log.cjs");
+var { managedService } = require("./version.cjs");
 
 function botModelsPath() {
+  if (managedService) return path.join(managedService.sandData, "openbot-bot-models.json");
   if (process.env.OPENBOT_BOT_MODELS) return process.env.OPENBOT_BOT_MODELS;
   var root = process.env.OPENBOT_SAND_DATA || (process.env.OPENBOT_PLAN ? path.dirname(process.env.OPENBOT_PLAN) : "/home/box/sand-data");
   return path.join(root, "openbot-bot-models.json");

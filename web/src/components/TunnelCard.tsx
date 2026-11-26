@@ -7,7 +7,7 @@ import { QrCode } from "./QrCode";
 import { Badge, Button, Notice } from "./ui";
 
 /**
- * Phone access (Cloudflare quick tunnel). Moved off the Dashboard so the
+ * Phone access (Cloudflare quick or managed tunnel). Moved off the Dashboard so the
  * Dashboard stays a status page; behaviour and toast copy are unchanged.
  */
 export function TunnelCard() {
@@ -17,7 +17,9 @@ export function TunnelCard() {
   const [busy, setBusy] = useState(false);
 
   const tunnel = state.snapshot.tunnel;
-  const live = tunnel.kind === "cloudflare-quick";
+  const live = tunnel.kind === "cloudflare-quick" || tunnel.kind === "cloudflare-managed";
+  const managed = tunnel.kind === "cloudflare-managed";
+  const protectedAccess = managed && tunnel.accessProtected === true;
   const href = live ? publicTunnelUrl(tunnel.url) : "";
 
   const run = async (expose: "cloudflare" | "off", title: string, message: string) => {
@@ -56,7 +58,15 @@ export function TunnelCard() {
           <span className="card__label" id="h-tunnel">
             Phone access
           </span>
-          {live ? <Badge tone="success">Live</Badge> : tunnel.kind === "error" ? <Badge tone="danger">Error</Badge> : <Badge>Off</Badge>}
+          {managed ? (
+            <Badge tone="success">Permanent</Badge>
+          ) : live ? (
+            <Badge tone="success">Live</Badge>
+          ) : tunnel.kind === "error" ? (
+            <Badge tone="danger">Error</Badge>
+          ) : (
+            <Badge>Off</Badge>
+          )}
         </div>
         <div className="card__body stack" style={{ gap: 12 }}>
           {live ? (
@@ -68,23 +78,31 @@ export function TunnelCard() {
               <Button variant="secondary-sm" icon={Copy} onClick={() => void copy(href)}>
                 Copy URL
               </Button>
-              <QrCode value={href} label="QR code for the public URL" />
-              <Notice tone="warn" icon={Info}>
-                Anyone with this URL can open this console. Keys stay on the Computer.
+              {!managed && <QrCode value={href} label="QR code for the public URL" />}
+              <Notice tone={protectedAccess ? "info" : "warn"} icon={Info}>
+                {protectedAccess
+                  ? "Cloudflare Access sign-in is required to open this console."
+                  : "Anyone with this URL can open this console. Keys stay on the Computer."}
               </Notice>
-              <div className="row gap-2">
-                <Button
-                  variant="secondary-sm"
-                  icon={RefreshCw}
-                  loading={busy}
-                  onClick={() => void run("cloudflare", "Tunnel refreshed", "A fresh public URL was minted.")}
-                >
-                  Refresh URL
-                </Button>
-                <Button variant="outline-danger" onClick={() => setConfirm("stop")}>
-                  Stop
-                </Button>
-              </div>
+              {managed ? (
+                <p style={{ color: "var(--muted)", margin: 0 }}>
+                  This permanent URL is managed by the Computer service and stays stable across restarts.
+                </p>
+              ) : (
+                <div className="row gap-2">
+                  <Button
+                    variant="secondary-sm"
+                    icon={RefreshCw}
+                    loading={busy}
+                    onClick={() => void run("cloudflare", "Tunnel refreshed", "A fresh public URL was minted.")}
+                  >
+                    Refresh URL
+                  </Button>
+                  <Button variant="outline-danger" onClick={() => setConfirm("stop")}>
+                    Stop
+                  </Button>
+                </div>
+              )}
             </>
           ) : tunnel.kind === "error" ? (
             <>

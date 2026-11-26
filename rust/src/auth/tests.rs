@@ -188,6 +188,7 @@ fn account_router(root: &Path, upstream: &Upstream) -> Router {
         port: 30444,
         serves_ui: true,
         serves_hop: false,
+        public_access: None,
     };
     let accounts = Accounts::new(store, HOST, status, None).unwrap();
     router(state, HOST.into(), [accounts.routes()])

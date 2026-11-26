@@ -12,16 +12,18 @@ var { toOpenAIMessages } = require("./openai-messages.cjs");
 var openaiStream = require("./openai-stream.cjs");
 var requestLog = require("./request-log.cjs");
 var botModels = require("./bot-models.cjs");
+var { managedService } = require("./version.cjs");
 var profileNameCache = Object.create(null);
 
 function sandDir() {
+  if (managedService) return managedService.sandData;
   if (process.env.OPENBOT_SAND_DATA) return process.env.OPENBOT_SAND_DATA;
   if (process.env.OPENBOT_PLAN) return path.dirname(process.env.OPENBOT_PLAN);
   return "/home/box/sand-data";
 }
 
 function pausePath() {
-  if (process.env.OPENBOT_PAUSE) return process.env.OPENBOT_PAUSE;
+  if (!managedService && process.env.OPENBOT_PAUSE) return process.env.OPENBOT_PAUSE;
   return path.join(sandDir(), "openbot-pause.json");
 }
 
@@ -40,7 +42,7 @@ function readPauseState() {
 }
 
 function pauseBotsPath() {
-  if (process.env.OPENBOT_PAUSE_BOTS) return process.env.OPENBOT_PAUSE_BOTS;
+  if (!managedService && process.env.OPENBOT_PAUSE_BOTS) return process.env.OPENBOT_PAUSE_BOTS;
   return path.join(sandDir(), "openbot-pause-bots.json");
 }
 
@@ -64,11 +66,11 @@ function assertNotPaused() {
   }
 }
 
-var PLAN = process.env.OPENBOT_PLAN || path.join(sandDir(), "openbot-plan.json");
-var MODE = process.env.OPENBOT_MODE || path.join(sandDir(), "openbot-mode");
-var LOG = process.env.OPENBOT_LOG || "/tmp/openbot-session.log";
-var HOP_HOST = process.env.OPENBOT_HOP_HOST || "127.0.0.1";
-var HOP_PORT = Number(process.env.OPENBOT_HOP_PORT || "9280");
+var PLAN = !managedService && process.env.OPENBOT_PLAN || path.join(sandDir(), "openbot-plan.json");
+var MODE = !managedService && process.env.OPENBOT_MODE || path.join(sandDir(), "openbot-mode");
+var LOG = managedService ? path.join(sandDir(), "openbot-session.log") : process.env.OPENBOT_LOG || "/tmp/openbot-session.log";
+var HOP_HOST = !managedService && process.env.OPENBOT_HOP_HOST || "127.0.0.1";
+var HOP_PORT = managedService ? managedService.port : Number(process.env.OPENBOT_HOP_PORT || "9280");
 var HIGH_AGENT_MAX_TOKENS = 65536;
 var MAX_SAFE_STRING = 32768;
 
@@ -702,7 +704,7 @@ var lastSpawnPid = 0;
 function hopHealTarget(overrides) {
   var o = overrides && typeof overrides === "object" ? overrides : {};
   var port = Number.isFinite(Number(o.port)) && Number(o.port) > 0 ? Number(o.port) : HOP_PORT;
-  var unified = port === 9280 || o.unified === true;
+  var unified = managedService !== null || port === 9280 || o.unified === true;
   var repoRoot = process.env.OPENBOT_REPO || path.resolve(__dirname, "..");
   var hostMain = process.env.OPENBOT_HOST_MAIN || process.argv.find(function (arg) {
     return path.isAbsolute(arg) && path.basename(arg) === "host-main.cjs";
@@ -984,7 +986,8 @@ function ensureHopUp(overrides, allowSpawn) {
   return hopHealReady(target).then(function (open) {
     if (open) return { ok: true, action: "already-up" };
     if (healInFlight) return healInFlight;
-    healInFlight = doHealUp(target, allowSpawn);
+    // The installed systemd unit owns this listener and its PID file.
+    healInFlight = doHealUp(target, !managedService && allowSpawn);
     return healInFlight.then(
       function (result) {
         healInFlight = null;

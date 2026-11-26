@@ -301,9 +301,10 @@ async fn start_runtime(root: &Path) -> (Listener, Compactor, Logs) {
         .with_compactor(Some(compactor.clone()))
         .with_logs(logs.clone());
     let api = logs.clone().routes();
-    let listener =
-        Listener::start(move |authority| server::router(state, authority, [hop.routes(), api]))
-            .await;
+    let listener = Listener::start(move |authority| {
+        server::router(state, authority.into(), [hop.routes(), api])
+    })
+    .await;
     (listener, compactor, logs)
 }
 

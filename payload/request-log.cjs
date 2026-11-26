@@ -3,6 +3,7 @@
 var crypto = require("crypto");
 var fs = require("fs");
 var path = require("path");
+var { managedService } = require("./version.cjs");
 
 var PREVIEW_CHARS = 8000;
 var ERROR_CHARS = 500;
@@ -46,6 +47,7 @@ function isRecord(value) {
 }
 
 function sandDataDir() {
+  if (managedService) return managedService.sandData;
   if (process.env.OPENBOT_SAND_DATA) return process.env.OPENBOT_SAND_DATA;
   if (process.env.OPENBOT_PLAN) return path.dirname(process.env.OPENBOT_PLAN);
   return DEFAULT_SAND_DATA;
@@ -55,11 +57,11 @@ function logPaths() {
   var sand = sandDataDir();
   return {
     sandData: sand,
-    settings: process.env.OPENBOT_LOGS || path.join(sand, "openbot-logs.json"),
+    settings: !managedService && process.env.OPENBOT_LOGS || path.join(sand, "openbot-logs.json"),
     requestLog: path.join(sand, "openbot-requests.jsonl"),
     eventsLog: path.join(sand, "openbot-events.jsonl"),
     bodiesDir: path.join(sand, "openbot-request-bodies"),
-    secrets: process.env.OPENBOT_SECRETS || path.join(sand, "secrets.json"),
+    secrets: !managedService && process.env.OPENBOT_SECRETS || path.join(sand, "secrets.json"),
   };
 }
 

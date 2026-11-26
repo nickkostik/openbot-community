@@ -6,6 +6,8 @@ mod compaction;
 mod discovery;
 mod hop;
 mod host;
+mod ingress;
+mod jwt;
 mod lease;
 mod logs;
 mod panel;
@@ -68,6 +70,9 @@ struct Args {
     /// Node executable used to validate staged host source.
     #[arg(long, default_value = "node")]
     host_node: PathBuf,
+    /// Cloudflare Access applications permitted to use the panel.
+    #[arg(long, requires = "ui_dir")]
+    access_config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -160,6 +165,7 @@ async fn serve(args: Args) -> io::Result<()> {
         host_main,
         host_adapter,
         host_node,
+        access_config,
         ..
     } = args;
     if managed_service && port == 0 {
@@ -177,10 +183,12 @@ async fn serve(args: Args) -> io::Result<()> {
     } else {
         address.to_string()
     };
+    let request_policy = ingress::Policy::new(authority.clone(), access_config.as_deref())?;
     let status = panel::ListenerStatus {
         port: address.port(),
         serves_ui: ui_dir.is_some(),
         serves_hop: enable_hop,
+        public_access: request_policy.public_url().map(str::to_owned),
     };
     let host = host_main
         .or_else(|| {
@@ -211,7 +219,7 @@ async fn serve(args: Args) -> io::Result<()> {
     let accounts = credentials
         .clone()
         .filter(|_| enable_accounts)
-        .map(|store| auth::Accounts::new(store, &authority, status, host.clone()))
+        .map(|store| auth::Accounts::new(store, &authority, status.clone(), host.clone()))
         .transpose()?;
     let discovery = credentials
         .clone()
@@ -220,7 +228,7 @@ async fn serve(args: Args) -> io::Result<()> {
         .transpose()?;
     let panel = ui_dir
         .zip(credentials.clone())
-        .map(|(directory, store)| panel::routes(directory, store, status, host.clone()))
+        .map(|(directory, store)| panel::routes(directory, store, status.clone(), host.clone()))
         .transpose()?;
     let refresh = discovery
         .clone()
@@ -250,7 +258,7 @@ async fn serve(args: Args) -> io::Result<()> {
     let log_cleanup = logs.schedule_cleanup();
     let result = axum::serve(
         listener,
-        server::router(state, authority, services.into_iter().flatten()),
+        server::router(state, request_policy, services.into_iter().flatten()),
     )
     .with_graceful_shutdown(async move {
         shutdown().await;

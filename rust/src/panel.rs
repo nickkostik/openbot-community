@@ -46,11 +46,12 @@ struct PanelReadback {
     host: Option<Host>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ListenerStatus {
     pub port: u16,
     pub serves_ui: bool,
     pub serves_hop: bool,
+    pub public_access: Option<String>,
 }
 
 pub fn routes(
@@ -133,10 +134,18 @@ impl ListenerStatus {
             "ok"
         };
         let alignment = json!({"kind":stage,"desired":mode,"wrap":wrap["kind"]});
-        let tunnel = host::tunnel(
-            root,
-            self.port,
-            std::env::var("OPENBOT_PUBLIC_URL").ok().as_deref(),
+        let tunnel = self.public_access.as_ref().map_or_else(
+            || {
+                host::tunnel(
+                    root,
+                    self.port,
+                    std::env::var("OPENBOT_PUBLIC_URL").ok().as_deref(),
+                )
+            },
+            |url| {
+                json!({"kind":"cloudflare-managed","url":url,"accessProtected":true,
+                         "internal":format!("http://127.0.0.1:{}",self.port)})
+            },
         );
         state["snapshot"] = json!({
             "wrap":wrap,

@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::{
     bot_models::{Settings, View},
     catalog::Catalog,
+    ingress::Policy,
     lease::Lease,
     routing::{self, CredentialKind, Route},
 };
@@ -191,11 +192,7 @@ pub fn read_mode(root: &Path) -> io::Result<&'static str> {
     })
 }
 
-pub fn router(
-    state: State,
-    authority: String,
-    services: impl IntoIterator<Item = Router>,
-) -> Router {
+pub fn router(state: State, policy: Policy, services: impl IntoIterator<Item = Router>) -> Router {
     let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
         .route("/api/pause", get(pauses::global).put(pauses::save_global))
@@ -209,30 +206,31 @@ pub fn router(
     for service in services {
         router = router.merge(service);
     }
-    router.layer(middleware::from_fn_with_state(authority, local_requests))
+    router.layer(middleware::from_fn_with_state(policy, panel_requests))
 }
 
-async fn local_requests(
-    AxumState(authority): AxumState<String>,
+async fn panel_requests(
+    AxumState(policy): AxumState<Policy>,
     request: Request,
     next: Next,
 ) -> Response {
-    let headers = request.headers();
-    let origin = format!("http://{authority}");
-    if headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        != Some(&authority)
-        || headers
-            .get(header::ORIGIN)
-            .is_some_and(|value| value != &origin)
-    {
-        return error(
+    let mut response = if request.uri().authority().is_some() {
+        error(
             StatusCode::FORBIDDEN,
-            "OpenBot requires its loopback origin.",
-        );
-    }
-    let mut response = next.run(request).await;
+            "OpenBot requires a panel-relative request.",
+        )
+    } else {
+        match policy
+            .authorize(request.headers(), request.method(), request.uri().path())
+            .await
+        {
+            Ok(()) => next.run(request).await,
+            Err(denial) => {
+                let (status, message) = denial.response();
+                error(status, message)
+            }
+        }
+    };
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),

@@ -1,7 +1,5 @@
 use std::{io, time::Duration};
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde_json::Value;
 use url::Url;
 
@@ -115,22 +113,8 @@ impl Network {
     ) -> Result<String, AuthError> {
         let invalid =
             || AuthError::input("OpenAI's ChatGPT account identity could not be verified.");
-        if token.len() > 32_768 {
-            return Err(invalid());
-        }
-        let mut parts = token.split('.');
-        let (Some(header), Some(claims), Some(signed), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err(invalid());
-        };
-        let decode = |part| -> Result<Value, AuthError> {
-            let body = URL_SAFE_NO_PAD.decode(part).map_err(|_| invalid())?;
-            serde_json::from_slice(&body).map_err(|_| invalid())
-        };
-        let header_data = decode(header)?;
-        let claims_data = decode(claims)?;
-        let key_id = credential::text(&header_data["kid"]).ok_or_else(invalid)?;
+        let token = crate::jwt::Token::parse(token).ok_or_else(invalid)?;
+        let claims_data = &token.claims;
         let subject = credential::text(&claims_data["sub"]).ok_or_else(invalid)?;
         let now = unix_seconds();
         let authorized_party = claims_data.get("azp");
@@ -141,8 +125,7 @@ impl Network {
                     && items.iter().any(|item| item == client)
                     && (items.len() == 1 || authorized_party.is_some_and(|value| value == client))
             });
-        if header_data["alg"] != "RS256"
-            || claims_data["iss"] != ISSUER
+        if claims_data["iss"] != ISSUER
             || claims_data["nonce"] != nonce
             || credential::seconds(&claims_data["exp"]).is_none_or(|expiry| expiry <= now)
             || claims_data
@@ -157,31 +140,9 @@ impl Network {
             .json(self.client.get(self.jwks.clone()))
             .await
             .map_err(|_| invalid())?;
-        let mut keys = body["keys"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|item| {
-                item["kid"] == key_id
-                    && item["kty"] == "RSA"
-                    && item.get("use").is_none_or(|value| value == "sig")
-                    && item.get("alg").is_none_or(|value| value == "RS256")
-            });
-        let key = keys.next().ok_or_else(invalid)?;
-        if keys.next().is_some() {
+        if !token.verify(&body) {
             return Err(invalid());
         }
-        let n = URL_SAFE_NO_PAD
-            .decode(credential::text(&key["n"]).ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
-        let e = URL_SAFE_NO_PAD
-            .decode(credential::text(&key["e"]).ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
-        let signed = URL_SAFE_NO_PAD.decode(signed).map_err(|_| invalid())?;
-        let message = format!("{header}.{claims}");
-        RsaPublicKeyComponents { n, e }
-            .verify(&RSA_PKCS1_2048_8192_SHA256, message.as_bytes(), &signed)
-            .map_err(|_| invalid())?;
         Ok(subject.into())
     }
 }

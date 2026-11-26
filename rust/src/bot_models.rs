@@ -82,6 +82,14 @@ impl Settings {
         }
     }
 
+    pub fn model_for_bot(&self, bot_id: &str) -> Option<&str> {
+        lookup_bot(&self.assignments, bot_id).map(String::as_str)
+    }
+
+    pub fn effort_for_bot(&self, bot_id: &str, model_id: &str) -> Option<Effort> {
+        lookup_bot(&self.reasoning, bot_id)?.get(model_id).copied()
+    }
+
     pub fn saved(&self) -> Result<Map<String, Value>, serde_json::Error> {
         let mut record = self.extra.clone();
         record.insert(
@@ -198,6 +206,10 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+fn lookup_bot<'a, T>(rows: &'a BTreeMap<String, T>, id: &str) -> Option<&'a T> {
+    rows.get(id).or_else(|| rows.get(&id.to_lowercase()))
 }
 
 fn collect_ids<'a>(

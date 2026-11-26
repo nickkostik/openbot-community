@@ -173,20 +173,77 @@ fn parsed_levels(value: &Value) -> Vec<Effort> {
 #[derive(Debug)]
 pub struct Model {
     pub id: String,
+    pub provider_id: String,
+    pub slug: String,
     pub chat: bool,
+    pub wire_chat: bool,
+    pub protocol: Option<Protocol>,
     pub levels: Vec<Effort>,
+    saved_effort: Effort,
     policy: Option<Policy>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+    Anthropic,
+}
+
+impl Protocol {
+    fn parse(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "chat-completions" => Some(Self::ChatCompletions),
+            "responses" => Some(Self::Responses),
+            "anthropic" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Provider {
+    pub id: String,
+    pub origin: String,
+    pub protocol: Protocol,
+}
+
+impl Provider {
+    fn from_saved(row: &Value) -> Option<Self> {
+        Some(Self {
+            id: row["id"].as_str()?.into(),
+            origin: row["origin"].as_str().unwrap_or_default().into(),
+            protocol: Protocol::parse(&row["apiType"]).unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct Binding {
+    pub model: String,
+    pub provider: String,
+}
+
+impl Binding {
+    fn from_saved(row: &Value) -> Option<Self> {
+        Some(Self {
+            model: row["modelId"].as_str()?.into(),
+            provider: row["providerId"].as_str().unwrap_or_default().into(),
+        })
+    }
+}
+
 impl Model {
-    fn from_saved(row: &Value, providers: &[Value]) -> Option<Self> {
+    fn from_saved(row: &Value, providers: &[Provider]) -> Option<Self> {
         let id = row["id"].as_str()?;
         let provider_id = row["providerId"].as_str()?;
         let slug = row["slug"].as_str()?;
         let origin = providers
             .iter()
-            .find(|provider| provider["id"].as_str() == Some(provider_id))
-            .and_then(|provider| provider["origin"].as_str())
+            .find(|provider| provider.id == provider_id)
+            .map(|provider| provider.origin.as_str())
             .unwrap_or_default();
         let policy = Policy::for_route(slug, origin);
         let levels = policy
@@ -197,13 +254,33 @@ impl Model {
                     .flatten()
             })
             .map_or_else(|| parsed_levels(&row["reasoningLevels"]), <[_]>::to_vec);
+        let mut saved_effort = row["activeReasoning"]
+            .as_str()
+            .and_then(Effort::parse)
+            .unwrap_or(Default);
+        if saved_effort == Off
+            && !row["reasoningLevels"]
+                .as_array()
+                .is_some_and(|levels| levels.iter().any(|level| level == "default"))
+        {
+            saved_effort = Default;
+        }
+        let protocol = match &row["apiType"] {
+            Value::Null => Protocol::parse(&row["api_type"]),
+            configured => Protocol::parse(configured),
+        };
         Some(Self {
             id: id.into(),
+            provider_id: provider_id.into(),
+            slug: slug.into(),
             chat: !matches!(
                 row["modelType"].as_str(),
                 Some("embedding" | "decision" | "image" | "other")
             ),
+            wire_chat: row.get("modelType").is_none_or(|kind| kind == "chat"),
+            protocol,
             levels,
+            saved_effort,
             policy,
         })
     }
@@ -213,11 +290,20 @@ impl Model {
             .and_then(|policy| policy.aliases.iter().find(|(old, _)| *old == effort))
             .map_or(effort, |(_, current)| *current)
     }
+
+    pub fn routed_effort(&self, override_effort: Option<Effort>) -> Effort {
+        override_effort
+            .map(|choice| self.display_effort(choice))
+            .filter(|choice| self.levels.contains(choice))
+            .unwrap_or_else(|| self.display_effort(self.saved_effort))
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct Catalog {
     pub models: Vec<Model>,
+    pub providers: Vec<Provider>,
+    pub wildcard: Option<Binding>,
 }
 
 impl Catalog {
@@ -231,11 +317,14 @@ impl Catalog {
         else {
             return Self::default();
         };
+        let providers: Vec<_> = providers.iter().filter_map(Provider::from_saved).collect();
         Self {
             models: models
                 .iter()
-                .filter_map(|row| Model::from_saved(row, providers))
+                .filter_map(|row| Model::from_saved(row, &providers))
                 .collect(),
+            providers,
+            wildcard: Binding::from_saved(&plan["agents"]["*"]),
         }
     }
 

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     bot_models::{Settings, View},
     catalog::Catalog,
+    routing::{self, CredentialKind, Route},
 };
 
 const PLAN_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -58,6 +59,23 @@ impl State {
             writer,
             writes: Mutex::new(()),
         })))
+    }
+
+    pub fn resolve_routes(
+        &self,
+        models: &[String],
+        bot_id: Option<&str>,
+        credential: CredentialKind,
+    ) -> io::Result<Vec<Route>> {
+        let catalog = self.0.catalog()?;
+        let settings = self.0.settings(false)?;
+        models
+            .iter()
+            .map(|model| {
+                routing::resolve(&catalog, &settings, model, bot_id, credential)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
+            })
+            .collect()
     }
 }
 

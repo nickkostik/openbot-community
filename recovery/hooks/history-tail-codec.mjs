@@ -17,6 +17,7 @@ export const LIMITS = Object.freeze({ plan: 8 * 1024 ** 2, database: 128 * 1024 
 const require = createRequire(import.meta.url);
 const SHA = /^[0-9a-f]{64}$/;
 const SLOT = Buffer.from('sand-live-conversation-root-v1__').toString('hex');
+const MAX_DATE_MS = 8_640_000_000_000_000;
 // Node 22 SQLite iterators do not keep their parent StatementSync alive.
 const iteratingStatements = new Set();
 export const digest = value => createHash('sha256').update(value).digest('hex');
@@ -24,6 +25,7 @@ function refuse(code) { const error = new Error(code); error.code = code; throw 
 function check(condition, code) { if (!condition) refuse(code); }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\x00-\x1f]/.test(value);
+const validActivityTimestamp = value => Number.isFinite(value) && value >= 0 && value <= MAX_DATE_MS;
 
 export function validatePlan(plan) {
   check(object(plan) && plan.schemaVersion === 1, 'PLAN_SCHEMA');
@@ -45,9 +47,7 @@ export function validatePlan(plan) {
     check((row.role === 'user' || row.role === 'assistant') && typeof row.text === 'string' &&
       row.literalText === true && (row.kind === undefined || row.kind === 'message' || row.kind === 'send-message') &&
       (row.kind !== 'send-message' || row.role === 'assistant'), 'PLAN_LITERAL_ONLY');
-    check(Number.isFinite(row.timestampMs) && row.timestampMs >= 0 && row.timestampMs <= Number.MAX_SAFE_INTEGER &&
-      SHA.test(row.sourcePayloadSha256),
-      'PLAN_RECORD_PROVENANCE');
+    check(validActivityTimestamp(row.timestampMs) && SHA.test(row.sourcePayloadSha256), 'PLAN_RECORD_PROVENANCE');
     // No imported tool, attachment, widget or executable request envelope is accepted.
     for (const key of ['toolCalls', 'tool_calls', 'attachment', 'attachments', 'pendingToolCalls', 'execute', 'command']) {
       check(!Object.hasOwn(row, key), 'PLAN_LITERAL_ONLY');
@@ -215,11 +215,9 @@ export function planFileEvidence(filename, plan) {
   return { path: filename, sha256: digest(raw) };
 }
 
-/** Native unread parsing accepts finite numbers without coercion. Keep its
- * existing activity frontier monotonic, with invalid or negative inputs at 0. */
+/** Retain the most recent activity time the renderer can display. */
 export function activityFrontier(prior, eligible) {
-  const valid = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
-  return Math.max(valid(prior), valid(eligible));
+  return Math.max(validActivityTimestamp(prior) ? prior : 0, validActivityTimestamp(eligible) ? eligible : 0);
 }
 
 export async function repairCandidate(options, plan) {
@@ -303,8 +301,10 @@ export async function repairCandidate(options, plan) {
       check(!storedIds.has(row.id), 'TRANSCRIPT_DUPLICATE_ID'); storedIds.add(row.id);
       const entry = sdk.parse(row.entry);
       check((entry ?? sdk.spend(row.entry))?.id === row.id, 'NATIVE_TRANSCRIPT_PARSE');
-      if (entry) { accepted.push(entry);
-        if (sdk.activityEligible(entry) && Number.isFinite(entry.timestampMs)) maxActivityAt = Math.max(maxActivityAt, entry.timestampMs); }
+      if (entry) {
+        accepted.push(entry);
+        if (sdk.activityEligible(entry)) maxActivityAt = activityFrontier(maxActivityAt, entry.timestampMs);
+      }
     }
     const byId = new Map(accepted.map(entry => [entry.id, entry]));
     for (const record of plan.records) {

@@ -171,24 +171,27 @@ test('native optional undefined properties normalize without losing defined cont
   }
 });
 
-test('activity frontier never moves backward or coerces invalid native state', () => {
+test('activity frontier preserves valid times and excludes unrenderable dates', () => {
   assert.equal(activityFrontier(3000, 2000), 3000);
   assert.equal(activityFrontier(2000, 3000), 3000);
   assert.equal(activityFrontier(3000, 3000), 3000);
   assert.equal(activityFrontier(3.5, 2.5), 3.5);
-  for (const invalid of [undefined, null, '9000', true, NaN, Infinity, -Infinity, -1]) {
+  assert.equal(activityFrontier(8_640_000_000_000_000, 3000), 8_640_000_000_000_000);
+  for (const invalid of [undefined, null, '9000', true, NaN, Infinity, -Infinity, -1,
+    8_640_000_000_000_001, Number.MAX_SAFE_INTEGER, 180_000_000_000_000_000]) {
     assert.equal(activityFrontier(invalid, 2000), 2000);
     assert.equal(activityFrontier(2000, invalid), 2000);
     assert.equal(activityFrontier(invalid, invalid), 0);
   }
 });
 
-test('native finite fractional timestamps remain exact and non-numeric timestamps refuse', () => {
-  for (const value of [0, 1.25, 1792440417263.125, Number.MAX_SAFE_INTEGER]) {
+test('native fractional timestamps remain exact within the renderer date range', () => {
+  for (const value of [0, 1.25, 1792440417263.125, 8_640_000_000_000_000]) {
     const input = plan(); input.records[0].timestampMs = value;
     assert.equal(validatePlan(input).records, 1); assert.equal(input.records[0].timestampMs, value);
   }
-  for (const value of [NaN, Infinity, -Infinity, -1, true, false, null, '1000.5', Number.MAX_SAFE_INTEGER + 1]) {
+  for (const value of [NaN, Infinity, -Infinity, -1, true, false, null, '1000.5',
+    8_640_000_000_000_001, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
     const input = plan(); input.records[0].timestampMs = value;
     assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
   }

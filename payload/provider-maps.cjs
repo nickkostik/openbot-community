@@ -12,6 +12,9 @@ function param(parameters, id) {
 var GLM_MODEL_RE = /^glm[-.\d]/i;
 var GLM_BASE_RE = /bigmodel\.cn/;
 var GROK_MODEL_RE = /^grok[-.]/i;
+var ZAI_DIRECT_RE = /^https:\/\/api\.z\.ai\/api\/(?:coding\/)?paas\/v4\/?$/i;
+var ZAI_GLM53_RE = /^glm-5\.3(?:-flash)?$/i;
+var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
 
 function isGlmRoute(modelId, baseUrl) {
   return GLM_MODEL_RE.test(String(modelId || "")) || GLM_BASE_RE.test(String(baseUrl || ""));
@@ -23,6 +26,21 @@ function isGrokRoute(modelId, baseUrl) {
 
 function thinkingOff(body) {
   body.thinking = { type: "disabled" };
+}
+
+function applyZaiGlm53(body, parameters) {
+  var effort = String(param(parameters, "effort"));
+  if (ZAI_GLM53_EFFORT_RE.test(effort)) body.reasoning_effort = effort;
+  if (!ZAI_GLM53_EFFORT_RE.test(String(body.reasoning_effort))) delete body.reasoning_effort;
+
+  // GLM-5.3 always thinks on Z.AI. Keep supported thinking options while
+  // replacing a disabled flag carried over from another model or a legacy setting.
+  if (body.thinking !== undefined || body.reasoning_effort !== undefined) {
+    var thinking = body.thinking;
+    var options = thinking && typeof thinking === "object" && !Array.isArray(thinking) ? thinking : {};
+    body.thinking = Object.assign({}, options, { type: "enabled" });
+  }
+  return body.reasoning_effort === undefined ? "zai-glm53-default" : "zai-glm53-effort";
 }
 
 function applyGlm(body, parameters) {
@@ -94,6 +112,9 @@ function applyProviderReasoningControls(body, ctx) {
   ctx = ctx || {};
   var modelId = String(ctx.modelId || "");
   var baseUrl = String(ctx.baseUrl || "");
+  if (ZAI_DIRECT_RE.test(baseUrl) && ZAI_GLM53_RE.test(modelId)) {
+    return applyZaiGlm53(body, ctx.parameters);
+  }
   if (isGrokRoute(modelId, baseUrl)) {
     return applyGrok(body, ctx.maxMode === true, ctx.parameters) || "grok-passthrough";
   }

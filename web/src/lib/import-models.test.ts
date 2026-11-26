@@ -14,6 +14,18 @@ test("published limits do not expand generation budgets or overwrite a provider'
   assert.equal(fields.catalogLimits?.maxOutputTokens, 393216);
 });
 
+test("Go imports use direct metadata ahead of a conflicting public catalog", () => {
+  const direct: FetchedModel = { ...fetched, apiType: "responses", providerMetadata: "opencode-go",
+    contextLength: 1048576, maxOutputTokens: 262144, modalities: ["text", "audio"],
+    reasoningLevels: ["default", "low", "xhigh"] };
+  const fields = modelImportFields(direct, { ...meta, apiType: "chat-completions" });
+  assert.equal(fields.apiType, "responses");
+  assert.equal(fields.contextTokens, 1048576);
+  assert.equal(fields.maxOutputTokens, 65536);
+  assert.deepEqual(fields.modalities, ["text", "audio"]);
+  assert.deepEqual(fields.reasoningLevels, ["default", "low", "xhigh"]);
+});
+
 test("refresh corrects legacy generic limits while preserving custom caps and supported efforts", () => {
   const model = { id: "account:m", providerId: "account", slug: "m", contextTokens: 128000, maxOutputTokens: 12000, activeReasoning: "high", modalities: ["text"], reasoningLevels: ["default", "high"], parameters: [] } as Model;
   assert.equal(modelRefreshFields(model, meta).contextTokens, 1000000);

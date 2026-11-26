@@ -429,6 +429,9 @@ function completionsUrl(origin) {
 function upstreamUrl(origin, apiType) {
   var b = String(origin || "").replace(/\/+$/, "");
   if (!b) throw new Error("openbot-hop: missing origin");
+  if (/^https:\/\/opencode\.ai\/(?:inference\/go(?:\/(?:openai|anthropic)\/v1)?|zen\/go(?:\/v1)?)$/.test(b)) {
+    b = "https://opencode.ai/inference/go" + (apiType === "anthropic" ? "/anthropic/v1" : "/openai/v1");
+  }
   if (apiType === "responses") return /\/responses$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/responses" : b + "/v1/responses");
   if (apiType === "anthropic") return /\/messages$/i.test(b) ? b : (/\/v1$/i.test(b) ? b + "/messages" : b + "/v1/messages");
   return completionsUrl(b);
@@ -1947,7 +1950,7 @@ async function handleCompletionsInner(req, res) {
       appendEventSafe({
         type: "bot-models.stale",
         severity: "WARN",
-        message: "Bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is no longer in the catalog; using the global model.",
+        message: "Bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is unavailable for chat; using the global model.",
         metadata: { botId: assignment.botId, modelId: assignment.modelId },
       });
       if (requested === assignment.modelId) {
@@ -1962,6 +1965,15 @@ async function handleCompletionsInner(req, res) {
       var unknown = { error: { message: "unknown model slug" } };
       record({ status: 400, error: unknown.error.message, responseBody: unknown });
       sendJson(res, 400, unknown);
+      return;
+    }
+    if (!botModels.modelSupportsChat(route.model)) {
+      var unsupported = { error: { message: route.model.slug + " does not support bot chat", code: "model_not_chat" } };
+      fields.model = route.model.slug;
+      fields.providerId = route.provider.id;
+      fields.providerName = route.provider.name;
+      record({ status: 400, error: unsupported.error.message, responseBody: unsupported });
+      sendJson(res, 400, unsupported);
       return;
     }
     var botReasoning = botSettings && botModels.resolveReasoning(body && body.messages, route.model, botSettings);

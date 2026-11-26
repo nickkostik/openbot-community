@@ -613,6 +613,10 @@ test("route lookups preserve each provider's context, output and explicit effort
     assert.equal(go.model.maxOutputTokens, 384000);
     assert.deepEqual(go.model.reasoningLevels, ["default", "low", "high", "max"]);
     assert.equal(go.model.providerKey, "opencode-go");
+    for (const origin of ["https://opencode.ai/inference/go", "https://opencode.ai/inference/go/openai/v1",
+      "https://opencode.ai/inference/go/anthropic/v1"]) {
+      assert.deepEqual(reader.snapshot("shared", origin).lookup, go);
+    }
     const limited = reader.snapshot("shared", "https://limited.example/v1").lookup;
     assert.ok(limited?.found);
     assert.equal(limited.model.contextLength, 32000);
@@ -640,7 +644,7 @@ test("per-model SDK protocols stay scoped to the provider route and survive an o
   const fs = memFs();
   const manager = createCatalogManager({ fs, cachePath, fetchFn: async url => jsonResponse(200,
     url.includes("openrouter") ? { data: [] } : {
-      go: { api: "https://opencode.ai/zen/go/v1", npm: "@ai-sdk/openai-compatible", models: {
+      go: { api: "https://opencode.ai/inference/go/openai/v1", npm: "@ai-sdk/openai-compatible", models: {
         grok: { id: "grok-4.7", provider: { npm: "@ai-sdk/openai" } },
         ds: { id: "deepseek-flash" },
         muse: { id: "muse-spark-1.3-contributor", provider: { npm: "@ai-sdk/openai" } },
@@ -663,5 +667,6 @@ test("per-model SDK protocols stay scoped to the provider route and survive an o
     assert.ok(other?.found);
     assert.equal(other.model.apiType, "anthropic");
     assert.equal(reader.snapshot("grok-4.7", "https://opencode.ai/zen/v1").lookup?.found, false);
+    assert.equal(reader.snapshot("grok-4.7", "https://opencode.ai/inference/openai/v1").lookup?.found, false);
   }
 });

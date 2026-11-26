@@ -4,22 +4,28 @@ import {
   DEFAULT_MODALITIES,
   DEFAULT_REASONING_LEVELS,
   makeModel,
+  modelSupportsChat,
+  parseModelType,
 } from "../domain/model.ts";
 import { parseModelId, parseModelSlug } from "../supervisor/plan.ts";
 import { type BoxPaths } from "../supervisor/paths.ts";
 import { parseProviderId, parseSecretBytes } from "../supervisor/secrets.ts";
 import { customBoxFromCatalog, officialBox, parseExposeToken, parseUpstreamOrigin, slugify } from "./argv.ts";
 import { normalizeProviderCredential } from "../supervisor/credential-import.ts";
+import { isOpenCodeGoOrigin, OPENCODE_GO_ORIGIN } from "../domain/opencode-go.ts";
 
 export type ModelLimitsInput = {
   readonly catalogLimits?: unknown;
   readonly apiType?: unknown;
+  readonly modelType?: unknown;
   readonly contextTokens?: unknown;
   readonly maxOutputTokens?: unknown;
   readonly reasoningLevels?: unknown;
   readonly modalities?: unknown;
   readonly activeReasoning?: unknown;
 };
+
+export class UnsupportedChatModelError extends Error {}
 
 export type UiCommand =
   | { readonly kind: "official" }
@@ -42,6 +48,7 @@ export type UiCommand =
       readonly kind: "upsert-model";
       readonly catalogLimits?: unknown;
       readonly apiType?: unknown;
+      readonly modelType?: unknown;
       readonly providerId: string;
       readonly slug: string;
       readonly contextTokens?: unknown;
@@ -76,6 +83,7 @@ function limitsFrom(input: Record<string, unknown>): ModelLimitsInput {
   const next: {
     catalogLimits?: unknown;
     apiType?: unknown;
+    modelType?: unknown;
     contextTokens?: unknown;
     maxOutputTokens?: unknown;
     reasoningLevels?: unknown;
@@ -84,6 +92,7 @@ function limitsFrom(input: Record<string, unknown>): ModelLimitsInput {
   } = {};
   if (input.catalogLimits !== undefined) next.catalogLimits = input.catalogLimits;
   if (input.apiType !== undefined) next.apiType = parseApiType(input.apiType);
+  if (input.modelType !== undefined) next.modelType = parseModelType(input.modelType);
   if (input.contextTokens !== undefined) {
     next.contextTokens = input.contextTokens;
   }
@@ -212,6 +221,10 @@ function emptyCatalog(): Catalog {
 }
 
 function withWildcard(catalog: Catalog, modelId: Model["id"]): Catalog {
+  const model = catalog.models.find((row) => row.id === modelId);
+  if (model && !modelSupportsChat(model)) {
+    throw new UnsupportedChatModelError(`OpenBot: ${model.slug} does not support bot chat`);
+  }
   return {
     ...catalog,
     bindings: [{ conversation: { kind: "wildcard" }, modelId }],
@@ -227,7 +240,7 @@ function upsertModelRow(catalog: Catalog, model: Model): Catalog {
   const rest = catalog.models.filter((row) => row.id !== model.id);
   const models = [...rest, model];
   const hasWildcard = catalog.bindings.some((row) => row.conversation.kind === "wildcard");
-  if (hasWildcard) {
+  if (hasWildcard || !modelSupportsChat(model)) {
     return { ...catalog, models };
   }
   return withWildcard({ ...catalog, models }, model.id);
@@ -252,12 +265,14 @@ function modelFromLimits(input: {
     activeReasoning: input.limits.activeReasoning ?? existing?.activeReasoning ?? "default",
     parameters: existing?.parameters ?? [],
     apiType: input.limits.apiType ?? existing?.apiType,
+    modelType: parseModelType(input.limits.modelType) ?? existing?.modelType,
     catalogLimits: input.limits.catalogLimits ?? existing?.catalogLimits,
   });
 }
 
 function remainingFallback(models: readonly Model[], providerId: Model["providerId"]): Model | undefined {
-  return models.find((row) => row.providerId === providerId) ?? models[0];
+  const chatModels = models.filter(modelSupportsChat);
+  return chatModels.find((row) => row.providerId === providerId) ?? chatModels[0];
 }
 
 export type UiSave = {
@@ -299,8 +314,8 @@ export function applyUiCommand(input: {
     if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
       throw new Error("OpenBot: provider base URL must not contain credentials, a query, or a fragment");
     }
-    if (base.startsWith("opencode-go") && origin !== "https://opencode.ai/zen/go/v1") {
-      throw new Error("OpenBot: OpenCode Go accounts must use https://opencode.ai/zen/go/v1 directly");
+    if (base.startsWith("opencode-go") && !isOpenCodeGoOrigin(origin)) {
+      throw new Error(`OpenBot: OpenCode Go accounts must use ${OPENCODE_GO_ORIGIN} directly`);
     }
     const credential = normalizeProviderCredential(command.secret, origin);
     if (base.startsWith("alibaba-token-plan") && !credential.startsWith("sk-sp-")) {
@@ -420,16 +435,11 @@ export function applyUiCommand(input: {
     const slug = parseModelSlug(command.slug);
     const modelId = parseModelId(`${providerId}:${command.slug}`);
     const existing = catalog.models.find((row) => row.id === modelId);
-    const next = upsertModelRow(
-      catalog,
-      modelFromLimits({
-        id: modelId,
-        providerId,
-        slug,
-        existing,
-        limits: command,
-      }),
-    );
+    const model = modelFromLimits({ id: modelId, providerId, slug, existing, limits: command });
+    const next = upsertModelRow(catalog, model);
+    if (input.mode === "official" && !modelSupportsChat(model)) {
+      return { desired: officialBox(paths, expose), catalogWrite: next };
+    }
     return { desired: customBoxFromCatalog({ paths, catalog: next, expose }) };
   }
   if (command.kind === "use-model") {
@@ -449,6 +459,7 @@ export function applyUiCommand(input: {
       activeReasoning: command.reasoning ?? model.activeReasoning,
       parameters: model.parameters,
       apiType: model.apiType,
+      modelType: model.modelType,
       catalogLimits: model.catalogLimits,
     });
     const next = upsertModelRow(catalog, nextModel);
@@ -490,10 +501,10 @@ export function applyUiCommand(input: {
     return { desired: officialBox(paths, expose), catalogWrite: emptyCatalog() };
   }
   const active = catalog.bindings.find((row) => row.conversation.kind === "wildcard");
-  const stillBound = active && models.some((row) => row.id === active.modelId);
-  const fallback = models[0];
+  const stillBound = active && models.some((row) => row.id === active.modelId && modelSupportsChat(row));
+  const fallback = models.find(modelSupportsChat);
   if (fallback === undefined) {
-    return { desired: officialBox(paths, expose), catalogWrite: emptyCatalog() };
+    return { desired: officialBox(paths, expose), catalogWrite: { providers, models, bindings: [] } };
   }
   const next: Catalog = {
     providers,

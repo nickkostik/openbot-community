@@ -19,6 +19,7 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
+const { modelSupportsChat } = require("./bot-models.cjs");
 
 const ROOT = process.env.OPENBOT_SAND_DATA || (process.env.OPENBOT_PLAN ? path.dirname(process.env.OPENBOT_PLAN) : "/home/box/sand-data");
 const STATE_DIR = path.join(ROOT, "openbot", "compact-state");
@@ -43,14 +44,14 @@ function isKimiK3(model) {
 
 function resolveSummarizers(plan, target) {
   var catalog = plan && plan.catalog;
-  if (!target || typeof target.providerId !== "string" || !target.providerId ||
+  if (!target || !modelSupportsChat(target) || typeof target.providerId !== "string" || !target.providerId ||
       !catalog || !Array.isArray(catalog.models) || !Array.isArray(catalog.providers)) return [];
   var targetProvider = catalog.providers.find(function (p) { return p && p.id === target.providerId; });
   if (!targetProvider || /metakey|modelhub|n5/i.test(String(targetProvider.id) + " " + String(targetProvider.origin || ""))) return [];
   if (!catalog.models.some(function (m) { return m && m.id === target.id && m.providerId === target.providerId && m.id === m.providerId + ":" + m.slug; })) return [];
   var models = catalog.models.filter(function (m) {
     var provider = m && catalog.providers.find(function (p) { return p && p.id === m.providerId; });
-    return provider && !/metakey|modelhub|n5/i.test(String(provider.id) + " " + String(provider.origin || "")) &&
+    return provider && modelSupportsChat(m) && !/metakey|modelhub|n5/i.test(String(provider.id) + " " + String(provider.origin || "")) &&
       typeof m.slug === "string" && m.slug && !isKimiK3(m) &&
       m.id === m.providerId + ":" + m.slug && Number.isFinite(Number(m.contextTokens)) && Number(m.contextTokens) > 0;
   });

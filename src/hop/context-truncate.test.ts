@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
-type Model = { id: string; providerId: string; slug: string; contextTokens: number; maxOutputTokens?: number; reasoningLevels?: string[]; activeReasoning?: string };
+type Model = { id: string; providerId: string; slug: string; contextTokens: number; maxOutputTokens?: number; reasoningLevels?: string[]; activeReasoning?: string; modelType?: string };
 type Plan = { catalog: { providers: { id: string }[]; models: Model[] } };
 type Body = { conversationId?: string; reasoning_effort?: string; openbot_internal_auxiliary?: boolean | string; tools?: unknown[]; messages: { role: string; content: string; reasoning_content?: string; tool_call_id?: string; tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] }[] };
 type SummaryRoute = { modelId: string; contextTokens: number } | null;
@@ -21,6 +22,7 @@ type Compactor = {
 };
 
 const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../payload/context-truncate.cjs"), "utf8");
+const botModels = createRequire(import.meta.url)("../../payload/bot-models.cjs");
 const target: Model = { id: "opencode-2:deepseek-v4.1-flash", providerId: "opencode-2", slug: "deepseek-v4.1-flash", contextTokens: 32768, reasoningLevels: ["default", "low", "high", "max"], activeReasoning: "high" };
 const kimi: Model = { id: "opencode-2:kimi-k3", providerId: "opencode-2", slug: "kimi-k3", contextTokens: 1000000 };
 
@@ -70,6 +72,7 @@ function fixture(t: TestContext) {
       if (name === "path") return path;
       if (name === "http") return mockHttp;
       if (name === "crypto") return crypto;
+      if (name === "./bot-models.cjs") return botModels;
       throw new Error("unexpected import");
     },
     module: exports,
@@ -110,11 +113,15 @@ test("compactor keeps the selected canonical model and never selects Kimi K3", (
   assert.equal(routes[1]?.reasoningEffort, "max");
 });
 
-test("fallbacks keep account families distinct and exclude forbidden endpoints", (t) => {
+test("fallbacks keep account families distinct and exclude forbidden endpoints and non-chat models", (t) => {
   const f = fixture(t);
   const foreign = { ...target, id: "opencode:deepseek-v4.1-flash", providerId: "opencode", contextTokens: 1000000 };
   f.plan.catalog.models.push(foreign);
   assert.equal(f.compactor.resolveSummarizers(f.plan, target)[2]?.modelId, foreign.id);
+  const nonChat = { ...foreign, modelType: "embedding" };
+  f.plan.catalog.models[f.plan.catalog.models.length - 1] = nonChat;
+  assert.ok(!f.compactor.resolveSummarizers(f.plan, target).some(r => r.modelId === nonChat.id));
+  assert.equal(f.compactor.resolveSummarizer(f.plan, nonChat), null);
   f.plan.catalog.providers.push({ id: "n5" });
   f.plan.catalog.models.push({ ...foreign, providerId: "n5", id: "n5:deepseek-v4.1-flash" });
   assert.ok(!f.compactor.resolveSummarizers(f.plan, target).some(r => r.modelId.startsWith("n5:")));

@@ -3,8 +3,9 @@
  * Single source of truth for the UI's view of `/api/state`, `/api/save`,
  * the log endpoints, and the §8 model-fetch/catalog endpoints.
  */
+import type { ModelType } from "../../../src/domain/types.ts";
 
-export type ReasoningLevel = "default" | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningLevel = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type Modality = "text" | "image" | "video" | "audio";
 export type LogChannel = "hop" | "official" | "custom-host";
 export type LogChannelFilter = "official" | "custom";
@@ -12,6 +13,7 @@ export type LogChannelFilter = "official" | "custom";
 export const REASONING_LEVELS: readonly ReasoningLevel[] = [
   "default",
   "none",
+  "minimal",
   "low",
   "medium",
   "high",
@@ -41,6 +43,7 @@ export type ProviderParameter = { id: string; value: string };
 export type Model = {
   catalogLimits?: { contextTokens: number | null; maxOutputTokens: number | null; sourceUrl: string; providerKey: string; outputModalities: readonly string[] };
   apiType?: "chat-completions" | "responses" | "anthropic";
+  modelType?: ModelType;
   id: string;
   providerId: string;
   slug: string;
@@ -151,6 +154,7 @@ export type PauseBotsState = { pausedBotIds: string[] };
 export type ModelLimitsPayload = {
   catalogLimits?: Model["catalogLimits"];
   apiType?: "chat-completions" | "responses" | "anthropic";
+  modelType?: ModelType;
   contextTokens?: number;
   maxOutputTokens?: number;
   reasoningLevels?: readonly string[];
@@ -454,6 +458,9 @@ export type FetchedModel = {
   modalities: string[];
   /** Backend always sends an array; empty = use defaults (PRD §8.1). */
   reasoningLevels: string[];
+  apiType?: Provider["apiType"];
+  modelType?: ModelType;
+  providerMetadata?: "opencode-go";
 };
 
 export type FetchModelsResult = {

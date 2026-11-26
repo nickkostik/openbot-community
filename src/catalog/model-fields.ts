@@ -1,10 +1,12 @@
 import type { FetchedModel } from "./provider-models.ts";
 import type { CatalogModel } from "./model-catalog.ts";
+import type { ModelType } from "../domain/types.ts";
 
 export type CatalogMetadata = Pick<CatalogModel, "contextLength" | "maxOutputTokens" | "modalities" | "reasoning" | "providerKey" | "sourceUrl" | "outputModalities" | "apiType"> & { reasoningLevels?: readonly string[] };
 export type ModelMetadataInput = {
   slug: string;
   apiType?: CatalogModel["apiType"];
+  modelType?: ModelType;
   contextTokens: number;
   maxOutputTokens: number;
   modalities: readonly string[];
@@ -21,8 +23,10 @@ export type ModelMetadataInput = {
  * - contextTokens: provider value, else route catalog value, else omitted.
  * - maxOutputTokens: bounded agent budget; catalogLimits holds the published
  *   output maximum separately, including modern limits above 128k.
- * - modalities: the catalog's non-empty list, else the fetch list, else omitted.
+ * - modalities: direct Go MIME categories first, otherwise the catalog's
+ *   non-empty list and then the fetch list.
  * - reasoningLevels:
+ *   0. direct Go advertised levels → use those account-scoped capabilities
  *   1. catalog `reasoningLevels` nonempty → use that ordered allow-list
  *   2. else fetched `reasoningLevels` nonempty → use Source A
  *   3. else catalog `reasoning === false` → `["default"]`
@@ -42,6 +46,9 @@ function importReasoningLevels(
   fetched: FetchedModel,
   catalog?: CatalogMetadata,
 ): readonly string[] | undefined {
+  if (fetched.providerMetadata === "opencode-go" && fetched.reasoningLevels.length) {
+    return fetched.reasoningLevels;
+  }
   if (catalog?.reasoningLevels !== undefined && catalog.reasoningLevels.length > 0) {
     return catalog.reasoningLevels;
   }
@@ -75,16 +82,15 @@ export function modelImportFields(
   const publishedOutput = positive(fetched.maxOutputTokens) ?? positive(catalog?.maxOutputTokens);
   const maxOutputTokens = publishedOutput ? Math.min(65536, publishedOutput) : undefined;
   const reasoningLevels = importReasoningLevels(fetched, catalog);
+  const apiType = fetched.apiType ?? catalog?.apiType;
 
-  const modalities = catalog?.modalities?.length
-    ? catalog.modalities
-    : fetched.modalities?.length
-      ? fetched.modalities
-      : undefined;
+  const directModalities = fetched.providerMetadata === "opencode-go" ? fetched.modalities : undefined;
+  const modalities = [directModalities, catalog?.modalities, fetched.modalities].find(values => values?.length);
 
   return {
     slug: fetched.id,
-    ...(catalog?.apiType ? { apiType: catalog.apiType } : {}),
+    ...(fetched.modelType ? { modelType: fetched.modelType } : {}),
+    ...(apiType ? { apiType } : {}),
     ...(contextTokens !== undefined ? { contextTokens } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(reasoningLevels ? { reasoningLevels } : {}),

@@ -4,6 +4,7 @@
  * Isolated in one file so backend-integration fixes are single-file changes.
  * Everything lives on the same origin as the served UI (no CORS, no base URL).
  */
+import { modelSupportsChat } from "../../../src/domain/model.ts";
 import type {
   BoxState,
   BotInfo,
@@ -554,7 +555,8 @@ export function customActivationBlocked(state: BoxState): RefusalError | null {
 
 /** Returning from Official preserves the saved global selection. */
 export function customActivationModel(state: BoxState): Model | undefined {
-  return modelById(state, state.activeModelId) ?? state.models[0];
+  const selected = modelById(state, state.activeModelId);
+  return selected && modelSupportsChat(selected) ? selected : state.models.find(modelSupportsChat);
 }
 
 export async function getLocalTransfer(): Promise<import("./types").LocalTransfer> {

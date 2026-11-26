@@ -23,9 +23,35 @@ const discovered = [{ id: "kept", name: null, contextLength: null, maxOutputToke
   { id: "new-model", name: null, contextLength: 200000, maxOutputTokens: 8000, modalities: ["text"], reasoningLevels: ["default"] }];
 const lists = providers.map(provider => ({ provider, result: { ok: true as const, models: discovered, skipped: 0, skippedReasons: [] } }));
 
+test("Go discovery preserves inventory and bindings while classifying old and new non-chat rows", () => {
+  const stored = JSON.parse(raw);
+  const old = { ...model, id: "opencode:old-embedding", slug: "old-embedding" };
+  stored.catalog.models.push(old);
+  const byAccount = lists.map(list => ({ ...list, result: { ...list.result, models: [
+    { id: "old-embedding", name: null, contextLength: null, maxOutputTokens: null, modalities: [],
+      reasoningLevels: [], modelType: "embedding" as const, providerMetadata: "opencode-go" as const },
+    { id: "new-decision", name: null, contextLength: null, maxOutputTokens: null, modalities: [],
+      reasoningLevels: [], modelType: "decision" as const, providerMetadata: "opencode-go" as const },
+  ] } }));
+  const offline = { snapshot: () => ({ lookup: { found: false } }) } as Pick<CatalogManager, "snapshot">;
+  const output = mergeModelRefresh(JSON.stringify(stored), byAccount, offline);
+  const next = JSON.parse(output.raw);
+  assert.equal(output.added, 3);
+  assert.equal(output.updated, 1);
+  assert.deepEqual(next.catalog.models[1], { ...old, modelType: "embedding" });
+  assert.equal(next.catalog.models.find((row: { id: string }) => row.id === "opencode2:new-decision").modelType, "decision");
+  assert.deepEqual(next.catalog.bindings, stored.catalog.bindings);
+  assert.deepEqual(next.agents, stored.agents);
+  assert.equal(mergeModelRefresh(output.raw, byAccount, offline).raw, output.raw);
+});
+
 test("automatic discovery uses Go direct and refuses retired relay and Zen families", () => {
   assert.equal(canDiscoverProvider(providers[0]!), true);
+  assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "https://opencode.ai/inference/go" as Provider["origin"] }), true);
+  assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "https://opencode.ai/inference/go/openai/v1" as Provider["origin"] }), true);
   assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "https://opencode.ai/zen/v1" as Provider["origin"] }), false);
+  assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "https://opencode.ai/inference/openai/v1" as Provider["origin"] }), false);
+  assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "http://opencode.ai/zen/go/v1" as Provider["origin"] }), false);
   assert.equal(canDiscoverProvider({ ...providers[0]!, origin: "https://n5.example/v1" as Provider["origin"] }), false);
   assert.equal(canDiscoverProvider({ ...providers[0]!, name: "MetaKey direct" }), false);
 });
@@ -81,6 +107,31 @@ test("Go per-model Responses metadata outranks the family default for both accou
   }
   assert.deepEqual(saved.catalog.bindings, input.catalog.bindings);
   assert.deepEqual(saved.agents, input.agents);
+});
+
+test("direct Go reasoning discovery updates accounts independently with the public catalog offline", () => {
+  const saved = JSON.parse(raw);
+  saved.catalog.models[0].apiType = "chat-completions";
+  const input = JSON.stringify(saved);
+  const offline = { snapshot: () => ({ lookup: { found: false } }) } as Pick<CatalogManager, "snapshot">;
+  const direct = lists.map((list, index) => ({ ...list, result: { ...list.result, models: [
+    { ...discovered[0]!, apiType: (index === 0 ? "responses" : "anthropic") as "responses" | "anthropic",
+      providerMetadata: "opencode-go" as const,
+      reasoningLevels: index === 0 ? ["default", "high", "xhigh"] : ["default", "none", "low"] },
+  ] } }));
+  const updated = mergeModelRefresh(input, direct, offline);
+  const models = JSON.parse(updated.raw).catalog.models;
+  assert.equal(updated.added, 1);
+  assert.equal(updated.updated, 1);
+  assert.deepEqual(models[0].reasoningLevels, ["default", "high", "xhigh"]);
+  assert.equal(models[0].apiType, "chat-completions");
+  assert.equal(models[0].activeReasoning, "high");
+  assert.equal(models[1].id, "opencode2:kept");
+  assert.equal(models[1].apiType, "anthropic");
+  assert.deepEqual(models[1].reasoningLevels, ["default", "none", "low"]);
+  const held = mergeModelRefresh(input, direct, offline, JSON.stringify({ reasoning: { Q: { [model.id]: "max" } } }));
+  assert.equal(held.reasoningHeld, 1);
+  assert.deepEqual(JSON.parse(held.raw).catalog.models[0].reasoningLevels, model.reasoningLevels);
 });
 
 test("automatic discovery is bounded, durable across restarts and merges a concurrent panel selection", async () => {

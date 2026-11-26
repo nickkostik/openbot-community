@@ -276,7 +276,7 @@ The hop applies this reasoning map to `glm-5.3` and `glm-5.3-flash` on the `http
 
 A supported selected effort sets `reasoning_effort` on the outgoing request and takes priority over any incoming value. The map ignores legacy Fast and Off settings on these routes. It preserves a supported incoming effort when no supported effort is selected, and removes an unsupported `reasoning_effort` so the provider default can apply.
 
-If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
+If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
 
 ### Maximize verified model context
 

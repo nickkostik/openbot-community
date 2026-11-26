@@ -20,6 +20,10 @@ function isGlmRoute(modelId, baseUrl) {
   return GLM_MODEL_RE.test(String(modelId || "")) || GLM_BASE_RE.test(String(baseUrl || ""));
 }
 
+function isZaiGlm53Route(modelId, baseUrl) {
+  return ZAI_DIRECT_RE.test(String(baseUrl || "")) && ZAI_GLM53_RE.test(String(modelId || ""));
+}
+
 function isGrokRoute(modelId, baseUrl) {
   return GROK_MODEL_RE.test(String(modelId || "")) || /api\.x\.ai/.test(String(baseUrl || ""));
 }
@@ -112,7 +116,7 @@ function applyProviderReasoningControls(body, ctx) {
   ctx = ctx || {};
   var modelId = String(ctx.modelId || "");
   var baseUrl = String(ctx.baseUrl || "");
-  if (ZAI_DIRECT_RE.test(baseUrl) && ZAI_GLM53_RE.test(modelId)) {
+  if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
   if (isGrokRoute(modelId, baseUrl)) {
@@ -127,5 +131,6 @@ function applyProviderReasoningControls(body, ctx) {
 module.exports = {
   applyProviderReasoningControls: applyProviderReasoningControls,
   isGlmRoute: isGlmRoute,
+  isZaiGlm53Route: isZaiGlm53Route,
   isGrokRoute: isGrokRoute,
 };

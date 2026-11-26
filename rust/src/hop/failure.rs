@@ -235,6 +235,11 @@ impl Failure {
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         let mut response = (self.status, Json(self.body())).into_response();
+        if self.status == StatusCode::SERVICE_UNAVAILABLE && matches!(self.retry, Retry::Never) {
+            response
+                .headers_mut()
+                .insert("x-openbot-retryable", HeaderValue::from_static("false"));
+        }
         if let Some(after) = self
             .retry_after
             .and_then(|value| HeaderValue::from_str(&value).ok())

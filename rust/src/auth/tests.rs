@@ -664,3 +664,125 @@ async fn read_only_and_early_renewal_never_send_the_saved_refresh_token() {
     assert!(error.message.contains("renewal window"));
     assert!(upstream.requests().is_empty());
 }
+
+#[tokio::test]
+async fn saves_default_model_and_effort_without_collapsing_provider_accounts() {
+    let fixture = Upstream::start().await;
+    let root = seed();
+    let path = root.path().join("openbot-plan.json");
+    let mut plan: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    plan["catalog"]["providers"].as_array_mut().unwrap().extend([
+        json!({"id":"opencode","origin":"https://opencode.ai/inference/go","apiType":"chat-completions"}),
+        json!({"id":"opencode-2","origin":"https://opencode.ai/zen/go/v1","apiType":"responses"}),
+        json!({"id":"old","origin":"https://n5.example.test/v1","apiType":"chat-completions"}),
+    ]);
+    plan["catalog"]["models"].as_array_mut().unwrap().extend([
+        json!({"id":"opencode:fixture-muse","slug":"fixture-muse","providerId":"opencode",
+            "apiType":"chat-completions","reasoningLevels":["default","low","high"],"activeReasoning":"low"}),
+        json!({"id":"opencode-2:fixture-muse","slug":"fixture-muse","providerId":"opencode-2",
+            "apiType":"responses","reasoningLevels":["default","low","high"],"activeReasoning":"default"}),
+        json!({"id":"opencode:fixture-embedding","slug":"fixture-embedding","providerId":"opencode","modelType":"embedding"}),
+        json!({"id":"old:fixture-old","slug":"fixture-old","providerId":"old"}),
+    ]);
+    let pinned = json!({"conversation":{"kind":"exact","id":"fixture-existing-conversation"},"modelId":"openai:gpt-fixture"});
+    plan["catalog"]["bindings"]
+        .as_array_mut()
+        .unwrap()
+        .push(pinned.clone());
+    plan["agents"]["fixture-existing-conversation"] =
+        json!({"modelId":"gpt-fixture","providerId":"openai"});
+    write(root.path(), "openbot-plan.json", &plan);
+    let before = fs::read(&path).unwrap();
+    let previous_keys = fs::read(root.path().join("secrets.json")).unwrap();
+    let router = account_router(root.path(), &fixture);
+    let activate =
+        json!({"kind":"use-model","modelId":"opencode-2:fixture-muse","reasoning":"high"});
+    let (status, _) = post_json(&router, "/api/save", activate.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    fs::write(root.path().join("openbot-mode"), "custom\n").unwrap();
+    let (status, result) = post_json(&router, "/api/save", activate.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{}", result);
+    assert_eq!(result["snapshot"]["alignment"]["desired"], "custom");
+    assert_eq!(result["activeModelId"], "opencode-2:fixture-muse");
+    assert_eq!(result["wrapBytesChanged"], false);
+    let public = result["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "opencode-2:fixture-muse")
+        .unwrap();
+    assert_eq!(public["modalities"], json!(["text"]));
+    assert_eq!(public["parameters"], json!([]));
+    let saved = fs::read(&path).unwrap();
+    let next: Value = serde_json::from_slice(&saved).unwrap();
+    assert!(
+        next["catalog"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model.get("modalities").is_none())
+    );
+    assert_eq!(
+        next["agents"]["*"],
+        json!({"modelId":"fixture-muse","providerId":"opencode-2"})
+    );
+    assert_eq!(
+        next["agents"]["fixture-existing-conversation"],
+        plan["agents"]["fixture-existing-conversation"]
+    );
+    assert!(
+        next["catalog"]["bindings"]
+            .as_array()
+            .unwrap()
+            .contains(&pinned)
+    );
+    let state = State::new(root.path().into(), false).unwrap();
+    let selected = state
+        .resolve_routes(&["fixture-muse".into()], None, CredentialKind::ApiKey)
+        .unwrap();
+    let next_route = serde_json::to_value(&selected[0]).unwrap();
+    assert_eq!(next_route["providerId"], "opencode-2");
+    assert_eq!(next_route["protocol"], "responses");
+    assert_eq!(next_route["reasoningEffort"], "high");
+    assert_eq!(
+        next_route["upstream"],
+        "https://opencode.ai/inference/go/openai/v1/responses"
+    );
+
+    assert_eq!(
+        post_json(&router, "/api/save", activate).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    for invalid in [
+        json!({"kind":"use-model","modelId":"opencode-2:fixture-muse","reasoning":"max"}),
+        json!({"kind":"use-model","modelId":"opencode:fixture-embedding"}),
+        json!({"kind":"use-model","modelId":"old:fixture-old"}),
+    ] {
+        assert_eq!(
+            post_json(&router, "/api/save", invalid).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+    let (status, result) = post_json(
+        &router,
+        "/api/save",
+        json!({"kind":"use-model","modelId":"opencode:fixture-muse"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["activeModelId"], "opencode:fixture-muse");
+    let switched = state
+        .resolve_routes(&["fixture-muse".into()], None, CredentialKind::ApiKey)
+        .unwrap();
+    let route = serde_json::to_value(&switched[0]).unwrap();
+    assert_eq!(route["providerId"], "opencode");
+    assert_eq!(route["reasoningEffort"], "low");
+    assert_eq!(
+        fs::read(root.path().join("secrets.json")).unwrap(),
+        previous_keys
+    );
+}

@@ -1047,7 +1047,8 @@ async function hopRequestWithRetry(body, healOverrides, retryState, ctx) {
     if (status >= 200 && status < 300) {
       return res;
     }
-    if (state.attemptIndex >= HOP_RETRY.maxRetries || !isRetryableHopStatus(status)) {
+    if (res.headers["x-openbot-retryable"] === "false" ||
+        state.attemptIndex >= HOP_RETRY.maxRetries || !isRetryableHopStatus(status)) {
       return res;
     }
     if (!state.budgetStart) state.budgetStart = Date.now();
@@ -1077,7 +1078,9 @@ async function* hopPartsWithRetry(body, voiceTool, ctx) {
       var status = res.statusCode || 0;
       if (status < 200 || status >= 300) {
         var raw = await readAll(res);
-        throw new Error("openbot-runtime: hop HTTP " + status + " " + String(raw || "").slice(0, 300));
+        var rejected = new Error("openbot-runtime: hop HTTP " + status + " " + String(raw || "").slice(0, 300));
+        rejected.hopStatus = status;
+        throw rejected;
       }
       for await (var part of iterateOpenAiResponse(res, voiceTool)) {
         exposed = true;
@@ -1110,6 +1113,7 @@ function swallow(p) {
 // it: the hop body then carries no identity fields and the hop-side
 // injection gate reports its honest missing-identity skip reasons.
 function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity) {
+  assertNotPaused();
   var settled = { u: false, e: false, m: false, i: false, r: false };
   var resU, rejU, resE, rejE, resM, rejM, resI, rejI, resR, rejR;
   var usage = swallow(new Promise(function (res, rej) { resU = res; rejU = rej; }));
@@ -1300,7 +1304,7 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       log("stream error " + (err && err.message));
       failAll(err);
       recordCustomHost({
-        status: 502,
+        status: Number.isInteger(err && err.hopStatus) ? err.hopStatus : 502,
         error: err && err.message ? String(err.message) : "hop failed",
       });
       yield { type: "error", error: err };
@@ -1477,6 +1481,7 @@ function tapExecutor(exec, meta) {
     get: function (target, prop, receiver) {
       if (prop === "stream") {
         return function (ctx, invocationId, tools, options2) {
+          assertNotPaused();
           var startedMs = Date.now();
           var startedAt = new Date().toISOString();
           var messages = typeof target.getMessages === "function" ? target.getMessages() : [];

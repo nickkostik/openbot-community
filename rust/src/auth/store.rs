@@ -17,10 +17,10 @@ use super::{
     unix_seconds,
 };
 use crate::{
-    catalog::Catalog,
+    catalog::{Catalog, Effort},
     lease::Lease,
-    routing::CredentialKind,
-    server::{PLAN_MAX_BYTES, read_bytes, read_json},
+    routing::{CredentialKind, is_direct_provider},
+    server::{PLAN_MAX_BYTES, read_bytes, read_json, read_mode},
 };
 
 const STORE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -103,6 +103,81 @@ impl CredentialStore {
     ) -> Result<(), AuthError> {
         let _write = self.write_lock()?;
         self.commit(stage(self.root(), value, max_bytes)?, filename)
+    }
+
+    pub(super) fn save_active_model(
+        &self,
+        model_id: &str,
+        reasoning: Option<Effort>,
+    ) -> Result<Value, AuthError> {
+        self.refresh_plan(|plan| {
+            if read_mode(self.root()).map_err(|_| store_error())? != "custom" {
+                return Err(AuthError::conflict(
+                    "Switch to Custom through the managed host controls before activating a model.",
+                ));
+            }
+            let catalog = Catalog::from_plan(plan);
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == model_id && model.wire_chat)
+                .ok_or_else(|| AuthError::input("Select an installed chat model."))?;
+            if !catalog
+                .providers
+                .iter()
+                .any(|provider| provider.id == model.provider_id && is_direct_provider(provider))
+            {
+                return Err(AuthError::input(
+                    "Select a configured direct model provider.",
+                ));
+            }
+            let store = self.load()?;
+            let effort = reasoning
+                .map(|choice| {
+                    model.effective_override(choice).ok_or_else(|| {
+                        AuthError::input("The model does not support that reasoning effort.")
+                    })
+                })
+                .transpose()?;
+            let mut changed = false;
+            if let Some(effort) = effort {
+                let models = plan["catalog"]["models"]
+                    .as_array_mut()
+                    .ok_or_else(store_error)?;
+                let entry = models
+                    .iter_mut()
+                    .find(|entry| entry["id"] == model_id)
+                    .ok_or_else(store_error)?;
+                let value = json!(effort);
+                if entry["activeReasoning"] != value {
+                    entry["activeReasoning"] = value;
+                    changed = true;
+                }
+            }
+            let binding = json!({"conversation":{"kind":"wildcard"},"modelId":model_id});
+            let bindings = plan["catalog"]["bindings"]
+                .as_array_mut()
+                .ok_or_else(store_error)?;
+            let mut active = bindings
+                .iter()
+                .filter(|row| row["conversation"]["kind"] == "wildcard");
+            if active.next() != Some(&binding) || active.next().is_some() {
+                bindings.retain(|row| row["conversation"]["kind"] != "wildcard");
+                bindings.push(binding);
+                changed = true;
+            }
+            if plan["agents"].is_null() {
+                plan["agents"] = json!({});
+            }
+            let agents = plan["agents"].as_object_mut().ok_or_else(store_error)?;
+            let agent = json!({"modelId":model.slug,"providerId":model.provider_id});
+            if agents.get("*") != Some(&agent) {
+                agents.insert("*".into(), agent);
+                changed = true;
+            }
+            Ok((changed, save_reply(plan, &store, None)))
+        })?
+        .ok_or_else(|| AuthError::input("Set up a model catalog before selecting a model."))
     }
 
     pub async fn authorize(&self, provider: &str, origin: &str) -> Result<Authorized, AuthError> {
@@ -489,9 +564,45 @@ fn public_fields(plan: &Value, store: &Value) -> Value {
         .into_iter()
         .flat_map(|entries| entries.keys())
         .collect();
+    let catalog = Catalog::from_plan(plan);
+    let validated: HashMap<_, _> = catalog
+        .models
+        .iter()
+        .map(|model| (model.id.as_str(), model))
+        .collect();
+    let models: Vec<_> = plan["catalog"]["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let model = validated.get(row["id"].as_str()?)?;
+            let mut row = row.clone();
+            if row["modalities"]
+                .as_array()
+                .is_none_or(|items| items.is_empty() || items.iter().any(|item| !item.is_string()))
+            {
+                row["modalities"] = json!(["text"]);
+            }
+            if !row["parameters"].is_array() {
+                row["parameters"] = json!([]);
+            }
+            row["reasoningLevels"] = json!(model.levels);
+            row["activeReasoning"] = json!(
+                model
+                    .effective_override(model.default_effort())
+                    .unwrap_or(Effort::Default)
+            );
+            if row["catalogLimits"].is_object()
+                && !row["catalogLimits"]["outputModalities"].is_array()
+            {
+                row["catalogLimits"]["outputModalities"] = json!([]);
+            }
+            Some(row)
+        })
+        .collect();
     json!({
         "providers":plan["catalog"]["providers"],
-        "models":plan["catalog"]["models"], "keyedProviders":keyed, "activeModelId":active
+        "models":models, "keyedProviders":keyed, "activeModelId":active
     })
 }
 

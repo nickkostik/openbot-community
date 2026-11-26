@@ -53,7 +53,6 @@ pub fn routes(
         .route("/api/state", get(state))
         .route("/api/snapshot", get(state))
         .route("/api/bots", get(bots))
-        .route("/api/pause-bots", get(paused_bots))
         .with_state(PanelReadback {
             credentials,
             status,
@@ -97,15 +96,6 @@ async fn bots(State(panel): State<PanelReadback>) -> Result<Json<Vec<roster::Bot
             panel.credentials.root(),
             &panel.agent_data,
         )))
-    })
-    .await
-}
-
-async fn paused_bots(State(panel): State<PanelReadback>) -> Result<Json<Value>, AuthError> {
-    crate::auth::blocking(move || {
-        Ok(Json(
-            json!({"pausedBotIds":roster::paused(panel.credentials.root())}),
-        ))
     })
     .await
 }

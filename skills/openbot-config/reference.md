@@ -149,9 +149,24 @@ An add returns `createdProviderId` for the next available `openai` account ID. U
 
 With both flags active, inference can renew a due OpenAI login when its renewal window permits. Concurrent requests for the same provider ID share one renewal. The candidate rereads the current credential and persists refreshed credentials only while the original value still matches. It atomically replaces the compatible `secrets.json` file, keeping the credential as a JSON-encoded string under `providers[providerId]`. The account routes and inference share the candidate writer guarded by `.openbot-rust-secrets.lock`. If a login is unusable, the hop returns HTTP 503 `provider_sign_in_required`. Use the existing Node panel for live account sign-in and renewal.
 
+#### Rust model selection and pauses
+
+Start the disposable candidate with `--enable-accounts` to use `POST /api/save` for a global model selection. Submit `{"kind":"use-model","modelId":"opencode-2:fixture-model","reasoning":"high"}` with an installed direct chat model and supported effort. Omit `reasoning` or send null to keep that model's saved effort. A successful save returns `activeModelId` and current panel state.
+
+Separate direct OpenCode Go accounts keep their own model IDs, protocols and credentials. `opencode:fixture-model` and `opencode-2:fixture-model` select independent routes. The save updates the global wildcard and preserves explicit conversation bindings, bot pins and per-bot efforts. A supported per-bot effort for the routed model still takes priority. With a saved plan in Official, this operation returns HTTP 409. Use the managed host controls for a mode change.
+
+The candidate exposes both GET routes for pause readback. Add `--write-bot-settings` for atomic PUT writes in the disposable directory.
+
+| Endpoint | Saved file | Synthetic PUT body |
+| --- | --- | --- |
+| `GET /api/pause`, `PUT /api/pause` | `openbot-pause.json` | `{"paused":true,"note":"Fixture pause"}` |
+| `GET /api/pause-bots`, `PUT /api/pause-bots` | `openbot-pause-bots.json` | `{"botId":"fixture-bot","paused":true}` or full list replacement with `{"pausedBotIds":["fixture-bot"]}` |
+
+Set `paused` to false to resume the gateway or a single bot. The hop reads pause state per request. A paused gateway or bot returns HTTP 503 with `paused` or `bot_paused` and the header `x-openbot-retryable: false`. The shared stock host adapter propagates marked terminal refusals without retry and preserves their HTTP status in error records. The Custom wrapper and an active Official stock tap also recheck global pause at stream start.
+
 #### Rust panel and provider discovery
 
-Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves. Successful account saves return the current panel state so the browser can show the saved account immediately.
+Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for OpenAI account saves and Custom model selection. Successful account saves return the current panel state so the browser can show the saved account immediately.
 
 Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with `--enable-hop`, `--enable-accounts` or `--enable-model-refresh`. Use read-only `GET /api/model-catalog` with `--ui-dir` or `--enable-model-refresh`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. The remaining panel control routes are pending.
 

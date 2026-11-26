@@ -21,7 +21,7 @@ use crate::{
     catalog::{Catalog, Effort, Model, Provider},
     hop::Hop,
     lease::Lease,
-    routing::{Selection, direct_go, parse_origin},
+    routing::{Selection, is_direct_provider},
 };
 
 use self::{
@@ -101,7 +101,7 @@ impl Plan {
         let window = target.context_tokens;
         let primary = SummaryRoute::configured(target, provider, selection.effort());
         let routes =
-            if primary.is_none() && !is_kimi_k3(&target.slug) || !allowed_provider(provider) {
+            if primary.is_none() && !is_kimi_k3(&target.slug) || !is_direct_provider(provider) {
                 Vec::new()
             } else {
                 let mut fallback: Vec<_> = catalog
@@ -162,7 +162,7 @@ impl SummaryRoute {
             || model.context_tokens == 0
             || is_kimi_k3(&model.slug)
             || model.id != format!("{}:{}", provider.id, model.slug)
-            || !allowed_provider(provider)
+            || !is_direct_provider(provider)
         {
             return None;
         }
@@ -195,42 +195,6 @@ fn is_kimi_k3(value: &str) -> bool {
         part.strip_prefix("kimi-k3")
             .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'))
     })
-}
-
-fn retired(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    let mut previous = "";
-    for word in lower.split(|character: char| !character.is_ascii_alphanumeric()) {
-        if matches!(word, "n5" | "metakey" | "modelhub") || previous == "meta" && word == "key" {
-            return true;
-        }
-        previous = word;
-    }
-    false
-}
-
-fn allowed_provider(provider: &Provider) -> bool {
-    if [&provider.id, &provider.origin]
-        .into_iter()
-        .any(|field| retired(field))
-        || provider.name.as_deref().is_some_and(retired)
-    {
-        return false;
-    }
-    let Some(origin) = parse_origin(&provider.origin) else {
-        return false;
-    };
-    if provider.id.to_ascii_lowercase().starts_with("opencode")
-        || origin.host_str() == Some("opencode.ai")
-    {
-        return direct_go(&origin);
-    }
-    origin.scheme() == "https"
-        || origin.host().is_some_and(|host| match host {
-            url::Host::Ipv4(ip) => ip.is_loopback(),
-            url::Host::Ipv6(ip) => ip.is_loopback(),
-            url::Host::Domain(domain) => domain == "localhost",
-        })
 }
 
 impl Compactor {

@@ -227,7 +227,6 @@ export function Dashboard() {
                   {active.reasoningLevels.map((level) => (
                     <ParamChip
                       key={level}
-                      pinned={level === "default"}
                       active={level === active.activeReasoning}
                       disabled={busy !== null}
                       onClick={() => setReasoning(level)}

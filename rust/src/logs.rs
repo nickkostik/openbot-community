@@ -147,7 +147,7 @@ pub(crate) fn historical_bot_ids(root: &Path) -> Vec<String> {
     )
 }
 
-fn iso(time: OffsetDateTime) -> String {
+pub(crate) fn iso(time: OffsetDateTime) -> String {
     // Preserve the canonical millisecond UTC format used by the Node logger.
     let formatted = time.format(&Rfc3339).unwrap_or_default();
     if let Some(without_zone) = formatted.strip_suffix('Z') {
@@ -157,6 +157,8 @@ fn iso(time: OffsetDateTime) -> String {
     }
     formatted
 }
+
+pub(crate) use maintenance::append_pause_event;
 
 fn at(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()

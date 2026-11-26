@@ -49,6 +49,10 @@ Add `--enable-model-refresh` in disposable state to run manual and scheduled ref
 
 Build the existing panel with `npm run build`, then point `--ui-dir` at the generated `ui` directory. Use the loopback address printed at startup. Open `/#/models/openai` in the browser for the saved OpenAI provider. Add `--enable-accounts` to test the sign-in and account saves with disposable credentials. The panel reads the saved catalog and listener status from Rust. The candidate loads `openbot-model-catalog.json` at startup and uses it for the aggregate count and provider-scoped metadata. Set `OPENBOT_AGENT_DATA` to a copied agent data directory to display the saved bot names and the corresponding log sources.
 
+In disposable Custom state, Models and Dashboard can save an active model and reasoning effort with `--enable-accounts`. The selection writes the wildcard binding and leaves explicit conversation bindings and per-bot overrides intact. The two OpenCode Go accounts keep separate selections and credentials. The stock adapter reads the current plan on the next turn. Official activation returns a conflict until the managed host controls complete the mode change.
+
+With `--write-bot-settings`, the dashboard can pause and resume the gateway and the Bots page can save individual or batch pause settings. The candidate uses the existing pause files. The stock adapter honors a pause on the next turn of an attached session. Terminal hop refusals return their original HTTP status to the adapter without a replay.
+
 ## Rehearse request recording
 
 Open `/#/logs` with `--ui-dir` to browse saved records, captured bodies, events, and usage. In disposable Custom state, add `--enable-hop --enable-request-logs` and set `loggingEnabled` in `openbot-logs.json` to record new requests. The writer uses `openbot-requests.jsonl` and its matching body files. It records retry attempts and streamed outcomes under one request. Usage counts the provider once per turn and distinguishes a zero cache count from missing telemetry. Capture uses the saved body policy, redacts credentials, and caps each stored body.
@@ -78,6 +82,7 @@ With request logging enabled, chat records show the estimated input, estimated r
 - [ ] Verify generation with a renewed OpenAI credential, confirm dispatch through the stock host adapter, and compare the selected provider and effort in the panel's request log.
 - [x] Port log settings, scheduled retention, cleanup, Strip Bodies, and Clear. Rehearse all operations against disposable history.
 - [x] Port compaction. Rehearse structured tool results, matching legacy briefs, native checkpoint restart, and an eligible direct OpenCode Go cache hit.
+- [x] Port active model and effort saves and gateway and bot pauses. Verify the next turn through one attached stock adapter session in disposable state.
 - [ ] Port the installer and the control and lifecycle commands. Verify service ownership, watcher recovery, and the panel's authenticated URLs. Retain the adapter required by the stock Grok Bot host.
 - [ ] Restore a protected backup in a disposable installation. Compare provider and model IDs, per-bot settings, mode, and the old and new service checkpoints. Rehearse an upgrade and rollback on the same loopback address.
 - [ ] Verify the live bot identities, active history, Official/Temporal mode, and routine settings before and after service cutover. Open the normal panel and complete the supported sign-in flow from the desktop.

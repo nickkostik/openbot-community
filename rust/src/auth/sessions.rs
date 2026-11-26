@@ -482,6 +482,27 @@ async fn save(
 ) -> Result<Json<Value>, AuthError> {
     let body = read_object(body)?;
     blocking(move || {
+        if body["kind"] == "use-model" {
+            if body.get("credentialId").is_some() || body.get("secret").is_some() {
+                return Err(AuthError::input(
+                    "Send model settings without a credential.",
+                ));
+            }
+            let store = &accounts.0.store;
+            let choice = body
+                .get("reasoning")
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value
+                        .as_str()
+                        .and_then(crate::catalog::Effort::parse)
+                        .ok_or_else(|| AuthError::input("Select a supported reasoning effort."))
+                })
+                .transpose()?;
+            let mut reply = store.save_active_model(required(&body, "modelId")?, choice)?;
+            accounts.0.status.add_to(store.root(), &mut reply);
+            return Ok(reply);
+        }
         let mut sessions = accounts.sessions()?;
         let id = body
             .get("credentialId")

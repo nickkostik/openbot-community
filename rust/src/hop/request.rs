@@ -14,7 +14,7 @@ use crate::{
     compaction::{Compacted, Compactor, SummaryRoute},
     reasoning,
     routing::{self, CredentialKind},
-    server::{State, read_json, read_mode},
+    server::{State, pauses, read_mode},
 };
 
 use super::failure::Failure;
@@ -237,24 +237,14 @@ fn conversation_field<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Option<&'a
 }
 
 fn check_paused(root: &Path, bot: Option<&str>) -> Result<(), Failure> {
-    if read_json(&root.join("openbot-pause.json"), 4 * 1024)
-        .is_ok_and(|value| value.is_some_and(|row| row["paused"] == true))
-    {
+    if pauses::paused(root) {
         return Err(Failure::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "paused",
             "OpenBot gateway is paused.",
         ));
     }
-    if let Some(bot) = bot
-        && read_json(&root.join("openbot-pause-bots.json"), 1024 * 1024).is_ok_and(|value| {
-            value.is_some_and(|row| {
-                row["pausedBotIds"]
-                    .as_array()
-                    .is_some_and(|bots| bots.iter().any(|entry| entry == bot))
-            })
-        })
-    {
+    if bot.is_some_and(|id| pauses::bot_ids(root).contains(id)) {
         return Err(Failure::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "bot_paused",

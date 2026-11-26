@@ -1,3 +1,5 @@
+pub(crate) mod pauses;
+
 use std::{
     fs::File,
     io::{self, Read, Write},
@@ -13,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
@@ -124,15 +127,23 @@ impl Store {
     }
 
     fn save(&self, settings: &Settings) -> io::Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(&settings.saved()?)?;
+        self.write_json(
+            &self.settings_path(),
+            &settings.saved()?,
+            BOT_MODELS_MAX_BYTES,
+        )
+    }
+
+    fn write_json(&self, path: &Path, value: &impl Serialize, maximum: u64) -> io::Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(value)?;
         bytes.push(b'\n');
-        if bytes.len() as u64 > BOT_MODELS_MAX_BYTES {
+        if bytes.len() as u64 > maximum {
             return Err(io::ErrorKind::FileTooLarge.into());
         }
         let mut temp = tempfile::NamedTempFile::new_in(&self.root)?;
         temp.write_all(&bytes)?;
         temp.as_file().sync_all()?;
-        temp.persist(self.settings_path())?;
+        temp.persist(path)?;
         #[cfg(unix)]
         File::open(&self.root)?.sync_all()?;
         Ok(())
@@ -187,6 +198,8 @@ pub fn router(
 ) -> Router {
     let mut router = Router::new()
         .route("/api/bot-models", get(bot_models).put(update_bot_models))
+        .route("/api/pause", get(pauses::global).put(pauses::save_global))
+        .route("/api/pause-bots", get(pauses::bots).put(pauses::save_bots))
         .route(
             "/healthz",
             get(|| async { Json(json!({"ok": true, "service": "openbot"})) }),

@@ -425,6 +425,7 @@ async function withHopServer(
     },
     seen: Record<string, unknown>[],
   ) => Promise<void>,
+  options: { status?: number; headers?: Record<string, string> } = {},
 ) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-rt-"));
   const planPath = path.join(dir, "plan.json");
@@ -443,7 +444,7 @@ async function withHopServer(
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
         seen.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(options.status ?? 200, { "Content-Type": "application/json", ...options.headers });
         res.end(JSON.stringify(reply));
       });
     });
@@ -481,6 +482,21 @@ async function withHopServer(
     else process.env.OPENBOT_HOP_PORT = prevPort;
   }
 }
+
+test("a terminal hop refusal reaches the attached session without a retry", async () => {
+  await withHopServer({error:{code:"provider_sign_in_required",message:"Sign in again"}}, async (runtime, seen) => {
+    const { fullStream } = runtime.hopFullStream(
+      { getMessages: () => [{ role:"user", content:"fixture" }] },
+      { modelId:"glm-5.3-flash", maxOutputTokens:4096 },
+    );
+    await assert.rejects(async () => {
+      for await (const _part of fullStream) {
+        // Drain the error part before checking the settled rejection.
+      }
+    }, /hop HTTP 503.*provider_sign_in_required/);
+    assert.equal(seen.length,1);
+  }, { status:503, headers:{"x-openbot-retryable":"false"} });
+});
 
 test("hopFullStream posts stream true and maps a JSON fallback", async () => {
   await withHopServer({

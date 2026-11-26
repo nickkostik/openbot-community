@@ -408,6 +408,23 @@ fn log_event(root: &Path, kind: &str, severity: &str, message: &str, metadata: &
     }
 }
 
+pub(crate) fn append_pause_event(root: &Path, paused: bool) {
+    if let Ok(_guard) = lock(root) {
+        let (severity, message) = if paused {
+            ("WARN", "Gateway paused. New chat traffic is held.")
+        } else {
+            ("INFO", "Gateway resumed. Chat traffic flows again.")
+        };
+        log_event(
+            root,
+            "gateway.pause",
+            severity,
+            message,
+            &json!({"paused":paused}),
+        );
+    }
+}
+
 fn failed() -> (StatusCode, &'static str) {
     (
         StatusCode::SERVICE_UNAVAILABLE,

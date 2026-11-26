@@ -211,6 +211,42 @@ pub fn parse_origin(raw: &str) -> Option<Url> {
     Some(origin)
 }
 
+pub(crate) fn retired_provider(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let mut previous = "";
+    for word in lower.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if matches!(word, "n5" | "metakey" | "modelhub") || previous == "meta" && word == "key" {
+            return true;
+        }
+        previous = word;
+    }
+    false
+}
+
+pub(crate) fn is_direct_provider(provider: &Provider) -> bool {
+    if [&provider.id, &provider.origin]
+        .into_iter()
+        .any(|field| retired_provider(field))
+        || provider.name.as_deref().is_some_and(retired_provider)
+    {
+        return false;
+    }
+    let Some(origin) = parse_origin(&provider.origin) else {
+        return false;
+    };
+    if provider.id.to_ascii_lowercase().starts_with("opencode")
+        || origin.host_str() == Some("opencode.ai")
+    {
+        return direct_go(&origin);
+    }
+    origin.scheme() == "https"
+        || origin.host().is_some_and(|host| match host {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(domain) => domain == "localhost",
+        })
+}
+
 pub fn direct_go(origin: &Url) -> bool {
     origin.scheme() == "https"
         && origin.port().is_none()

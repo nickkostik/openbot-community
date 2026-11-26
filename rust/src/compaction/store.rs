@@ -152,13 +152,14 @@ impl Store {
         )
         .and_then(|(receipt, text)| {
             let source = raw["summarySource"].as_str().unwrap_or_default();
-            (!source.is_empty() && !super::is_kimi_k3(source) && !super::retired(source)).then(
-                || Brief {
-                    receipt,
-                    text: text.into(),
-                    source: source.into(),
-                },
-            )
+            (!source.is_empty()
+                && !super::is_kimi_k3(source)
+                && !crate::routing::retired_provider(source))
+            .then(|| Brief {
+                receipt,
+                text: text.into(),
+                source: source.into(),
+            })
         });
         Some(Saved {
             last_window: raw["lastContextTokens"]

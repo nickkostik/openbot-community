@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::BTreeSet,
     ffi::OsStr,
     fs, io,
     path::Path,
@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::{
     logs::historical_bot_ids,
-    server::{BOT_MODELS_MAX_BYTES, read_json},
+    server::{BOT_MODELS_MAX_BYTES, pauses, read_json},
 };
 
 #[derive(Serialize)]
@@ -25,22 +25,6 @@ pub struct Bot {
     created_at_ms: Option<u64>,
 }
 
-pub fn paused(root: &Path) -> Vec<String> {
-    let saved = read_json(&root.join("openbot-pause-bots.json"), 1024 * 1024)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let mut seen = HashSet::new();
-    saved["pausedBotIds"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter(|id| !id.trim().is_empty() && seen.insert(*id))
-        .map(str::to_owned)
-        .collect()
-}
-
 pub fn read(root: &Path, agent_data: &Path) -> Vec<Bot> {
     let agents = agent_data.join("agents");
     let mut ids = BTreeSet::new();
@@ -52,7 +36,7 @@ pub fn read(root: &Path, agent_data: &Path) -> Vec<Bot> {
                 .filter_map(|entry| entry.file_name().into_string().ok()),
         );
     }
-    ids.extend(paused(root));
+    ids.extend(pauses::bot_ids(root));
     ids.extend(historical_bot_ids(root));
     if let Ok(Some(saved)) = read_json(&root.join("openbot-bot-models.json"), BOT_MODELS_MAX_BYTES)
         && let Some(assignments) = saved["assignments"].as_object()
@@ -176,7 +160,10 @@ mod tests {
         assert!(rows[0].hidden);
         assert!(rows[0].updated_at_ms.is_some());
         assert!(!rows[0].deleted);
-        assert_eq!(paused(&root), ["live", "archived"]);
+        assert_eq!(
+            pauses::bot_ids(&root),
+            BTreeSet::from(["live".into(), "archived".into()])
+        );
         assert_eq!(
             rows[1..]
                 .iter()

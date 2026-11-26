@@ -612,32 +612,65 @@ async fn official_mode_and_global_and_bot_pauses_block_dispatch() {
         "official_mode"
     );
     fs::write(fixture.path().join("openbot-mode"), "custom\n").unwrap();
-    file(
-        fixture.path(),
-        "openbot-pause.json",
-        json!({"paused": true}),
+    let set = |route: &'static str, data: Value| {
+        let request = fixture
+            .client
+            .put(format!("{}{route}", fixture.rust.base))
+            .json(&data);
+        async move {
+            request
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        set(
+            "/api/pause",
+            json!({"paused":true,"note":" fixture reason "})
+        )
+        .await["note"],
+        "fixture reason"
     );
     let reply = fixture.turn(request.clone()).await;
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
         "paused"
     );
-    file(
-        fixture.path(),
-        "openbot-pause.json",
-        json!({"paused": false}),
+    set("/api/pause", json!({"paused":false})).await;
+    let (a, b) = tokio::join!(
+        set("/api/pause-bots", json!({"botId":PROFILE,"paused":true})),
+        set(
+            "/api/pause-bots",
+            json!({"botId":"separate-bot","paused":true})
+        )
     );
-    file(
-        fixture.path(),
-        "openbot-pause-bots.json",
-        json!({"pausedBotIds": [PROFILE]}),
+    assert!(
+        a["pausedBotIds"].as_array().unwrap().len() == 2
+            || b["pausedBotIds"].as_array().unwrap().len() == 2
     );
-    let reply = fixture.turn(request).await;
+    let reply = fixture.turn(request.clone()).await;
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
         "bot_paused"
     );
     fixture.mock.inspect(|seen| assert!(seen.is_empty()));
+    let replaced = set(
+        "/api/pause-bots",
+        json!({"pausedBotIds":["separate-bot","separate-bot"]}),
+    )
+    .await;
+    assert_eq!(replaced["pausedBotIds"], json!(["separate-bot"]));
+    fixture.mock.push(Json(chat_body()).into_response());
+    let reply = fixture.turn(request).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+    let events = fixture.log("/api/logs/events?type=gateway.pause").await;
+    assert_eq!(events["total"], 2);
 }
 
 #[tokio::test]

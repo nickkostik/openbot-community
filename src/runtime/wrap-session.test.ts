@@ -100,7 +100,7 @@ test("wrapSession chain re-resolves the plan on every stream and getModelId", as
   const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-rt-lazy-"));
   const planPath = path.join(dir, "plan.json");
   const assignmentsPath = path.join(dir, "openbot-bot-models.json");
-  const botId = "7f361b02-066f-4e0c-8ff0-53ac2ca10383";
+  const botId = "00000000-0000-4000-8000-000000000001";
   const assign = (modelId?: string) => writeFileSync(
     assignmentsPath, JSON.stringify({ assignments: modelId ? { [botId]: modelId } : {} }),
   );

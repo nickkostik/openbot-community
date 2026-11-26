@@ -13,15 +13,111 @@ HERE = Path(__file__).resolve().parent
 MODULE_PATH = HERE / "patch-sidebar-authority.py"
 
 
-def load_patcher():
+def load_patcher(path=MODULE_PATH):
     spec = importlib.util.spec_from_file_location(
-        "grokbot_sidebar_authority_patch", MODULE_PATH
+        "grokbot_sidebar_authority_patch", path
     )
     if spec is None or spec.loader is None:
         raise RuntimeError("could not load patcher")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class CurrentDateGuardTests(unittest.TestCase):
+    def renderer(self, number):
+        return (
+            f"function p{number}(e){{return typeof e==`number`&&Number.isFinite(e)&&e>0}}"
+            f"function h{number}(e){{return p{number}(e)?e:null}}"
+            f"function read{number}(e){{return h{number}(e.timestampMs)}}"
+            f"function format{number}(t){{const r=new Date(t);return clock.timeOfDay.format(r)}}"
+            f"function open{number}(t){{const value=read{number}(t);"
+            f"return value===null?null:format{number}(value)}}"
+        ).encode()
+
+    def test_current_and_earlier_linux_renderers_keep_their_dates_renderable(self):
+        patcher = load_patcher(HERE / "patch-current-date.py")
+        for count in (1, 2):
+            with self.subTest(readers=count):
+                original = b"".join(self.renderer(number) for number in range(count))
+                fixed = patcher.guard_renderer_dates(original)
+                self.assertEqual(len(fixed), len(original))
+                self.assertEqual(patcher.guard_renderer_dates(fixed), fixed)
+                script = b"const clock={timeOfDay:new Intl.DateTimeFormat('en',{timeZone:'UTC'})};" + fixed
+                values = "{timestampMs:1700000000000},{timestampMs:864e13},{timestampMs:864e13+1},{}, {timestampMs:NaN}"
+                render = ",".join(f"[{values}].map(open{number})" for number in range(count))
+                script += f"process.stdout.write(JSON.stringify([{render}]));".encode()
+                result = json.loads(subprocess.check_output(["node", "--input-type=module"], input=script))
+                for dates in result:
+                    self.assertEqual(dates[0], "11/14/2023")
+                    self.assertIsInstance(dates[1], str)
+                    self.assertEqual(dates[2:], [None, None, None])
+
+    def test_mixed_or_unreviewed_renderers_are_refused(self):
+        patcher = load_patcher(HERE / "patch-current-date.py")
+        stock = self.renderer(0)
+        fixed = patcher.guard_renderer_dates(stock)
+        variants = (
+            fixed + self.renderer(1),
+            stock + b"function unreviewed(e){return other(e.timestampMs)}",
+            stock.replace(b"&&e>0", b"&&e>=0"),
+        )
+        for layout in variants:
+            with self.subTest(layout=layout):
+                with self.assertRaises(ValueError):
+                    patcher.guard_renderer_dates(layout)
+
+
+class CurrentSidebarOrderTests(unittest.TestCase):
+    renderer = (
+        b"function shared(e){return e.harness===`temporal`&&e.viewerIsOwner===!1&&!e.isGroup}"
+        b"function score(e,t=`row-updated`){return t===`activity`?"
+        b"Math.max(e.localActivityAt??0,e.lastActivityAt??0,e.createdAt):"
+        b"shared(e)?Math.max(e.lastActivityAt??0,e.createdAt):Math.max(e.updatedAt,e.lastActivityAt??0)}"
+        b"function compare(e,t,n=`row-updated`){return score(t,n)-score(e,n)}"
+    )
+
+    def test_orders_owned_chats_by_message_time_without_changing_other_scores(self):
+        patcher = load_patcher(HERE / "patch-current-date.py")
+        cases = b"""
+const older = {id:'older', harness:'temporal', viewerIsOwner:true,
+  createdAt:440, updatedAt:450, lastActivityAt:100, localActivityAt:440};
+const later = {...older, id:'later', isGroup:true, createdAt:40, updatedAt:200,
+  lastActivityAt:190, localActivityAt:120};
+const sharedChat = {...older, viewerIsOwner:false};
+const group = {...sharedChat, isGroup:true};
+const box = {...older, harness:'box'};
+const fallback = [null, 0, -10, NaN, Infinity, 864e13 + 1, 864e13];
+process.stdout.write(JSON.stringify({
+  ordered: [older,later].sort(compare).map(r=>r.id),
+  otherScores: [sharedChat,group,box].map(r=>[score(r),score(r,'activity')]),
+  ownedScores: [score(older),score(older,'activity')],
+  invalidDates: fallback.map(lastActivityAt=>score({...older,lastActivityAt})),
+}));
+"""
+        patched = patcher.sort_temporal_sidebar(self.renderer)
+        self.assertNotEqual(patched, self.renderer)
+        self.assertEqual(len(patched), len(self.renderer))
+        self.assertEqual(patcher.sort_temporal_sidebar(patched), patched)
+        stock, fixed = [
+            json.loads(subprocess.check_output(["node", "--input-type=module"], input=code + cases))
+            for code in (self.renderer, patched)
+        ]
+        self.assertEqual(stock["ordered"], ["older", "later"])
+        self.assertEqual(fixed["ordered"], ["later", "older"])
+        self.assertEqual(fixed["otherScores"], stock["otherScores"])
+        self.assertEqual(fixed["ownedScores"], [100, 100])
+        self.assertEqual(fixed["invalidDates"], [440] * 6 + [864e13])
+
+    def test_leaves_unknown_and_ambiguous_ordering_intact(self):
+        patcher = load_patcher(HERE / "patch-current-date.py")
+        for renderer in (
+            self.renderer * 2,
+            self.renderer.replace(b"score(t,n)-score(e,n)", b"score(e,n)-score(t,n)"),
+            self.renderer.replace(b"&&!e.isGroup", b""),
+        ):
+            with self.subTest(renderer=renderer):
+                self.assertEqual(patcher.sort_temporal_sidebar(renderer), renderer)
 
 
 class PatchTests(unittest.TestCase):

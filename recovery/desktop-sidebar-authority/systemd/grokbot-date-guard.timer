@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Grok Bot date guard after updates
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

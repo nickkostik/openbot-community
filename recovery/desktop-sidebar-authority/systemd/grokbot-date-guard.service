@@ -1,0 +1,6 @@
+[Unit]
+Description=Keep Grok Bot message date guard installed
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/openbot/desktop-sidebar-recovery/ensure-date-guard.sh

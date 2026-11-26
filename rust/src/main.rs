@@ -3,6 +3,7 @@ mod auth;
 mod bot_models;
 mod catalog;
 mod compaction;
+mod delivery;
 mod discovery;
 mod hop;
 mod host;
@@ -257,6 +258,9 @@ async fn serve(args: Args) -> io::Result<()> {
         catalog.as_ref().map(aggregate::CatalogService::routes),
         (status.serves_ui || enable_request_logs).then(|| logs.clone().routes()),
         skills.map(skills::Skills::routes),
+        status
+            .serves_ui
+            .then(|| delivery::config::routes(state.clone(), write_bot_settings)),
     ];
     println!("OpenBot Rust listening on http://{authority}");
     let draining = catalog.clone();

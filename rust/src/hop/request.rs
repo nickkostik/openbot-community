@@ -12,6 +12,7 @@ use crate::{
     auth::{Authorized, CODEX_USER_AGENT, CredentialStore},
     catalog::{Effort, Protocol},
     compaction::{Compacted, Compactor, SummaryRoute},
+    delivery::{Delivery, Turn},
     reasoning,
     routing::{self, CredentialKind},
     server::{State, pauses, read_mode},
@@ -21,10 +22,11 @@ use super::failure::Failure;
 
 pub const MAX_INBOUND_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const COMPLETION_LIMITS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 
 #[derive(Clone, Copy)]
 pub enum Intent<'a> {
-    Chat(Option<&'a Compactor>),
+    Chat(Option<&'a Compactor>, Option<&'a Delivery>),
     Summary(&'a SummaryRoute),
 }
 
@@ -43,6 +45,12 @@ pub struct Prepared {
     pub upstream_stream: bool,
     pub client_stream: bool,
     pub compaction: Option<Compacted>,
+    pub(super) delivery: Option<PreparedDelivery>,
+}
+
+pub(super) struct PreparedDelivery {
+    pub turn: Turn,
+    pub followup: Option<Bytes>,
 }
 
 const CONVERSATION_FIELDS: &[&str] = &[
@@ -64,6 +72,25 @@ const INTERNAL_FIELDS: &[&str] = &[
     "openbotEpochId",
     "epochId",
     "epoch_id",
+    "botId",
+    "chatType",
+    "chat_type",
+    "opening",
+    "directChat",
+    "direct_chat",
+    "internalLane",
+    "internal_lane",
+    "groupFlag",
+    "isGroup",
+    "isGroupMemberTurn",
+    "hidden",
+    "isSubagent",
+    "isSilenceAllowed",
+    "requestSource",
+    "isRoutine",
+    "routine",
+    "automation",
+    "isAutomation",
 ];
 
 impl Prepared {
@@ -85,7 +112,12 @@ impl Prepared {
         let bot = bot_id(&body).map(str::to_owned);
         let staged = state.clone();
         let pause_bot = bot.clone();
-        let (catalog, settings) = tokio::task::spawn_blocking(move || {
+        let delivery = match intent {
+            Intent::Chat(_, delivery) => delivery,
+            Intent::Summary(_) => None,
+        };
+        let delivery_file = delivery.map(|delivery| delivery.file.clone());
+        let (catalog, settings, config) = tokio::task::spawn_blocking(move || {
             if read_mode(staged.root()).map_err(|_| config_failure())? != "custom" {
                 return Err(Failure::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -94,7 +126,8 @@ impl Prepared {
                 ));
             }
             check_paused(staged.root(), pause_bot.as_deref())?;
-            staged.saved().map_err(|_| config_failure())
+            let (catalog, settings) = staged.saved().map_err(|_| config_failure())?;
+            Ok((catalog, settings, delivery_file.map(|file| file.load())))
         })
         .await
         .map_err(|_| config_failure())??;
@@ -136,6 +169,9 @@ impl Prepared {
         let route = selection.route(credential.kind);
         let client_stream = body.get("stream") == Some(&Value::Bool(true));
         let conversation = conversation_field(|key| body.get(key));
+        let mut turn = delivery.zip(config).and_then(|(delivery, config)| {
+            delivery.turn(config, &body, incoming, bot.as_deref(), conversation)
+        });
         let has_conversation = conversation.is_some();
         let scope = scope(
             conversation.or(bot.as_deref()),
@@ -145,7 +181,7 @@ impl Prepared {
             .as_deref()
             .map(|scope| stable_cache_key(&selection.provider.id, scope));
         let (mut body, compaction) = match intent {
-            Intent::Chat(Some(compactor)) => {
+            Intent::Chat(Some(compactor), _) => {
                 let conversation = conversation.map(str::to_owned);
                 compactor
                     .apply(body, conversation, bot.clone(), &catalog, &selection)
@@ -154,18 +190,13 @@ impl Prepared {
             _ => (body, None),
         };
 
+        if let Some(turn) = &mut turn {
+            turn.before(&mut body);
+        }
         for key in CONVERSATION_FIELDS.iter().chain(INTERNAL_FIELDS) {
             body.shift_remove(*key);
         }
         reasoning::apply(&mut body, &selection, route.protocol);
-        let mut outbound = route
-            .encode_request(Value::Object(body), credential.kind)
-            .map_err(|err| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", err))?;
-        if credential.kind == CredentialKind::ChatGptPlan {
-            outbound["store"] = json!(false);
-            outbound["stream"] = json!(true);
-        }
-
         let host = Url::parse(&route.upstream)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned));
@@ -173,13 +204,63 @@ impl Prepared {
         let go = provider == "opencode"
             || provider.starts_with("opencode-")
             || host.as_deref() == Some("opencode.ai");
-        if let Some(key) = &session_key
-            && (credential.kind == CredentialKind::OpenAiOauth
-                || host.as_deref() == Some("api.openai.com")
-                || (go && route.protocol == Protocol::Responses))
-        {
-            outbound["prompt_cache_key"] = json!(key);
-        }
+        let cache_on_wire = credential.kind == CredentialKind::OpenAiOauth
+            || host.as_deref() == Some("api.openai.com")
+            || (go && route.protocol == Protocol::Responses);
+        let encode = |values| -> Result<Value, Failure> {
+            let mut outbound = route
+                .encode_request(Value::Object(values), credential.kind)
+                .map_err(|err| Failure::new(StatusCode::BAD_REQUEST, "invalid_request", err))?;
+            if credential.kind == CredentialKind::ChatGptPlan {
+                outbound["store"] = json!(false);
+                outbound["stream"] = json!(true);
+            }
+            if cache_on_wire && let Some(key) = &session_key {
+                outbound["prompt_cache_key"] = json!(key);
+            }
+            Ok(outbound)
+        };
+        let delivery = turn.map(|mut turn| {
+            let followup = COMPLETION_LIMITS
+                .into_iter()
+                .find_map(|key| Some((key, body.get(key)?.as_u64()?)))
+                .and_then(|(key, limit)| {
+                    let candidate = turn.candidate(&body, limit, selection.model.delivery_rates)?;
+                    let mut next: Map<String, Value> = body
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "messages")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    next.insert("messages".into(), Value::Array(candidate.messages));
+                    next.insert(key.into(), json!(candidate.cap));
+                    let outbound = match encode(next) {
+                        Ok(outbound) => outbound,
+                        Err(_) => {
+                            turn.skip_packet("followup_encoding_failed");
+                            return None;
+                        }
+                    };
+                    if !COMPLETION_LIMITS.iter().any(|key| {
+                        outbound
+                            .get(key)
+                            .and_then(Value::as_u64)
+                            .is_some_and(|limit| (1..=candidate.cap).contains(&limit))
+                    }) {
+                        turn.skip_packet("budget_completion");
+                        return None;
+                    }
+                    let result = serde_json::to_vec(&outbound)
+                        .ok()
+                        .filter(|payload| payload.len() <= MAX_REQUEST_BYTES)
+                        .map(Bytes::from);
+                    if result.is_none() {
+                        turn.skip_packet("followup_encoding_failed");
+                    }
+                    result
+                });
+            PreparedDelivery { turn, followup }
+        });
+        let outbound = encode(body)?;
 
         let upcoming_stream = outbound["stream"] == true;
         let info = Metadata {
@@ -213,6 +294,7 @@ impl Prepared {
             upstream_stream: upcoming_stream,
             client_stream,
             compaction,
+            delivery,
         })
     }
 }

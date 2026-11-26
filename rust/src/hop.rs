@@ -1,3 +1,4 @@
+mod delivery;
 mod failure;
 pub(crate) mod request;
 mod response;
@@ -14,7 +15,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, State as AxumState, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -25,11 +26,13 @@ use serde_json::{Value, json};
 use crate::{
     auth::CredentialStore,
     compaction::{Compactor, SummaryError, SummaryRoute},
+    delivery::Delivery,
     logs::{Logs, Trace},
     server::{State, read_json},
 };
 
 use self::{
+    delivery::{Input, StreamDelivery},
     failure::Failure,
     request::{Intent, MAX_INBOUND_BYTES, Prepared},
     stream::{Frame, Live},
@@ -47,6 +50,7 @@ pub struct Hop {
     logs: Option<Logs>,
     compactor: Option<Compactor>,
     host: Option<crate::host::Host>,
+    delivery: Delivery,
     #[cfg(test)]
     test_go_base: Option<String>,
 }
@@ -72,6 +76,7 @@ impl Hop {
             .timeout(timeout)
             .build()
             .map_err(io::Error::other)?;
+        let delivery = Delivery::new(state.root());
         Ok(Self {
             state,
             credentials,
@@ -80,6 +85,7 @@ impl Hop {
             logs: None,
             compactor: None,
             host: None,
+            delivery,
             #[cfg(test)]
             test_go_base: None,
         })
@@ -109,27 +115,47 @@ impl Hop {
 
     async fn dispatch(
         &self,
-        prepared: &Prepared,
+        mut prepared: Prepared,
         mut trace: Option<Trace>,
     ) -> Result<Response, Failure> {
         let mut attempt = 0;
         let mut waited = Duration::ZERO;
+        if let Some(strategy) = &prepared.delivery
+            && let Some(trace) = &mut trace
+        {
+            trace.delivery(strategy.turn.metadata());
+        }
         loop {
             let started = Instant::now();
-            match self.attempt(prepared).await {
+            match self
+                .attempt(&prepared, &prepared.body, prepared.client_stream)
+                .await
+            {
                 Ok((status, reply)) => {
                     if let Some(trace) = &mut trace {
                         trace.attempt(status, started, None, None);
                     }
                     return Ok(match reply {
                         Reply::Buffered(value) => {
+                            let value = match prepared.delivery.take() {
+                                Some(strategy) => {
+                                    strategy.buffered(self, &prepared, value, &mut trace).await
+                                }
+                                None => value,
+                            };
                             if let Some(mut trace) = trace {
                                 trace.buffered(&value);
                                 trace.finish(status, None);
                             }
                             Json(value).into_response()
                         }
-                        Reply::Streaming(prefix, live) => stream_reply(prefix, live, trace, status),
+                        Reply::Streaming(prefix, live) => {
+                            prepared.body = Bytes::new();
+                            let strategy = prepared.delivery.take().map(|strategy| {
+                                Box::new(StreamDelivery::new(self.clone(), prepared, strategy))
+                            });
+                            stream_reply(Input { prefix, live }, trace, status, strategy)
+                        }
                     });
                 }
                 Err(failure) => {
@@ -151,7 +177,12 @@ impl Hop {
         }
     }
 
-    async fn attempt(&self, prepared: &Prepared) -> Result<(StatusCode, Reply), Failure> {
+    async fn attempt(
+        &self,
+        prepared: &Prepared,
+        payload: &Bytes,
+        client_stream: bool,
+    ) -> Result<(StatusCode, Reply), Failure> {
         let url = prepared.url.as_str();
         #[cfg(test)]
         let fixture = tests::fixture_go_url(self, prepared);
@@ -161,7 +192,7 @@ impl Hop {
             .client
             .post(url)
             .headers(prepared.headers.clone())
-            .body(prepared.body.clone())
+            .body(payload.clone())
             .send()
             .await
             .map_err(|err| Failure::network(&err))?;
@@ -186,7 +217,7 @@ impl Hop {
                 &prepared.model,
                 &prepared.secret,
             );
-            if prepared.client_stream {
+            if client_stream {
                 return Ok((status, begin_stream(live).await?));
             }
             return Ok((
@@ -204,7 +235,7 @@ impl Hop {
             return Err(Failure::event(&output, &headers, &prepared.secret));
         }
         let completion = response::normalize(prepared.protocol, &prepared.model, output)?;
-        if prepared.client_stream {
+        if client_stream {
             let mut frames: VecDeque<_> = response::json_frames(completion)
                 .into_iter()
                 .map(Frame::Data)
@@ -266,7 +297,7 @@ impl Hop {
         if let Some(trace) = &mut trace {
             trace.route(&prepared);
         }
-        let reply = self.dispatch(&prepared, trace).await.map_err(|failure| {
+        let reply = self.dispatch(prepared, trace).await.map_err(|failure| {
             if failure.context_overflow() {
                 SummaryError::ContextOverflow
             } else {
@@ -330,7 +361,7 @@ async fn completions(
             body,
             &headers,
             &hop.version,
-            Intent::Chat(hop.compactor.as_ref()),
+            Intent::Chat(hop.compactor.as_ref(), Some(&hop.delivery)),
         )
         .await
     }
@@ -346,7 +377,7 @@ async fn completions(
             {
                 service.launch(job, hop.clone());
             }
-            let result = hop.dispatch(&prepared, trace).await?;
+            let result = hop.dispatch(prepared, trace).await?;
             Ok(match turn {
                 Some(turn) => turn.wrap_response(result),
                 None => result,
@@ -431,17 +462,17 @@ async fn begin_stream(mut live: Live) -> Result<Reply, Failure> {
 }
 
 fn stream_reply(
-    prefix: VecDeque<Frame>,
-    live: Option<Box<Live>>,
+    source: Input,
     trace: Option<Trace>,
     status: StatusCode,
+    strategy: Option<Box<StreamDelivery>>,
 ) -> Response {
     let chunks = futures_util::stream::unfold(
-        (prefix, live, trace),
-        move |(mut prefix, mut live, mut trace)| async move {
-            let next = match prefix.pop_front() {
-                Some(frame) => Ok(Some(frame)),
-                None => live.as_mut()?.next().await,
+        (source, trace, strategy),
+        move |(mut source, mut trace, mut strategy)| async move {
+            let next = match &mut strategy {
+                Some(strategy) => strategy.next(&mut source, &mut trace).await,
+                None => source.next().await,
             };
             let bytes = match next {
                 Ok(Some(frame)) => {
@@ -467,11 +498,12 @@ fn stream_reply(
                     if let Some(trace) = trace.take() {
                         trace.finish(failure.status(), Some(value));
                     }
-                    live = None;
+                    source.live = None;
+                    strategy = None;
                     bytes
                 }
             };
-            Some((Ok::<_, Infallible>(bytes), (prefix, live, trace)))
+            Some((Ok::<_, Infallible>(bytes), (source, trace, strategy)))
         },
     );
     let mut response = Body::from_stream(chunks).into_response();

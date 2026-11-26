@@ -45,7 +45,7 @@ fn read_owner(path: &Path) -> Option<u32> {
     std::str::from_utf8(&bytes).ok()?.trim().parse().ok()
 }
 
-fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(bytes)?;

@@ -205,6 +205,16 @@ The candidate loads `openbot-model-catalog.json` at startup and persists public 
 
 When saved-provider refresh is enabled, it adds new routes under existing provider accounts and enriches existing rows while retaining model IDs, bindings, explicit protocols, custom context, and active and per-bot reasoning choices. A narrower published output limit can reduce the output cap. The merge reads current bot settings under the shared `.openbot-rust-bot-settings.lock` lease and serializes plan updates with bot settings saves. Use `--write-bot-settings` on the same candidate to rehearse both writes.
 
+#### Rust delivery hardening
+
+With `--ui-dir`, the rehearsal panel serves `GET /api/settings/delivery`. `PUT /api/settings/delivery` requires `--write-bot-settings` and accepts a `mode` with optional boolean `layers.l1`, `layers.l2` and `layers.l3`. It saves to `openbot-injection.json` in the `--sand-data` directory, or the explicit `OPENBOT_INJECTION` path. The next hop request reads the saved policy without a restart. Saves preserve valid top-level or nested layer settings and tuning, and environment pins retain priority. Scope and field purposes are described in the [existing delivery policy](#injection).
+
+The default is `off`. `dry-run` records observations only. In `enforce`, L1 adds eligible reminders, L2 permits at most one additional generation per active direct-chat epoch, and L3 can add a reminder to the next eligible request in the same unresolved silent epoch. The request needs recognized direct-chat evidence, a real user-message boundary, bot and conversation IDs, and an available `SendToUser` tool. L2 and L3 also require an epoch ID. The candidate tracks epoch limits in its process. Group chats, routines, hidden context, subagents, auxiliary requests, Official traffic and compaction summary calls are outside this scope.
+
+An L2 candidate has a single `stop` choice without tool calls while delivery is owed. The additional run keeps the same provider, model, credential, effort and cache identity. Prompt, completion and timeout budgets apply, and a protocol that cannot carry the output cap skips L2. When model rates are available, the hop estimates the extra cost against the configured cap. Unknown rates are reported as `unknown` and can use the token and run budgets when the dollar cap is positive. A zero dollar cap blocks unknown-rate retries.
+
+The hop waits for a complete validated second response before forwarding its output or tool calls. An unavailable, malformed or timed-out follow-up releases the original response. With request logging enabled, the request record includes `injection` metadata. The existing Logs panel reads sampled counts, outcomes, skips, extra calls and latency from `GET /api/logs/stats`.
+
 #### Rust request logs
 
 Add `--enable-request-logs` with `--enable-hop` in disposable state to record candidate requests. Recording uses the existing `openbot-logs.json` and requires `"loggingEnabled": true`. The candidate reads this setting per request and checks it again before writing.

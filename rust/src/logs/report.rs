@@ -30,7 +30,7 @@ pub fn stats(root: &Path, rows: &Rows) -> Value {
         body_bytes = body_bytes.saturating_add(count(row, "bodyBytes"));
     }
     let (body_files, body_disk_bytes) = body_disk_size(&root.join(BODIES));
-    json!({
+    let mut result = json!({
         "records":rows.values.len(),"scanned":sample.len(),"approximate":rows.approximate || sample.len()<rows.values.len(),
         "ok":ok,"errors":sample.len()-ok,"tokenBasis":"provider","providerSampleRecords":totals.requests,
         "excludedHarnessRecords":sample.len()-totals.requests,"promptTokens":totals.prompt_tokens,
@@ -38,7 +38,131 @@ pub fn stats(root: &Path, rows: &Rows) -> Value {
         "cachedTokens":totals.cached_tokens,"reasoningTokens":totals.reasoning_tokens,"bodyBytes":body_bytes,
         "bodyFiles":body_files,"bodyDiskBytes":body_disk_bytes,"bodiesApproximate":body_files>DISK_SAMPLE,
         "diskBytes":rows.disk_bytes.saturating_add(body_disk_bytes),
-    })
+    });
+    if let Some(injection) = injection_stats(sample) {
+        result["injection"] = injection;
+    }
+    result
+}
+
+fn injection_stats(rows: &[Value]) -> Option<Value> {
+    let mut counts = BTreeMap::<&str, u64>::new();
+    let mut families = BTreeMap::<&str, u64>::new();
+    let mut skips = BTreeMap::<&str, u64>::new();
+    let mut classification = BTreeMap::<&str, u64>::new();
+    let mut outcomes = BTreeMap::<&str, u64>::new();
+    let mut modes = BTreeMap::<&str, u64>::new();
+    let mut latency_rows = 0;
+    for row in rows
+        .iter()
+        .map(|row| &row["injection"])
+        .filter(|row| row.is_object())
+    {
+        let mut bump = |field, by: u64| {
+            let count = counts.entry(field).or_default();
+            *count = count.saturating_add(by);
+        };
+        bump("records", 1);
+        let would_apply = row["injectionWouldApply"] == true;
+        let attempted = row["l2Attempted"] == true;
+        let runs = count(row, "l2AdditionalRuns");
+        bump("wouldApply", u64::from(would_apply));
+        bump(
+            "candidates",
+            u64::from(would_apply || row["l2Eligible"] == true),
+        );
+        bump("l2Attempted", u64::from(attempted));
+        bump("extraCalls", runs);
+        if let Some(latency) = row["l2AddedLatencyMs"].as_u64() {
+            bump("extraLatencyMs", latency);
+            latency_rows += 1;
+        }
+        let outcome = string(row, "l2Outcome");
+        let decision = string(row, "terminalDecision");
+        let fallback = matches!(
+            outcome,
+            "fallback-original-terminal" | "failed-first-fallback"
+        ) || decision == "l2-fallback-original-terminal";
+        bump(
+            "l2Triggered",
+            u64::from(runs > 0 || attempted || decision == "l2-triggered"),
+        );
+        bump(
+            "applied",
+            u64::from(matches!(
+                outcome,
+                "second-success" | "applied" | "success" | "retry-success"
+            )),
+        );
+        bump("fallbackOriginalTerminal", u64::from(fallback));
+        bump(
+            "remediationFailures",
+            u64::from(fallback || outcome == "failed"),
+        );
+        bump(
+            "unresolved",
+            u64::from(matches!(outcome, "unresolved" | "valid-no-tool")),
+        );
+        bump(
+            "terminalReleased",
+            u64::from(
+                fallback
+                    || row["terminalHoldState"] == "released"
+                    || matches!(decision, "normal-release" | "l2-triggered"),
+            ),
+        );
+        let skip = string(row, "skipReason");
+        let class = string(row, "classificationSkippedReason");
+        bump("skipped", u64::from(!skip.is_empty()));
+        bump("classificationSkipped", u64::from(!class.is_empty()));
+        for (facet, key) in [
+            (&mut skips, skip),
+            (&mut classification, class),
+            (&mut outcomes, outcome),
+            (&mut modes, string(row, "injectionMode")),
+        ] {
+            if !key.is_empty() {
+                *facet.entry(key).or_default() += 1;
+            }
+        }
+        for family in row["injectionFamilies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(10)
+        {
+            *families.entry(family).or_default() += 1;
+        }
+    }
+    if counts.is_empty() {
+        return None;
+    }
+    let facet = |counts: BTreeMap<&str, u64>| {
+        let mut rows: Vec<_> = counts.into_iter().collect();
+        rows.sort_by(|(left, a), (right, b)| b.cmp(a).then_with(|| left.cmp(right)));
+        Value::Array(
+            rows.into_iter()
+                .map(|(key, count)| json!({"value":key,"count":count}))
+                .collect(),
+        )
+    };
+    let mut result = json!(counts);
+    result["extraLatencyMs"] = json!(counts.get("extraLatencyMs").copied().unwrap_or(0));
+    result["averageExtraLatencyMs"] = if latency_rows > 0 {
+        json!(
+            (result["extraLatencyMs"].as_u64().unwrap_or(0) as f64 / f64::from(latency_rows))
+                .round()
+        )
+    } else {
+        Value::Null
+    };
+    result["families"] = facet(families);
+    result["skipReasons"] = facet(skips);
+    result["classificationSkippedReasons"] = facet(classification);
+    result["outcomes"] = facet(outcomes);
+    result["modes"] = facet(modes);
+    Some(result)
 }
 
 fn body_disk_size(dir: &Path) -> (usize, u64) {

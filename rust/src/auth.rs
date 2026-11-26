@@ -73,7 +73,7 @@ fn random<const N: usize>() -> Result<[u8; N], AuthError> {
     Ok(bytes)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

@@ -91,6 +91,10 @@ impl Logs {
 }
 
 impl Trace {
+    pub(crate) fn delivery(&mut self, metadata: &Value) {
+        self.row.insert("injection".into(), metadata.clone());
+    }
+
     pub fn inbound(&mut self, body: &Value, headers: &HeaderMap) {
         self.row
             .insert("stream".into(), json!(body["stream"] == true));

@@ -234,6 +234,7 @@ pub struct Model {
     pub levels: Vec<Effort>,
     pub context_tokens: usize,
     pub max_output_tokens: u64,
+    pub(crate) delivery_rates: Option<(f64, f64)>,
     pub fast: bool,
     saved_effort: Effort,
     policy: Option<Policy>,
@@ -344,6 +345,7 @@ impl Model {
                 .filter(|value| (1..=100_000_000).contains(value))
                 .map_or(0, |value| value as usize),
             max_output_tokens: configured_tokens(&row["maxOutputTokens"]),
+            delivery_rates: usd_rates(&row["pricing"]),
             fast: row["parameters"]
                 .as_array()
                 .and_then(|rows| rows.iter().find(|row| row["id"] == "fast"))
@@ -376,6 +378,23 @@ impl Model {
     pub fn policy(&self) -> Option<PolicyKind> {
         self.policy.map(|policy| policy.kind)
     }
+}
+
+fn usd_rates(pricing: &Value) -> Option<(f64, f64)> {
+    if pricing["currency"]
+        .as_str()
+        .is_some_and(|code| code != "USD")
+    {
+        return None;
+    }
+    let rate = |key: &str| {
+        let value = &pricing[key];
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse().ok())
+            .filter(|rate| rate.is_finite() && *rate >= 0.0)
+    };
+    Some((rate("input")?, rate("output")?))
 }
 
 fn configured_tokens(value: &Value) -> u64 {

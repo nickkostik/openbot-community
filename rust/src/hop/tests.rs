@@ -15,6 +15,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::server;
 
+mod delivery_cases;
+
 const PROFILE: &str = "00000000-0000-4000-8000-000000000001";
 const CHAT: &str = "/v1/chat/completions";
 
@@ -146,8 +148,13 @@ impl Fixture {
         .with_logs(logs.clone());
         hop.test_go_base = Some(base.clone());
         let logs_router = logs.clone().routes();
+        let delivery_router = crate::delivery::config::routes(state.clone(), true);
         let rust = TestServer::start(move |authority| {
-            server::router(state, authority.into(), [hop.routes(), logs_router])
+            server::router(
+                state,
+                authority.into(),
+                [hop.routes(), logs_router, delivery_router],
+            )
         })
         .await;
         let client = reqwest::Client::builder()
@@ -740,7 +747,7 @@ async fn saved_openai_credentials_are_scoped_to_the_existing_outbound_contracts(
             body.clone(),
             &HeaderMap::new(),
             "fixture",
-            Intent::Chat(None),
+            Intent::Chat(None, None),
         )
         .await
         .unwrap();
@@ -875,7 +882,7 @@ async fn direct_body(
         request,
         &HeaderMap::new(),
         "fixture",
-        Intent::Chat(None),
+        Intent::Chat(None, None),
     )
     .await
     .unwrap();

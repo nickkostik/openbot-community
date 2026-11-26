@@ -5,6 +5,7 @@ use std::{
 };
 
 use axum::{
+    body::Bytes,
     http::{Uri, header::HeaderName},
     routing::post,
 };
@@ -106,6 +107,7 @@ struct Fixture {
     mock: Mock,
     _upstream: TestServer,
     client: reqwest::Client,
+    logs: Logs,
 }
 
 impl Fixture {
@@ -135,13 +137,16 @@ impl Fixture {
         );
         fs::write(dir.path().join("openbot-mode"), "custom\n").unwrap();
         let state = State::new(dir.path().into(), true).unwrap();
+        let logs = Logs::new(state.root(), true);
         let hop = Hop::new(
             state.clone(),
             CredentialStore::new(state.root(), false).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .with_logs(logs.clone());
+        let logs_router = logs.clone().routes();
         let rust = TestServer::start(move |authority| {
-            server::router(state, authority.into(), [hop.routes()])
+            server::router(state, authority.into(), [hop.routes(), logs_router])
         })
         .await;
         let client = reqwest::Client::builder()
@@ -155,6 +160,7 @@ impl Fixture {
             mock,
             _upstream: upstream,
             client,
+            logs,
         }
     }
 
@@ -184,6 +190,20 @@ impl Fixture {
             "{}",
             reply.text().await.unwrap()
         );
+    }
+
+    async fn log(&self, path: &str) -> Value {
+        self.logs.wait_for_writes().await;
+        self.client
+            .get(format!("{}{}", self.rust.base, path))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
     }
 }
 
@@ -524,6 +544,11 @@ async fn transient_failure_retries_and_quota_and_protocol_failures_are_visible()
 #[tokio::test]
 async fn streaming_retry_stops_after_output_and_next_turn_recovers() {
     let fixture = Fixture::new().await;
+    file(
+        fixture.path(),
+        "openbot-logs.json",
+        json!({"loggingEnabled":true,"logBodies":true}),
+    );
     let early = events(&[
         json!({"type":"response.created","response":{"id":"unsuccessful","model":"synthetic"}}),
         json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"retryable"}}}),
@@ -537,7 +562,8 @@ async fn streaming_retry_stops_after_output_and_next_turn_recovers() {
     ]);
     fixture.mock.push(sse_body(Body::from(partial), &[]));
     fixture.mock.push(Json(responses_body()).into_response());
-    let request = user_request("opencode-2:synthetic", true);
+    let mut request = user_request("opencode-2:synthetic", true);
+    request["openbotRequestId"] = json!("fixture-stream-retry");
     let reply = fixture.turn(request.clone()).await;
     assert_eq!(reply.status(), StatusCode::OK);
     let frames = reply.text().await.unwrap();
@@ -545,12 +571,33 @@ async fn streaming_retry_stops_after_output_and_next_turn_recovers() {
     assert!(frames.contains("upstream_incomplete"));
     assert!(!frames.contains("unsuccessful"));
     assert!(!frames.contains("[DONE]"));
+    request["openbotRequestId"] = json!("fixture-stream-recovery");
     let next = fixture.turn(request).await;
     assert_eq!(next.status(), StatusCode::OK);
     let next = next.text().await.unwrap();
     assert!(next.contains("\"content\":\"ready\""));
     assert!(next.ends_with("data: [DONE]\n\n"));
     fixture.mock.inspect(|seen| assert_eq!(seen.len(), 3));
+    let errors = fixture.log("/api/logs?ok=false&channel=custom").await;
+    assert_eq!(errors["total"], 1);
+    let failed = &errors["items"][0];
+    assert_eq!(failed["attemptCount"], 2);
+    assert_eq!(failed["requestId"], "fixture-stream-retry");
+    assert_eq!(failed["status"], 502);
+    assert!(failed["firstTokenMs"].is_u64());
+    let id = failed["id"].as_str().unwrap();
+    let detail = fixture.log(&format!("/api/logs/{id}")).await;
+    assert_eq!(detail["response"]["error"]["code"], "upstream_incomplete");
+    assert!(detail["response"]["events"].to_string().contains("partial"));
+    let recovered = fixture
+        .log("/api/logs?ok=true&q=fixture-stream-recovery")
+        .await;
+    assert_eq!(recovered["total"], 1);
+    assert_eq!(recovered["items"][0]["cachedTokens"], 10);
+    assert_eq!(recovered["items"][0]["totalTokens"], 20);
+    assert_eq!(recovered["items"][0]["botId"], PROFILE);
+    assert_eq!(recovered["items"][0]["modelId"], "opencode-2:synthetic");
+    assert_eq!(recovered["items"][0]["apiType"], "responses");
 }
 
 #[tokio::test]
@@ -706,6 +753,11 @@ async fn abandoning_a_stream_releases_the_upstream_connection() {
     }
     let fixture = Fixture::new().await;
     let released = Arc::new(tokio::sync::Notify::new());
+    file(
+        fixture.path(),
+        "openbot-logs.json",
+        json!({"loggingEnabled":true,"logBodiesOnError":false}),
+    );
     let started = events(&[json!({"choices":[{
         "index":0,"delta":{"content":"First"},"finish_reason":null
     }]})]);
@@ -729,6 +781,13 @@ async fn abandoning_a_stream_releases_the_upstream_connection() {
         .await
         .unwrap();
     fixture.mock.inspect(|seen| assert_eq!(seen.len(), 1));
+    let logged = fixture.log("/api/logs").await;
+    assert_eq!(logged["total"], 1);
+    let row = &logged["items"][0];
+    assert_eq!(row["status"], 499);
+    assert_eq!(row["ok"], false);
+    assert_eq!(row["hasResponse"], false);
+    assert!(row["firstTokenMs"].is_u64());
 }
 
 async fn direct_body(
@@ -859,4 +918,130 @@ async fn direct_provider_efforts_keep_their_native_fields_and_limits() {
     .await;
     assert_eq!(deepseek["output_config"]["effort"], "max");
     assert_eq!(deepseek["thinking"]["type"], "enabled");
+}
+
+#[tokio::test]
+async fn log_capture_applies_policy_redacts_secrets_and_limits_large_bodies() {
+    let fixture = Fixture::new().await;
+    let mut request = user_request("opencode:synthetic", false);
+    request["messages"][1]["content"] = json!("fixture-key-one and Bearer synthetic-extra-secret.");
+    request["provider_options"] =
+        json!({"api_key":"embedded-synthetic-secret","refreshToken":"synthetic-renewal-secret"});
+
+    fixture.mock.push(Json(chat_body()).into_response());
+    assert_eq!(fixture.turn(request.clone()).await.status(), StatusCode::OK);
+    assert_eq!(fixture.log("/api/logs").await["total"], 0);
+
+    file(
+        fixture.path(),
+        "openbot-logs.json",
+        json!({"loggingEnabled":true,"maxBodyCaptureBytes":1024}),
+    );
+    fixture.mock.push(Json(chat_body()).into_response());
+    assert_eq!(fixture.turn(request.clone()).await.status(), StatusCode::OK);
+    let success = fixture.log("/api/logs?ok=true").await;
+    assert_eq!(success["items"][0]["hasRequest"], false);
+    assert_eq!(success["items"][0]["hasResponse"], false);
+
+    fixture.mock.push(upstream_error(
+        StatusCode::BAD_REQUEST,
+        "bad_request",
+        "fixture-key-one and Bearer provider-synthetic-secret",
+    ));
+    assert_eq!(
+        fixture.turn(request.clone()).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let errors = fixture.log("/api/logs?ok=false").await;
+    assert_eq!(errors["total"], 1);
+    let row = &errors["items"][0];
+    assert_eq!(row["hasRequest"], true);
+    assert_eq!(row["hasResponse"], true);
+    let detail = fixture
+        .log(&format!("/api/logs/{}", row["id"].as_str().unwrap()))
+        .await;
+    let text = detail.to_string();
+    for secret in [
+        "fixture-key-one",
+        "synthetic-extra-secret",
+        "embedded-synthetic-secret",
+        "synthetic-renewal-secret",
+        "provider-synthetic-secret",
+    ] {
+        assert!(!text.contains(secret));
+    }
+    assert!(text.contains("[redacted]"));
+
+    file(
+        fixture.path(),
+        "openbot-logs.json",
+        json!({"loggingEnabled":true,"logBodies":true,"maxBodyCaptureBytes":1024}),
+    );
+    request["messages"][1]["content"] = json!("synthetic payload".repeat(100));
+    request["openbotRequestId"] = json!("over-capture-limit");
+    let mut reply = chat_body();
+    reply["choices"][0]["message"]["content"] = json!("synthetic reply".repeat(100));
+    fixture.mock.push(Json(reply.clone()).into_response());
+    assert_eq!(
+        fixture
+            .turn(request.clone())
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["choices"],
+        reply["choices"]
+    );
+    let rows = fixture.log("/api/logs?q=over-capture-limit").await;
+    let row = &rows["items"][0];
+    assert_eq!(row["requestTruncated"], true);
+    assert_eq!(row["responseTruncated"], true);
+    assert!(row["bodyBytes"].as_u64().unwrap() <= 2048);
+
+    // Leave metadata readable when a broken body archive prevents capture.
+    let bodies = fixture.path().join("openbot-request-bodies");
+    fs::rename(&bodies, fixture.path().join("archived-bodies")).unwrap();
+    fs::write(&bodies, "unusable body directory").unwrap();
+    request["openbotRequestId"] = json!("body-directory-failure");
+    fixture.mock.push(Json(reply).into_response());
+    assert_eq!(fixture.turn(request).await.status(), StatusCode::OK);
+    let rows = fixture.log("/api/logs?q=body-directory-failure").await;
+    assert_eq!(rows["items"][0]["hasResponse"], false);
+    assert_eq!(rows["items"][0]["bodyWriteFailed"], true);
+}
+
+#[tokio::test]
+async fn zero_anthropic_cache_is_distinct_from_missing_telemetry() {
+    let fixture = Fixture::new().await;
+    file(
+        fixture.path(),
+        "openbot-logs.json",
+        json!({"loggingEnabled":true}),
+    );
+    for (id, usage) in [
+        (
+            "known-zero",
+            json!({"input_tokens":20,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":2}),
+        ),
+        (
+            "unknown-cache",
+            json!({"input_tokens":20,"output_tokens":5}),
+        ),
+    ] {
+        fixture.mock.push(Json(json!({
+            "id":"fixture-anthropic","type":"message","role":"assistant","model":"synthetic","stop_reason":"end_turn",
+            "content":[{"type":"text","text":"ready"}],"usage":usage
+        })).into_response());
+        let mut request = user_request("messages-test:synthetic", false);
+        request["openbotRequestId"] = json!(id);
+        assert_eq!(fixture.turn(request).await.status(), StatusCode::OK);
+    }
+    let known = fixture.log("/api/logs?q=known-zero").await;
+    assert_eq!(known["items"][0]["cachedTokens"], 0);
+    assert_eq!(known["items"][0]["promptTokens"], 22);
+    let unknown = fixture.log("/api/logs?q=unknown-cache").await;
+    assert!(unknown["items"][0].get("cachedTokens").is_none());
+    let usage = fixture.log("/api/logs/usage?provider=messages-test").await;
+    assert_eq!(usage["summary"]["cacheKnownInputTokens"], 22);
+    assert_eq!(usage["summary"]["cacheUnknownInputTokens"], 20);
+    assert_eq!(usage["summary"]["cacheHitRate"], 0.0);
 }

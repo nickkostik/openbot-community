@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::{
     auth::{Authorized, CODEX_USER_AGENT, CredentialStore},
-    catalog::Protocol,
+    catalog::{Effort, Protocol},
     reasoning,
     routing::{self, CredentialKind},
     server::{State, read_json, read_mode},
@@ -24,6 +24,11 @@ pub struct Prepared {
     pub url: String,
     pub protocol: Protocol,
     pub model: String,
+    pub model_id: String,
+    pub provider_id: String,
+    pub provider_name: Option<String>,
+    pub bot_id: Option<String>,
+    pub reasoning_effort: Effort,
     pub body: Bytes,
     pub headers: HeaderMap,
     pub secret: String,
@@ -107,11 +112,7 @@ impl Prepared {
             .map_err(Failure::credential)?;
         let route = selection.route(credential.kind);
         let client_stream = body.get("stream") == Some(&Value::Bool(true));
-        let conversation = CONVERSATION_FIELDS.iter().find_map(|key| {
-            body.get(*key)?
-                .as_str()
-                .filter(|value| !value.is_empty() && value.len() <= 128)
-        });
+        let conversation = conversation_field(|key| body.get(key));
         let has_conversation = conversation.is_some();
         let scope = scope(
             conversation.or(bot.as_deref()),
@@ -169,6 +170,11 @@ impl Prepared {
             url: route.upstream,
             protocol: route.protocol,
             model: selection.model.slug.clone(),
+            model_id: selection.model.id.clone(),
+            provider_id: provider.into(),
+            provider_name: selection.provider.name.clone(),
+            bot_id: bot,
+            reasoning_effort: selection.effort(),
             body: Bytes::from(payload),
             headers,
             secret: credential.token,
@@ -176,6 +182,18 @@ impl Prepared {
             client_stream,
         })
     }
+}
+
+pub fn conversation(body: &Value) -> Option<&str> {
+    conversation_field(|key| body.get(key))
+}
+
+fn conversation_field<'a>(get: impl Fn(&str) -> Option<&'a Value>) -> Option<&'a str> {
+    CONVERSATION_FIELDS.iter().find_map(|key| {
+        get(key)?
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+    })
 }
 
 fn check_paused(root: &Path, bot: Option<&str>) -> Result<(), Failure> {

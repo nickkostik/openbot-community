@@ -95,9 +95,11 @@ pub fn usage(protocol: Protocol, value: &Value) -> Option<Value> {
         let created = count("cache_creation_input_tokens");
         input = input.saturating_add(read).saturating_add(created);
         result["prompt_tokens"] = json!(input);
-        if read != 0 || created != 0 {
-            result["prompt_tokens_details"] =
-                json!({"cached_tokens": read, "cache_creation_tokens": created});
+        if value["cache_read_input_tokens"].is_u64() {
+            result["prompt_tokens_details"]["cached_tokens"] = json!(read);
+        }
+        if value["cache_creation_input_tokens"].is_u64() {
+            result["prompt_tokens_details"]["cache_creation_tokens"] = json!(created);
         }
     } else {
         for (source, dest) in [

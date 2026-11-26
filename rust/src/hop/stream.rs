@@ -128,7 +128,7 @@ impl Frame {
         }
     }
 
-    pub fn bytes(self) -> Bytes {
+    pub fn bytes(&self) -> Bytes {
         match self {
             Self::Done => Bytes::from_static(b"data: [DONE]\n\n"),
             Self::Data(data) => Bytes::from(format!("data: {data}\n\n")),

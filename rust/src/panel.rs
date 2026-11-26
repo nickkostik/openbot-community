@@ -1,3 +1,5 @@
+mod roster;
+
 use std::{
     fs::File,
     io::{self, Read},
@@ -16,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::{
     auth::{AuthError, CredentialStore},
-    server::read_json,
+    logs,
 };
 
 const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
@@ -31,6 +33,7 @@ const ASSETS: [(&str, &str, &str); 4] = [
 struct PanelReadback {
     credentials: CredentialStore,
     status: ListenerStatus,
+    agent_data: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -49,9 +52,15 @@ pub fn routes(
     let mut router = Router::new()
         .route("/api/state", get(state))
         .route("/api/snapshot", get(state))
+        .route("/api/bots", get(bots))
+        .route("/api/pause-bots", get(paused_bots))
         .with_state(PanelReadback {
             credentials,
             status,
+            agent_data: std::env::var_os("OPENBOT_AGENT_DATA")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/home/box/agent-data")),
         });
     for (route, name, mime) in ASSETS {
         let bytes = read_asset(&asset_root, name)?;
@@ -82,6 +91,25 @@ async fn state(State(panel): State<PanelReadback>) -> Result<Json<Value>, AuthEr
     .await
 }
 
+async fn bots(State(panel): State<PanelReadback>) -> Result<Json<Vec<roster::Bot>>, AuthError> {
+    crate::auth::blocking(move || {
+        Ok(Json(roster::read(
+            panel.credentials.root(),
+            &panel.agent_data,
+        )))
+    })
+    .await
+}
+
+async fn paused_bots(State(panel): State<PanelReadback>) -> Result<Json<Value>, AuthError> {
+    crate::auth::blocking(move || {
+        Ok(Json(
+            json!({"pausedBotIds":roster::paused(panel.credentials.root())}),
+        ))
+    })
+    .await
+}
+
 impl ListenerStatus {
     pub fn add_to(&self, root: &Path, state: &mut Value) {
         let mode = crate::server::read_mode(root).unwrap_or("official");
@@ -104,7 +132,7 @@ impl ListenerStatus {
             "uiListen":listen(self.serves_ui), "hopListen":listen(self.serves_hop),
             "alignment":alignment
         });
-        state["logSettings"] = log_settings(root);
+        state["logSettings"] = json!(logs::Settings::load(root));
     }
 }
 
@@ -124,39 +152,6 @@ fn read_asset(root: &Path, name: &str) -> io::Result<Bytes> {
         return Err(io::ErrorKind::FileTooLarge.into());
     }
     Ok(data.into())
-}
-
-fn log_settings(root: &Path) -> Value {
-    let raw = read_json(&root.join("openbot-logs.json"), 4096)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let integer = |key: &str, minimum: u64, maximum: u64, fallback: u64| {
-        let field = &raw[key];
-        let value = field
-            .as_u64()
-            .or_else(|| field.as_str()?.trim().parse().ok());
-        if field.is_null() {
-            Some(fallback)
-        } else {
-            value.filter(|value| (minimum..=maximum).contains(value))
-        }
-    };
-    let numbers = (
-        integer("logRetentionDays", 1, 365, 7),
-        integer("maxBodyCaptureBytes", 1024, 1_048_576, 65_536),
-        integer("maxRecords", 1, 10_000, 2000),
-    );
-    let (valid, days, bytes, records) = match numbers {
-        (Some(days), Some(bytes), Some(records)) => (true, days, bytes, records),
-        _ => (false, 7, 65_536, 2000),
-    };
-    json!({
-        "loggingEnabled": valid && raw["loggingEnabled"] == true,
-        "logBodies": valid && raw["logBodies"] == true,
-        "logBodiesOnError": !valid || raw["logBodiesOnError"].as_bool().unwrap_or(true),
-        "logRetentionDays": days, "maxBodyCaptureBytes": bytes, "maxRecords": records
-    })
 }
 
 #[cfg(test)]

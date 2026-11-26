@@ -1,5 +1,5 @@
 mod failure;
-mod request;
+pub(crate) mod request;
 mod response;
 mod stream;
 
@@ -9,12 +9,12 @@ use std::{
     io,
     path::Path,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
+    body::Body,
     extract::{DefaultBodyLimit, State as AxumState, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::{
     auth::CredentialStore,
+    logs::{Logs, Trace},
     server::{State, read_json},
 };
 
@@ -42,6 +43,12 @@ pub struct Hop {
     credentials: CredentialStore,
     client: reqwest::Client,
     version: String,
+    logs: Option<Logs>,
+}
+
+enum Reply {
+    Buffered(Value),
+    Streaming(VecDeque<Frame>, Option<Box<Live>>),
 }
 
 impl Hop {
@@ -65,7 +72,13 @@ impl Hop {
             credentials,
             client,
             version: version(),
+            logs: None,
         })
+    }
+
+    pub fn with_logs(mut self, logs: Logs) -> Self {
+        self.logs = Some(logs);
+        self
     }
 
     pub fn routes(self) -> Router {
@@ -75,14 +88,40 @@ impl Hop {
             .with_state(self)
     }
 
-    async fn dispatch(&self, prepared: &Prepared) -> Result<Response, Failure> {
+    async fn dispatch(
+        &self,
+        prepared: &Prepared,
+        mut trace: Option<Trace>,
+    ) -> Result<Response, Failure> {
         let mut attempt = 0;
         let mut waited = Duration::ZERO;
         loop {
+            let started = Instant::now();
             match self.attempt(prepared).await {
-                Ok(response) => return Ok(response),
+                Ok((status, reply)) => {
+                    if let Some(trace) = &mut trace {
+                        trace.attempt(status, started, None, None);
+                    }
+                    return Ok(match reply {
+                        Reply::Buffered(value) => {
+                            if let Some(mut trace) = trace {
+                                trace.buffered(&value);
+                                trace.finish(status, None);
+                            }
+                            Json(value).into_response()
+                        }
+                        Reply::Streaming(prefix, live) => stream_reply(prefix, live, trace, status),
+                    });
+                }
                 Err(failure) => {
-                    let Some(delay) = failure.delay(attempt, waited) else {
+                    let delay = failure.delay(attempt, waited);
+                    if let Some(trace) = &mut trace {
+                        trace.attempt(failure.status(), started, Some(&failure.body()), delay);
+                    }
+                    let Some(delay) = delay else {
+                        if let Some(trace) = trace {
+                            trace.finish(failure.status(), Some(failure.body()));
+                        }
                         return Err(failure);
                     };
                     tokio::time::sleep(delay).await;
@@ -93,7 +132,7 @@ impl Hop {
         }
     }
 
-    async fn attempt(&self, prepared: &Prepared) -> Result<Response, Failure> {
+    async fn attempt(&self, prepared: &Prepared) -> Result<(StatusCode, Reply), Failure> {
         let response = self
             .client
             .post(&prepared.url)
@@ -124,9 +163,12 @@ impl Hop {
                 &prepared.secret,
             );
             if prepared.client_stream {
-                return begin_stream(live).await;
+                return Ok((status, begin_stream(live).await?));
             }
-            return Ok(Json(collect_stream(live, &prepared.model).await?).into_response());
+            return Ok((
+                status,
+                Reply::Buffered(collect_stream(live, &prepared.model).await?),
+            ));
         }
         let data = read_reply(response, MAX_REPLY_BYTES).await?;
         let output: Value = serde_json::from_slice(&data).map_err(|_| {
@@ -141,12 +183,12 @@ impl Hop {
         if prepared.client_stream {
             let mut frames: VecDeque<_> = response::json_frames(completion)
                 .into_iter()
-                .map(|value| Frame::Data(value).bytes())
+                .map(Frame::Data)
                 .collect();
-            frames.push_back(Frame::Done.bytes());
-            Ok(stream_reply(frames, None))
+            frames.push_back(Frame::Done);
+            Ok((status, Reply::Streaming(frames, None)))
         } else {
-            Ok(Json(completion).into_response())
+            Ok((status, Reply::Buffered(completion)))
         }
     }
 }
@@ -156,7 +198,11 @@ async fn completions(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, Failure> {
-    let Json(body) = body.map_err(|error| {
+    let mut trace = match &hop.logs {
+        Some(logs) => logs.begin().await,
+        None => None,
+    };
+    let body = body.map_err(|error| {
         if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
             Failure::new(
                 error.status(),
@@ -170,10 +216,29 @@ async fn completions(
                 "Inference request must be JSON.",
             )
         }
-    })?;
-    let prepared =
-        Prepared::load(&hop.state, &hop.credentials, body, &headers, &hop.version).await?;
-    hop.dispatch(&prepared).await
+    });
+    let prepared = async {
+        let Json(body) = body?;
+        if let Some(trace) = &mut trace {
+            trace.inbound(&body, &headers);
+        }
+        Prepared::load(&hop.state, &hop.credentials, body, &headers, &hop.version).await
+    }
+    .await;
+    match prepared {
+        Ok(prepared) => {
+            if let Some(trace) = &mut trace {
+                trace.route(&prepared);
+            }
+            hop.dispatch(&prepared, trace).await
+        }
+        Err(failure) => {
+            if let Some(trace) = trace {
+                trace.finish(failure.status(), Some(failure.body()));
+            }
+            Err(failure)
+        }
+    }
 }
 
 fn is_sse(headers: &HeaderMap, requested: bool) -> bool {
@@ -224,40 +289,71 @@ async fn collect_stream(mut live: Live, model: &str) -> Result<Value, Failure> {
     buffer.completed()
 }
 
-async fn begin_stream(mut live: Live) -> Result<Response, Failure> {
+async fn begin_stream(mut live: Live) -> Result<Reply, Failure> {
     let mut prefix = VecDeque::new();
     let mut bytes = 0;
     while let Some(frame) = live.next().await? {
         let visible = frame.visible();
-        let data = frame.bytes();
-        bytes += data.len();
+        bytes += frame.bytes().len();
         if bytes > MAX_REPLY_BYTES {
             return Err(Failure::protocol(
                 "Upstream preamble exceeded the supported size.",
             ));
         }
-        prefix.push_back(data);
+        prefix.push_back(frame);
         // Errors before the first output are still retryable. After the
         // returned body starts, the response owns the original connection.
         if visible {
-            return Ok(stream_reply(prefix, Some(Box::new(live))));
+            return Ok(Reply::Streaming(prefix, Some(Box::new(live))));
         }
     }
     Err(Failure::incomplete())
 }
 
-fn stream_reply(prefix: VecDeque<Bytes>, live: Option<Box<Live>>) -> Response {
-    let chunks =
-        futures_util::stream::unfold((prefix, live), |(mut prefix, mut live)| async move {
-            if let Some(data) = prefix.pop_front() {
-                return Some((Ok::<_, Infallible>(data), (prefix, live)));
-            }
-            match live.as_mut()?.next().await {
-                Ok(Some(frame)) => Some((Ok(frame.bytes()), (prefix, live))),
-                Ok(None) => None,
-                Err(failure) => Some((Ok(Frame::Data(failure.body()).bytes()), (prefix, None))),
-            }
-        });
+fn stream_reply(
+    prefix: VecDeque<Frame>,
+    live: Option<Box<Live>>,
+    trace: Option<Trace>,
+    status: StatusCode,
+) -> Response {
+    let chunks = futures_util::stream::unfold(
+        (prefix, live, trace),
+        move |(mut prefix, mut live, mut trace)| async move {
+            let next = match prefix.pop_front() {
+                Some(frame) => Ok(Some(frame)),
+                None => live.as_mut()?.next().await,
+            };
+            let bytes = match next {
+                Ok(Some(frame)) => {
+                    let bytes = frame.bytes();
+                    match &frame {
+                        Frame::Data(value) => {
+                            if let Some(trace) = &mut trace {
+                                trace.frame(value, bytes.len(), frame.visible());
+                            }
+                        }
+                        Frame::Done => {
+                            if let Some(trace) = trace.take() {
+                                trace.finish(status, None);
+                            }
+                        }
+                    }
+                    bytes
+                }
+                Ok(None) => return None,
+                Err(failure) => {
+                    let value = failure.body();
+                    let bytes = Frame::Data(value.clone()).bytes();
+                    if let Some(trace) = trace.take() {
+                        trace.finish(failure.status(), Some(value));
+                    }
+                    live = None;
+                    bytes
+                }
+            };
+            Some((Ok::<_, Infallible>(bytes), (prefix, live, trace)))
+        },
+    );
     let mut response = Body::from_stream(chunks).into_response();
     let headers = response.headers_mut();
     headers.insert(

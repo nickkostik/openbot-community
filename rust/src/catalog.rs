@@ -261,6 +261,7 @@ impl Protocol {
 #[derive(Debug)]
 pub struct Provider {
     pub id: String,
+    pub name: Option<String>,
     pub origin: String,
     pub protocol: Protocol,
 }
@@ -269,6 +270,7 @@ impl Provider {
     pub(crate) fn from_saved(row: &Value) -> Option<Self> {
         Some(Self {
             id: row["id"].as_str()?.into(),
+            name: row["name"].as_str().map(str::to_owned),
             origin: row["origin"].as_str().unwrap_or_default().into(),
             protocol: Protocol::parse(&row["apiType"]).unwrap_or_default(),
         })

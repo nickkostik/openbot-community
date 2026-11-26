@@ -28,6 +28,10 @@ enum Retry {
 }
 
 impl Failure {
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub fn credential(error: AuthError) -> Self {
         let code = if error.status == StatusCode::NOT_FOUND {
             "missing_credential"

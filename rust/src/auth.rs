@@ -77,7 +77,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unique_id() -> Result<String, AuthError> {
+pub(crate) fn unique_id() -> Result<String, AuthError> {
     let mut bytes = random::<16>()?;
     bytes[6] = (bytes[6] & 15) | 0x40;
     bytes[8] = (bytes[8] & 63) | 0x80;

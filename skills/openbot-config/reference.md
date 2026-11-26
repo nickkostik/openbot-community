@@ -165,6 +165,20 @@ The candidate loads `openbot-model-catalog.json` at startup and persists public 
 
 When saved-provider refresh is enabled, it adds new routes under existing provider accounts and enriches existing rows while retaining model IDs, bindings, explicit protocols, custom context, and active and per-bot reasoning choices. A narrower published output limit can reduce the output cap. The merge reads current bot settings under the shared `.openbot-rust-bot-settings.lock` lease and serializes plan updates with bot settings saves. Use `--write-bot-settings` on the same candidate to rehearse both writes.
 
+#### Rust request logs
+
+Add `--enable-request-logs` with `--enable-hop` in disposable state to record candidate requests. Recording uses the existing `openbot-logs.json` and requires `"loggingEnabled": true`. The candidate reads this setting per request and checks it again before writing.
+
+The candidate appends request metadata to `openbot-requests.jsonl`. Rows capture the selected provider and model, route, status, retries, timing and available provider-reported prompt, completion, cached and reasoning tokens. Optional redacted request and response captures go to `openbot-request-bodies/<id>.json` according to `logBodies` and `logBodiesOnError`. Each capture is limited by `maxBodyCaptureBytes` (65,536 bytes by default). Oversized captures are marked as truncated.
+
+The candidate exposes these read routes with `--ui-dir` or `--enable-request-logs`.
+
+- `GET /api/logs` lists request metadata. `GET /api/logs/{id}` reads a record and its saved body capture.
+- `GET /api/logs/settings`, `GET /api/logs/stats` and `GET /api/logs/facets` read settings, sampled statistics and available filters.
+- `GET /api/logs/events` reads existing rows from `openbot-events.jsonl`. `GET /api/logs/usage` summarizes sampled provider usage by model, provider, purpose and time.
+
+Provider token totals in stats and usage exclude `custom-host` harness rows. Use the current Node service for settings changes, manual cleanup, retention, the Official stock host tap and context compaction.
+
 ### Official controls without logging rewrap
 
 For an already selected literal Official mode, the reviewed installed CLI can recover the owned panel independently of optional native logging compatibility:

@@ -5,6 +5,7 @@ mod catalog;
 mod discovery;
 mod hop;
 mod lease;
+mod logs;
 mod panel;
 mod reasoning;
 mod routing;
@@ -43,6 +44,9 @@ struct Args {
     /// Enable manual and scheduled catalog refresh writes in disposable state.
     #[arg(long)]
     enable_model_refresh: bool,
+    /// Record requests using the existing log settings in disposable state.
+    #[arg(long)]
+    enable_request_logs: bool,
     /// Serve the built OpenBot web assets from this directory.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
@@ -100,27 +104,23 @@ fn main() -> io::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(
-            args.sand_data,
-            args.port,
-            args.write_bot_settings,
-            args.enable_hop,
-            args.enable_accounts,
-            args.enable_model_refresh,
-            args.ui_dir,
-        ))
+        .block_on(serve(args))
 }
 
-async fn serve(
-    sand_data: PathBuf,
-    port: u16,
-    writable: bool,
-    enable_hop: bool,
-    enable_accounts: bool,
-    enable_model_refresh: bool,
-    ui_dir: Option<PathBuf>,
-) -> io::Result<()> {
-    let state = server::State::with_catalog_writer(sand_data, writable, enable_model_refresh)?;
+async fn serve(args: Args) -> io::Result<()> {
+    let Args {
+        sand_data,
+        port,
+        write_bot_settings,
+        enable_hop,
+        enable_accounts,
+        enable_model_refresh,
+        enable_request_logs,
+        ui_dir,
+        ..
+    } = args;
+    let state =
+        server::State::with_catalog_writer(sand_data, write_bot_settings, enable_model_refresh)?;
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?;
     let authority = if address.port() == 80 {
@@ -136,10 +136,11 @@ async fn serve(
     let credentials = (enable_hop || enable_accounts || enable_model_refresh || status.serves_ui)
         .then(|| auth::CredentialStore::new(state.root(), enable_accounts || enable_model_refresh))
         .transpose()?;
+    let logs = logs::Logs::new(state.root(), enable_request_logs);
     let hop = credentials
         .clone()
         .filter(|_| enable_hop)
-        .map(|store| hop::Hop::new(state.clone(), store))
+        .map(|store| hop::Hop::new(state.clone(), store).map(|hop| hop.with_logs(logs.clone())))
         .transpose()?;
     let accounts = credentials
         .clone()
@@ -171,6 +172,7 @@ async fn serve(
         discovery.map(discovery::Discovery::routes),
         panel,
         catalog.as_ref().map(aggregate::CatalogService::routes),
+        (status.serves_ui || enable_request_logs).then(|| logs.clone().routes()),
     ];
     println!("OpenBot Rust listening on http://{authority}");
     let draining = catalog.clone();
@@ -192,6 +194,7 @@ async fn serve(
     if let Some(credentials) = credentials {
         credentials.wait_for_renewals().await;
     }
+    logs.wait_for_writes().await;
     result
 }
 

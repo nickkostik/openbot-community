@@ -506,6 +506,50 @@ class RoomRecoveryTests(unittest.TestCase):
 
 
 class MigrationTranscriptTests(unittest.TestCase):
+    def test_stage_preserves_source_sequences_across_undated_and_tied_entries(self):
+        first = {'id': 'z-first', 'timestampMs': 5, 'content': 'First native row'}
+        middle = {'id': 'undated', 'content': 'Undated native row'}
+        last = {'id': 'a-last', 'timestampMs': 5, 'content': 'Last native row'}
+        local = [first, middle, last]
+        cloud = [{'id': 'cloud-earlier', 'timestampMs': 4, 'content': 'Cloud row'}, first, last]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / 'agents' / OLD_MEMBER
+            backup = root / 'backup'
+            save = RoomRecoveryTests.save
+            save(source / 'profile.json', {'agentId': OLD_MEMBER, 'harness': 'temporal'})
+            store = source / 'store.db'
+            with contextlib.closing(sqlite3.connect(store)) as conn, conn:
+                conn.execute('CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)')
+                conn.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT UNIQUE, entry TEXT)')
+                conn.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',
+                                 [(i, row['id'], json.dumps(row)) for i, row in enumerate(local, 1)])
+            cloud_path = backup / 'cloud-transcripts' / (OLD_MEMBER + '.json')
+            def save_cloud(entries):
+                save(cloud_path, {'entries': [
+                    {'seq': str(i), 'body': base64.b64encode(json.dumps(row).encode()).decode()}
+                    for i, row in enumerate(entries, 1)]})
+
+            save_cloud([cloud[0], last, first])
+            original, conflicting_cloud = store.read_bytes(), cloud_path.read_bytes()
+            with mock.patch.object(MODULE, 'SD', root), \
+                    mock.patch.object(MODULE, 'rpc', side_effect=AssertionError('Unexpected remote call')):
+                with self.assertRaisesRegex(ValueError, 'source orders contradict'):
+                    MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+                self.assertFalse((root / 'agents' / MEMBER).exists())
+                self.assertFalse((root / ('local-copy-' + MEMBER)).exists())
+                self.assertFalse((backup / 'history-merge').exists())
+                self.assertEqual(cloud_path.read_bytes(), conflicting_cloud)
+                save_cloud(cloud)
+                original_cloud = cloud_path.read_bytes()
+                MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+            self.assertEqual(store.read_bytes(), original)
+            self.assertEqual(cloud_path.read_bytes(), original_cloud)
+            with contextlib.closing(sqlite3.connect(root / 'agents' / MEMBER / 'store.db')) as conn:
+                rows = [json.loads(row[0]) for row in conn.execute(
+                    'SELECT entry FROM transcript_entries ORDER BY seq')]
+            self.assertEqual(rows, [cloud[0], *local])
+
     def test_invalid_timestamp_does_not_stage_copy_and_allows_corrected_retry(self):
         for source, value in (('local', 8_640_000_000_000_001),
                               ('platform', -8_640_000_000_000_001),

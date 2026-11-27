@@ -7,7 +7,6 @@ offline. Samples and complete double captures are not an admission fence.
 import base64
 import contextlib
 import hashlib
-import heapq
 import json
 import os
 import pathlib
@@ -17,7 +16,6 @@ import tempfile
 import subprocess
 import time
 import uuid
-from graphlib import CycleError, TopologicalSorter
 
 STATE = 'openbot-return-handoff.json'
 SCHEMA = 'openbot-official-return-handoff/v1'
@@ -48,34 +46,23 @@ def directory(path):
         raise RuntimeError('Return capture requires owned directories')
 
 
-def ordered_return_keys(additions, source_orders):
+def ordered_return_keys(merger, additions, source_orders):
     """Preserve each source's append order and the chronology of dated entries."""
-    sorter = TopologicalSorter()
-    for key in additions:
-        sorter.add(key)
-    for order in source_orders:
-        for before, after in zip(order, order[1:]):
-            sorter.add(after, before)
+    # The queue priority for an undated entry never becomes a saved date.
+    priorities = {key: value.get('timestampMs', -1) for key, value in additions.items()}
     try:
-        sorter.prepare()
-    except CycleError:
+        order = list(merger.order_source_keys(source_orders, priorities))
+    except ValueError:
         raise RuntimeError('Return source ordering requires review') from None
 
-    ready = []
     previous_date = None
-    while sorter.is_active():
-        for key in sorter.get_ready():
-            # An undated entry becomes eligible once its source predecessors
-            # have been emitted. The queue priority never becomes a saved date.
-            heapq.heappush(ready, (additions[key].get('timestampMs', -1), key))
-        _, key = heapq.heappop(ready)
+    for key in order:
         timestamp = additions[key].get('timestampMs')
         if timestamp is not None:
             if previous_date is not None and timestamp < previous_date:
                 raise RuntimeError('Return source ordering requires review')
             previous_date = timestamp
         yield key
-        sorter.done(key)
 
 
 class Capture:
@@ -451,7 +438,7 @@ class FreshReturn(Capture):
         if len(additions)>self.tail.MAX_ROWS:
             raise RuntimeError('Official return exceeds bounded literal import')
         records=[]; text_bytes=0
-        for key in ordered_return_keys(additions, tail_orders):
+        for key in ordered_return_keys(self.r.merger, additions, tail_orders):
             value = additions[key]
             role,text,original=literal_records[key]; identifier=value['id']
             if identifier in occupied or len(identifier.encode())>128:

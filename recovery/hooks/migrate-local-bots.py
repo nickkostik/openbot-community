@@ -250,7 +250,7 @@ def fetch_transcript(old, backup):
 def validate_transcript_date(entry):
     if not isinstance(entry, dict):
         return
-    # Missing dates keep the merge's existing fallback order.
+    # An absent date takes its place from the source sequence.
     timestamp = entry.get('timestampMs', 0)
     if (type(timestamp) not in (int, float) or
             not -MAX_TRANSCRIPT_TIMESTAMP_MS <= timestamp <= MAX_TRANSCRIPT_TIMESTAMP_MS):
@@ -345,7 +345,8 @@ def copy_agent(old, new, mapping, journal):
             cloud = [json.loads(base64.b64decode(row['body'], validate=True)) for row in remote]
             for entry in itertools.chain(local, cloud):
                 validate_transcript_date(entry)
-            merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping)
+            merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping,
+                                                       preserve_source_order=True)
             ordered = [(record['entry']['id'], json.dumps(record['entry'], ensure_ascii=False, separators=(',', ':')))
                        for record in merged]
             with conn:

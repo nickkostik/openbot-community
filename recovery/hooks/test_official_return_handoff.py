@@ -233,7 +233,7 @@ class FreshReturnTests(unittest.TestCase):
         sources = [['dated', 'undated'], ['undated', 'dated']]
 
         with self.assertRaisesRegex(RuntimeError, 'Return source ordering requires review'):
-            list(H.ordered_return_keys(entries, sources))
+            list(H.ordered_return_keys(self.r.merger, entries, sources))
 
     def test_temporal_harness_drift_without_messages_still_uses_fresh_identity(self):
         self.server_transcripts[fleet.OLD] = cloud([self.first])

@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sqlite3
+import tempfile
 import types
 import unittest
 import uuid
@@ -95,6 +96,33 @@ class CompletedEnvelopeTests(unittest.TestCase):
                 self.assertEqual(T.literal({**event, field: limit}), ('user', 'literal text'))
                 with self.assertRaises(RuntimeError):
                     T.literal({**event, field: limit + 1})
+
+    def test_append_keeps_an_undated_message_in_its_original_order(self):
+        first = item(1, 'before')
+        undated = item(2, 'message with no known time')
+        event = json.loads(base64.b64decode(undated['body']))
+        del event['timestampMs']
+        event.update(requestId='original-request', clientNonce='original-nonce')
+        undated['body'] = base64.b64encode(T.encoded(event)).decode()
+        last = item(3, 'after')
+        recovery = types.SimpleNamespace(merger=T.module('fleet-state-merge'))
+        source = {'agentId': OLD}
+        with tempfile.TemporaryDirectory() as folder:
+            store = pathlib.Path(folder) / 'store.db'
+            with contextlib.closing(sqlite3.connect(store)) as sql:
+                sql.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+            _, records = T.append_rows(recovery, {}, store, [(source, value) for value in (first, undated, last)])
+            rows = T.rows(store)
+        self.assertEqual([p[0] for p in rows], [1, 2, 3])
+        self.assertEqual([p[1] for p in rows], [p['entryId'] for p in (first, undated, last)])
+        self.assertEqual(json.loads(rows[1][2]), event)
+        self.assertEqual(records[1]['timestampState'], 'missing')
+        self.assertNotIn('timestampMs', records[1])
+        self.assertEqual(records[1]['sourcePayloadSha256'], T.sha(T.encoded(event)))
+        self.assertEqual([records[0]['timestampMs'], records[2]['timestampMs']], [1, 3])
+        for supplied in (None, True, '0'):
+            with self.subTest(supplied=supplied), self.assertRaises(RuntimeError):
+                T.literal({**event, 'timestampMs': supplied})
 
 
 class ApplyTests(ReceiptTests):

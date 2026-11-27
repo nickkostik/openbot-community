@@ -159,7 +159,7 @@ def literal(event):
     def correlation(value):
         return isinstance(value,str) and 0 < len(value) <= 1024 and not any(ord(c)<32 for c in value)
     if (not isinstance(event,dict) or not isinstance(event.get('id'),str) or not event['id'] or
-            not valid_timestamp(event.get('timestampMs'))):
+            ('timestampMs' in event and not valid_timestamp(event['timestampMs']))):
         raise RuntimeError('Tail requires a completed literal native text event')
     if event.get('kind') == 'message':
         metadata = {'requestId','clientNonce','batchId','sentWhileOfflineAtMs'}
@@ -198,8 +198,13 @@ def append_rows(r, mapping, store, additions):
             value['id'] = identifier; occupied.add(identifier); sequence += 1
             connection.execute('INSERT INTO transcript_entries(seq,id,entry)VALUES(?,?,?)', (sequence, identifier, encoded(value).decode()))
             projections.append({'sourceId': source['agentId'], 'sourceKind': 'platform', 'sourceEntryId': event['id'], 'targetEntryId': identifier})
-            records.append({'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
-                            'kind': event['kind'], 'timestampMs': event['timestampMs'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True})
+            record = {'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
+                      'kind': event['kind'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True}
+            if 'timestampMs' in event:
+                record['timestampMs'] = event['timestampMs']
+            else:
+                record['timestampState'] = 'missing'
+            records.append(record)
             text_bytes += len(text.encode())
         if len(records) > MAX_ROWS or text_bytes > MAX_TEXT: raise RuntimeError('Tail exceeds bounded import')
         connection.commit()

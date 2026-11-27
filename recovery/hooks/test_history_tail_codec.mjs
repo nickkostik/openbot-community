@@ -197,6 +197,19 @@ test('native fractional timestamps remain exact within the renderer date range',
   }
 });
 
+test('a reviewed undated row keeps its missing date distinct from an invalid supplied date', () => {
+  const input = plan(), row = input.records[0];
+  delete row.timestampMs;
+  assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
+  row.timestampState = 'missing';
+  assert.equal(validatePlan(input).records, 1);
+  assert.equal(activityFrontier(6000, row.timestampMs), 6000);
+  for (const supplied of [undefined, null, 0, false, 8_640_000_000_000_001]) {
+    row.timestampMs = supplied;
+    assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
+  }
+});
+
 test('plan-file proof binds exact Python JSON bytes rather than normalized JS numbers', t => {
   const { write } = fixture(t), input = plan();
   const raw = JSON.stringify(input).replace('"timestampMs":1000', '"timestampMs":1000.0');

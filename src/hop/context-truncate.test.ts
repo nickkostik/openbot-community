@@ -11,12 +11,12 @@ import vm from "node:vm";
 
 type Model = { id: string; providerId: string; slug: string; contextTokens: number; maxOutputTokens?: number; reasoningLevels?: string[]; activeReasoning?: string; modelType?: string };
 type Plan = { catalog: { providers: { id: string }[]; models: Model[] } };
-type Body = { conversationId?: string; reasoning_effort?: string; openbot_internal_auxiliary?: boolean | string; tools?: unknown[]; messages: { role: string; content: string; reasoning_content?: string; tool_call_id?: string; tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] }[] };
+type Body = { conversationId?: string; reasoning_effort?: string; openbot_internal_auxiliary?: boolean | string; max_tokens?: number; tools?: unknown[]; messages: { role: string; content: string; reasoning_content?: string; tool_call_id?: string; tool_calls?: { id: string; type: string; function: { name: string; arguments: string } }[] }[] };
 type SummaryRoute = { modelId: string; contextTokens: number } | null;
 type Compactor = {
   resolveSummarizer: (plan: Plan, target: Model) => SummaryRoute;
   resolveSummarizers: (plan: Plan, target: Model) => { modelId: string; contextTokens: number; reasoningEffort?: string }[];
-  applyContextTruncation: (body: Body, model: Model) => string;
+  applyContextTruncation: (body: Body, model: Model, completionField?: "max_tokens") => string;
   chatKey: (body: Body) => string;
   estimateTokens: (messages: Body["messages"]) => number;
 };
@@ -526,6 +526,35 @@ test("the latest tool result and its assistant call stay together across compact
   assert.equal(body.messages.at(-2), call, "keep the latest assistant tool call unchanged");
   assert.equal(body.messages.at(-1), reply, "keep the latest tool result unchanged");
   assert.equal(f.request().payload.model, target.id);
+});
+
+test("reserving completion room keeps the full latest turn including its tool result", (t) => {
+  const { compactor } = fixture(t);
+  const model = { ...target, contextTokens: 128000, maxOutputTokens: 65536 };
+  const body = history(14);
+  const latest = body.messages.at(-1)!;
+  const call = { role: "assistant", content: "", tool_calls: [
+    { id: "latest-call", type: "function", function: { name: "ReadFile", arguments: "{}" } },
+  ] };
+  const reply = { role: "tool", tool_call_id: "latest-call", content: "current facts " + "x".repeat(320000) };
+  body.messages.push(call, reply);
+  body.max_tokens = 65536;
+  assert.match(compactor.applyContextTruncation(body, model, "max_tokens"), /^truncated-/);
+  assert.equal(body.messages.at(-3), latest);
+  assert.equal(body.messages.at(-2), call);
+  assert.equal(body.messages.at(-1), reply);
+  assert.ok(body.max_tokens < 65536);
+  assert.ok(compactor.estimateTokens(body.messages) + body.max_tokens <= model.contextTokens);
+});
+
+test("a single large user message only reduces the completion allowance", (t) => {
+  const { compactor } = fixture(t);
+  const model = { ...target, contextTokens: 128000 };
+  const messages = [{ role: "user", content: "x".repeat(360000) }];
+  const body = { messages, max_tokens: 65536 };
+  assert.equal(compactor.applyContextTruncation(body, model, "max_tokens"), "skip-few");
+  assert.equal(body.messages, messages);
+  assert.equal(body.max_tokens, 38000);
 });
 
 test("parallel historical tools are summarized as one complete group with arguments and IDs", (t) => {

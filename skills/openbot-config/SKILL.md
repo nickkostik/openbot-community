@@ -109,9 +109,9 @@ A separately authorized same-ID restoration uses `openbot-history-merge-receipt/
 
 ## Compaction, cache and wire behavior
 
-Custom compaction normally summarizes through the selected canonical model, with only the product's approved overflow routes and each route's own credential/protocol. Do not switch account for authentication/quota/transport errors. Marked zero-tool auxiliary requests have separate cache/session scope and do not alter main-chat compaction state.
+Custom compaction normally summarizes through the selected canonical model, with only the product's approved overflow routes and each route's own credential/protocol. Do not switch account for authentication/quota/transport errors. Marked zero-tool auxiliary requests have separate cache/session scope and do not alter main-chat compaction state. The Node hop normalizes the protocol completion limit before deciding whether to trim toward 35% input. It reduces the completion limit if retained input leaves too little room, with a one-token minimum.
 
-Private summaries/checkpoints require exact covered-message hashes and routing/effort identity; a guarded exact suffix may survive native oldest-message eviction. Never edit hashes/cursors or publish cached text. Retain complete latest tool groups, original assistant reasoning and unresolved evidence. Stable local prefixes are not provider cache/billing proof. [Compaction and cache](reference.md#compaction-and-cache).
+Private summaries/checkpoints require exact covered-message hashes and routing/effort identity; a guarded exact suffix may survive native oldest-message eviction. Never edit hashes/cursors or publish cached text. Retain the complete latest user turn and tool group, original assistant reasoning and unresolved evidence. Stable local prefixes are not provider cache/billing proof. [Compaction and cache](reference.md#compaction-and-cache).
 
 ## Pauses, routines, ACP and MCP
 

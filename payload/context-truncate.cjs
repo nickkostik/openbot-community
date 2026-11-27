@@ -4,7 +4,7 @@
 //   - Summarizer: use the selected bot model. On context overflow only, try
 //     a configured DeepSeek Flash, GPT-6.1 Sol, or Muse 1.3 route; never Kimi K3.
 //   - Target model: whatever the chat is running (mimo-v2.6-pro at 256K, etc).
-//     Trigger fires at 85% of its window, land at 35%.
+//     Target 35% of its window, with a trigger at up to 85% after reserving completion room.
 //   - Model-transition awareness: when the target model's window shrinks below
 //     what's already in the transcript, force a compact even before 85%.
 //   - Persistent per-chat state at /home/box/agent-data/openbot/compact-state/
@@ -598,7 +598,7 @@ function completeToolBoundary(messages, dropped) {
   return end < messages.length ? end : start;
 }
 
-function applyContextTruncation(body, model) {
+function applyContextTruncation(body, model, completionField) {
   try {
     if (body && body.openbot_internal_auxiliary === true) return "skip-auxiliary";
     if (!body || !Array.isArray(body.messages)) return "skip-few";
@@ -615,21 +615,30 @@ function applyContextTruncation(body, model) {
         pending.coveredHashes = pendingMatch.hashes;
       }
     }
-    if (body.messages.length <= 2) return "skip-few";
     var ctx = Number(model && model.contextTokens);
-    if (!Number.isFinite(ctx) || ctx <= 0) return "skip-noctx";
-    var trigger = Math.floor(ctx * TRIGGER_PCT);
+    if (!Number.isFinite(ctx) || ctx <= 0) return body.messages.length <= 2 ? "skip-few" : "skip-noctx";
+    var toolTokens = Array.isArray(body.tools) ? Math.ceil(Buffer.byteLength(JSON.stringify(body.tools), "utf8") / 4) : 0;
+    var requested = completionField ? Number(body[completionField]) : 0;
+    var outputTokens = Number.isFinite(requested) && requested >= 1 ? requested : 0;
+    if (body.messages.length <= 2) return "skip-few";
     var budget = Math.floor(ctx * LAND_PCT);
     if (budget <= 0) return "skip-budget";
+    // Reserve the actual completion allowance before deciding how much
+    // history fits. Preserve the existing target and the latest turn.
+    var historyTrigger = Math.floor(ctx * TRIGGER_PCT);
+    var trigger = Math.min(historyTrigger, Math.max(budget, ctx - outputTokens));
     var st = loadState(key) || {};
     var msgs = body.messages;
     var head = [];
     var offset = 0;
     while (offset < msgs.length && /^(?:system|developer)$/.test(msgs[offset].role)) head.push(msgs[offset++]);
     var rest = msgs.slice(offset);
+    var latestUser = rest.findLastIndex(function (message) { return message.role === "user"; });
+    var instruction = rest.findIndex(function (message) { return /^(?:system|developer)$/.test(message.role); });
+    var historyEnd = Math.min(latestUser < 0 ? rest.length - 1 : latestUser,
+      instruction < 0 ? rest.length - 1 : instruction);
     rebaseReceipt(st, rest, "compactedPrefixCount", "compactedPrefixHash", "compactedPrefixHashes");
     rebaseReceipt(st, rest, "summaryForDropped", "summaryPrefixHash", "summaryPrefixHashes");
-    var toolTokens = Array.isArray(body.tools) ? Math.ceil(Buffer.byteLength(JSON.stringify(body.tools), "utf8") / 4) : 0;
     var est = estimateTokens(msgs) + toolTokens;
     var modelChanged = st.lastContextTokens && st.lastContextTokens !== ctx;
     var forceCompact = modelChanged && ctx < st.lastContextTokens && est > budget;
@@ -640,7 +649,7 @@ function applyContextTruncation(body, model) {
     var delta;
     var priorSummary;
     var previousCount = Number(st.compactedPrefixCount) || 0;
-    var prefixMatches = previousCount > 0 && previousCount < rest.length &&
+    var prefixMatches = previousCount > 0 && previousCount <= historyEnd &&
       st.compactedPrefixHash === prefixHash(rest.slice(0, previousCount));
     var summaryCount = Number(st.summaryForDropped) || 0;
     var usableSummary = summaryCount > 0 && summaryCount <= rest.length &&
@@ -676,13 +685,13 @@ function applyContextTruncation(body, model) {
       }
       var reserve = Math.min(SUMMARY_MAX_TOKENS, Math.floor(budget * 0.15));
       var remainingCharacters = estimateCharacters(head) + estimateCharacters(rest);
-      while (dropped < rest.length - 1 && Math.ceil(remainingCharacters / 4) + toolTokens > budget - reserve) {
+      while (dropped < historyEnd && Math.ceil(remainingCharacters / 4) + toolTokens > budget - reserve) {
         remainingCharacters -= estimateCharacters([rest[dropped++]]);
       }
       if (!dropped) return "none-drop";
     }
     dropped = completeToolBoundary(rest, dropped);
-    if (!dropped) return "none-protected-tool-group";
+    if (!dropped || dropped > historyEnd) return "none-protected-tool-group";
     var droppedMsgs = rest.slice(0, dropped);
     var coveredHash = prefixHash(droppedMsgs);
     cached = !!(usableSummary && summaryCount === dropped);
@@ -702,7 +711,8 @@ function applyContextTruncation(body, model) {
     st.compactedPrefixHash = coveredHash;
     st.compactedPrefixHashes = messageHashes(droppedMsgs);
     st.lastCompactedAt = Date.now();
-    st.lastTrigger = forceCompact ? "model-window-shrink" : "pct-85";
+    st.lastTrigger = forceCompact ? "model-window-shrink" :
+      est > historyTrigger ? "pct-85" : est > trigger ? "completion-room" : "retained-prefix";
     saveState(key, st);
     // Starting the job persists its checkpoint. Save the trim receipt first
     // so this older state object cannot overwrite newly created progress.
@@ -712,7 +722,12 @@ function applyContextTruncation(body, model) {
       " est=" + est + "->" + (estimateTokens(body.messages) + toolTokens) + " budget=" + budget + " ctx=" + ctx +
       " summarizer=" + (cached ? "cache" : (inFlight.has(key) ? "in-flight:" : "fallback:") + (routes[0] ? routes[0].modelId : "unavailable")) + "\n");
     return "truncated-" + dropped + "-" + (cached ? "cached" : "fallback");
-  } catch (e) { return "error"; }
+  } catch (e) { return "error"; } finally {
+    if (outputTokens > 0) {
+      var available = Math.max(1, Math.floor(ctx) - estimateTokens(body.messages) - toolTokens);
+      if (available < outputTokens) body[completionField] = available;
+    }
+  }
 }
 
 module.exports = {

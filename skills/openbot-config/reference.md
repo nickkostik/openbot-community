@@ -613,6 +613,14 @@ For Custom Chat Completions, this map applies to `glm-5.3` on the canonical Qwen
 
 OpenBot preserves a top-level `clear_thinking` boolean or promotes a boolean from legacy `thinking.clear_thinking` when there is no top-level boolean. This also applies with a saved per-bot effort. When neither field supplies a boolean, OpenBot omits `clear_thinking` and the provider applies its default. Direct Z.AI's GLM-5.3 route uses nested `thinking`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
 
+### Direct Alibaba Token Plan GLM-5.2 reasoning
+
+The exact `glm-5.2` route offers Default, Off, High and Max on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. Legacy `minimal`, `low` and `medium` normalize to `high`, and `xhigh` normalizes to `max`.
+
+For Chat Completions, Off sends `enable_thinking: false`. High and Max send `enable_thinking: true` with `reasoning_effort: "high"` or `reasoning_effort: "max"`. The hop keeps an explicit boolean `clear_thinking` at the top level or promotes a legacy boolean `thinking.clear_thinking` when no top-level boolean is supplied. Default without a per-bot override can retain native Chat `enable_thinking` and `thinking_budget`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
+
+For Responses, Off, High and Max send `reasoning.effort` values of `none`, `high` and `max` respectively. [QwenCloud Responses reference](https://docs.qwencloud.com/api-reference/chat/openai-responses).
+
 ### Direct Kimi Code K3.1 Pro reasoning
 
 This policy applies to the model IDs `k3.1-pro` and `k3.1-pro-highspeed` on `https://api.kimi.com/coding` or `https://api.kimi.ai/coding`, including their `/coding/v1` forms and optional trailing slashes. Their native efforts are `low`, `high` and `max`. Kimi uses High by default and rejects disabled thinking on these two models. [Kimi Code model configuration](https://www.kimi.com/code/docs/en/kimi-code/models).

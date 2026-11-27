@@ -2055,7 +2055,7 @@ async function handleCompletionsInner(req, res) {
       // normal provider maps and protocol converter then serialize it.
       delete body.reasoning_effort;
       delete body.reasoning;
-      if ((isZaiGlm53Route(route.model.slug, route.provider.origin) || isAlibabaGlm53Route(route.model.slug, route.provider.origin))
+      if ((reasoningPolicy?.kind === "alibaba-glm52" || isZaiGlm53Route(route.model.slug, route.provider.origin) || isAlibabaGlm53Route(route.model.slug, route.provider.origin))
           && isRecord(body.thinking)
           && typeof body.thinking.clear_thinking === "boolean") {
         // This setting controls prior reasoning history independently of effort.
@@ -2064,6 +2064,7 @@ async function handleCompletionsInner(req, res) {
         delete body.thinking;
       }
       delete body.enable_thinking;
+      if (reasoningPolicy?.kind === "alibaba-glm52") delete body.thinking_budget;
       if ((reasoningPolicy?.kind === "nvidia-nemotron-toggle" || reasoningPolicy?.kind === "nvidia-super-vl") && isRecord(body.chat_template_kwargs)) {
         body.chat_template_kwargs = Object.assign({}, body.chat_template_kwargs);
         delete body.chat_template_kwargs.enable_thinking;

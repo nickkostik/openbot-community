@@ -1019,6 +1019,45 @@ async fn qwencloud_glm53_uses_its_own_controls_after_a_model_switch() {
 }
 
 #[tokio::test]
+async fn qwencloud_glm52_uses_documented_effort_choices_on_both_protocols() {
+    for origin in [
+        "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+    ] {
+        let facts = crate::catalog::discovery_facts("glm-5.2", origin).unwrap();
+        assert_eq!(
+            json!(facts.levels),
+            json!(["default", "none", "high", "max"])
+        );
+        for (saved, effort) in [("none", "none"), ("high", "high"), ("xhigh", "max")] {
+            let mut request = user_request("direct:model", false);
+            request["thinking"] = json!({"type":"disabled","clear_thinking":false});
+            request["enable_thinking"] = json!(false);
+            request["thinking_budget"] = json!(512);
+            request["reasoning_effort"] = json!("medium");
+            let body = direct_body(
+                origin,
+                "glm-5.2",
+                "chat-completions",
+                saved,
+                request.clone(),
+            )
+            .await;
+            assert_eq!(body["enable_thinking"], effort != "none");
+            assert_eq!(body["clear_thinking"], false);
+            assert_eq!(
+                body["reasoning_effort"].as_str(),
+                (effort != "none").then_some(effort)
+            );
+            assert!(body.get("thinking").is_none() && body.get("thinking_budget").is_none());
+            let body = direct_body(origin, "glm-5.2", "responses", saved, request).await;
+            assert_eq!(body["reasoning"], json!({"effort": effort}));
+            assert!(body.get("enable_thinking").is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn log_capture_applies_policy_redacts_secrets_and_limits_large_bodies() {
     let fixture = Fixture::new().await;
     let mut request = user_request("opencode:synthetic", false);

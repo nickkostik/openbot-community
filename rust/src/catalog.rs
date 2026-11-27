@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
+use crate::routing::is_alibaba_token_plan_origin;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -51,12 +53,20 @@ struct Policy {
 pub enum PolicyKind {
     DeepSeek,
     KimiCode,
+    AlibabaGlm52,
     NvidiaToggle,
     NvidiaSuper,
 }
 
 impl Policy {
     fn for_route(slug: &str, origin: &str) -> Option<Self> {
+        if slug == "glm-5.2" && is_alibaba_token_plan_origin(&origin.to_ascii_lowercase()) {
+            return Some(Self {
+                kind: PolicyKind::AlibabaGlm52,
+                levels: &[Default, Off, High, Max],
+                aliases: &[(Minimal, High), (Low, High), (Medium, High), (XHigh, Max)],
+            });
+        }
         let origin = Url::parse(origin).ok()?;
         if origin.scheme() != "https"
             || origin.port().is_some()

@@ -77,6 +77,9 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
     let alibaba_glm53 = protocol == Protocol::ChatCompletions
         && slug == "glm-5.3"
         && is_alibaba_token_plan_origin(&origin);
+    let policy = selection.model.policy();
+    let alibaba_glm52_chat =
+        protocol == Protocol::ChatCompletions && matches!(policy, Some(PolicyKind::AlibabaGlm52));
     let direct_zai = matches!(
         origin.trim_end_matches('/'),
         "https://api.z.ai/api/coding/paas/v4" | "https://api.z.ai/api/paas/v4"
@@ -96,7 +99,7 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
                 "enable_thinking",
             ],
         );
-        if (direct_zai || alibaba_glm53)
+        if (direct_zai || alibaba_glm53 || alibaba_glm52_chat)
             && let Some(clear) = clear_thinking
         {
             body.insert("thinking".into(), json!({"clear_thinking": clear}));
@@ -105,7 +108,7 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
             nested(body, "output_config", |object| remove(object, &["effort"]));
         }
         if matches!(
-            selection.model.policy(),
+            policy,
             Some(PolicyKind::NvidiaToggle | PolicyKind::NvidiaSuper)
         ) && body.contains_key("chat_template_kwargs")
         {
@@ -115,9 +118,12 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
         }
     }
 
-    match selection.model.policy() {
+    match policy {
         Some(PolicyKind::DeepSeek) => deepseek(body, selection, protocol, effort),
         Some(PolicyKind::KimiCode) => kimi(body, selection, effort),
+        Some(PolicyKind::AlibabaGlm52) if protocol != Protocol::Anthropic => {
+            alibaba_glm52(body, selection, protocol, effort);
+        }
         Some(PolicyKind::NvidiaToggle) => nvidia(body, selection, effort, true),
         Some(PolicyKind::NvidiaSuper) => nvidia(body, selection, effort, false),
         None if direct_zai => zai(body, effort),
@@ -138,7 +144,7 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
                 body.insert("reasoning_effort".into(), json!(effort));
             }
         }
-        None => generic(body, selection, &slug, &origin, effort),
+        None | Some(PolicyKind::AlibabaGlm52) => generic(body, selection, &slug, &origin, effort),
     }
 }
 
@@ -261,12 +267,76 @@ fn glm53_effort(body: &Body, saved: Effort) -> Option<Effort> {
         .or_else(|| incoming(body, "reasoning_effort").filter(allowed))
 }
 
+fn clear_thinking(body: &Body) -> Option<bool> {
+    body.get("clear_thinking")
+        .and_then(Value::as_bool)
+        .or_else(|| body.get("thinking")?.get("clear_thinking")?.as_bool())
+}
+
+fn alibaba_glm52(body: &mut Body, selection: &Selection<'_>, protocol: Protocol, saved: Effort) {
+    let responses = protocol == Protocol::Responses;
+    let selected = effective(selection, Some(saved)).or_else(|| {
+        (selection.effort_override.is_none() && selection.model.fast).then_some(Effort::None)
+    });
+    let enabled = body
+        .get("enable_thinking")
+        .and_then(Value::as_bool)
+        .or_else(|| match body.get("thinking")?.get("type")?.as_str()? {
+            "enabled" => Some(true),
+            "disabled" => Some(false),
+            _ => None,
+        });
+    let effort = selected.or_else(|| {
+        if enabled == Some(false) {
+            return Some(Effort::None);
+        }
+        let native = if responses {
+            body.get("reasoning")
+                .and_then(Value::as_object)
+                .and_then(|value| incoming(value, "effort"))
+        } else {
+            None
+        };
+        effective(selection, native)
+            .or_else(|| effective(selection, incoming(body, "reasoning_effort")))
+            .filter(|effort| enabled != Some(true) || *effort != Effort::None)
+    });
+    let clear = clear_thinking(body);
+    remove(
+        body,
+        &[
+            "thinking",
+            "enable_thinking",
+            "reasoning",
+            "reasoning_effort",
+            "clear_thinking",
+        ],
+    );
+    if responses {
+        body.shift_remove("thinking_budget");
+        if let Some(effort) = effort {
+            body.insert("reasoning_effort".into(), json!(effort));
+        }
+        return;
+    }
+
+    if selected.is_some() || effort == Some(Effort::None) || selection.effort_override.is_some() {
+        body.shift_remove("thinking_budget");
+    }
+    if let Some(enabled) = effort.map(|value| value != Effort::None).or(enabled) {
+        body.insert("enable_thinking".into(), json!(enabled));
+    }
+    if let Some(effort) = effort.filter(|value| *value != Effort::None) {
+        body.insert("reasoning_effort".into(), json!(effort));
+    }
+    if let Some(clear) = clear {
+        body.insert("clear_thinking".into(), json!(clear));
+    }
+}
+
 fn alibaba_glm53_chat(body: &mut Body, saved: Effort) {
     let effort = glm53_effort(body, saved);
-    let clear_thinking = body
-        .get("clear_thinking")
-        .and_then(Value::as_bool)
-        .or_else(|| body.get("thinking")?.get("clear_thinking")?.as_bool());
+    let clear_thinking = clear_thinking(body);
     remove(
         body,
         &[

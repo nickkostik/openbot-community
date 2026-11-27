@@ -19,6 +19,11 @@ var ALIBABA_TOKEN_PLAN_CHAT_ORIGINS = new Set([
   "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
   "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
 ]);
+var ALIBABA_GLM52 = Object.freeze({
+  kind: "alibaba-glm52",
+  levels: Object.freeze(["default", "none", "high", "max"]),
+  aliases: Object.freeze({ minimal: "high", low: "high", medium: "high", xhigh: "max" }),
+});
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
 var DEEPSEEK_ORIGIN = "https://api.deepseek.com";
@@ -82,6 +87,7 @@ function documentedReasoningPolicy(modelId, baseUrl) {
   if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(baseUrl) && /^k3\.1-pro(?:-highspeed)?$/.test(modelId)) {
     return KIMI_CODE_PRO;
   }
+  if (modelId === "glm-5.2" && isAlibabaTokenPlanOrigin(baseUrl)) return ALIBABA_GLM52;
   if (!NVIDIA_DIRECT.test(baseUrl)) return undefined;
   if (modelId === "nvidia/nemotron-3.5-super-vl-120b-a12b") return NVIDIA_SUPER_VL;
   if (modelId === "nvidia/nemotron-3.5-lightning-30b-a3b") return NVIDIA_LIGHTNING;
@@ -97,8 +103,11 @@ function isZaiGlm53Route(modelId, baseUrl) {
 }
 
 function isAlibabaGlm53Route(modelId, baseUrl) {
-  return /^glm-5\.3$/i.test(modelId)
-    && ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(String(baseUrl).toLowerCase().replace(/\/+$/, ""));
+  return /^glm-5\.3$/i.test(modelId) && isAlibabaTokenPlanOrigin(baseUrl);
+}
+
+function isAlibabaTokenPlanOrigin(baseUrl) {
+  return ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(String(baseUrl).toLowerCase().replace(/\/+$/, ""));
 }
 
 function isGrokRoute(modelId, baseUrl) {
@@ -208,8 +217,53 @@ function applyGlm53Effort(body, parameters) {
   if (!GLM53_EFFORTS.has(body.reasoning_effort)) delete body.reasoning_effort;
 }
 
+function clearThinking(body) {
+  return typeof body.clear_thinking === "boolean" ? body.clear_thinking : body.thinking?.clear_thinking;
+}
+
+function applyAlibabaGlm52(body, parameters, apiType) {
+  var responses = apiType === "responses";
+  var thinking = param(parameters, "thinking");
+  var saved = documentedReasoningEffort(ALIBABA_GLM52, param(parameters, "effort"));
+  var selected = String(thinking).toLowerCase() === "false" ? "none" : saved;
+  if (!selected || selected === "default") {
+    selected = String(param(parameters, "fast")).toLowerCase() === "true" ? "none" : undefined;
+  }
+  var enabled = typeof body.enable_thinking === "boolean" ? body.enable_thinking : undefined;
+  if (enabled === undefined) {
+    if (body.thinking?.type === "enabled") enabled = true;
+    if (body.thinking?.type === "disabled") enabled = false;
+  }
+  var effort = selected;
+  if (!effort) {
+    var native = responses ? body.reasoning?.effort : undefined;
+    effort = enabled === false ? "none"
+      : documentedReasoningEffort(ALIBABA_GLM52, native)
+        || documentedReasoningEffort(ALIBABA_GLM52, body.reasoning_effort);
+    if (effort === "default" || (enabled === true && effort === "none")) effort = undefined;
+  }
+
+  var clear = clearThinking(body);
+  delete body.thinking;
+  delete body.enable_thinking;
+  delete body.reasoning;
+  delete body.reasoning_effort;
+  delete body.clear_thinking;
+  if (responses) {
+    delete body.thinking_budget;
+    if (effort) body.reasoning_effort = effort;
+  } else {
+    if (selected || effort === "none") delete body.thinking_budget;
+    if (effort) body.enable_thinking = effort !== "none";
+    else if (enabled !== undefined) body.enable_thinking = enabled;
+    if (effort && effort !== "none") body.reasoning_effort = effort;
+    if (typeof clear === "boolean") body.clear_thinking = clear;
+  }
+  return ALIBABA_GLM52.kind;
+}
+
 function applyAlibabaGlm53(body, parameters) {
-  var clear = typeof body.clear_thinking === "boolean" ? body.clear_thinking : body.thinking?.clear_thinking;
+  var clear = clearThinking(body);
   if (typeof clear === "boolean") body.clear_thinking = clear;
   else delete body.clear_thinking;
   delete body.thinking;
@@ -323,7 +377,9 @@ function applyProviderReasoningControls(body, ctx) {
   if (documented === KIMI_CODE_PRO) {
     return applyKimiCodePro(body, ctx.parameters);
   }
-  if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
+  if (documented === ALIBABA_GLM52) {
+    if (ctx.apiType !== "anthropic") return applyAlibabaGlm52(body, ctx.parameters, ctx.apiType);
+  } else if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
   if (ctx.apiType === "chat-completions" && isAlibabaGlm53Route(modelId, baseUrl)) {
     return applyAlibabaGlm53(body, ctx.parameters);
   }

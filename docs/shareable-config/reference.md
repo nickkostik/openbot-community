@@ -276,6 +276,14 @@ For Custom Chat Completions, this map applies to `glm-5.3` on the canonical Qwen
 
 OpenBot preserves a top-level `clear_thinking` boolean or promotes a boolean from legacy `thinking.clear_thinking` when there is no top-level boolean. This also applies with a saved per-bot effort. When neither field supplies a boolean, OpenBot omits `clear_thinking` and the provider applies its default. Direct Z.AI's GLM-5.3 route uses nested `thinking`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
 
+### Direct Alibaba Token Plan GLM-5.2 reasoning
+
+The exact `glm-5.2` route offers Default, Off, High and Max on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. Legacy `minimal`, `low` and `medium` normalize to `high`, and `xhigh` normalizes to `max`.
+
+For Chat Completions, Off sends `enable_thinking: false`. High and Max send `enable_thinking: true` with `reasoning_effort: "high"` or `reasoning_effort: "max"`. The hop keeps an explicit boolean `clear_thinking` at the top level or promotes a legacy boolean `thinking.clear_thinking` when no top-level boolean is supplied. Default without a per-bot override can retain native Chat `enable_thinking` and `thinking_budget`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
+
+For Responses, Off, High and Max send `reasoning.effort` values of `none`, `high` and `max` respectively. [QwenCloud Responses reference](https://docs.qwencloud.com/api-reference/chat/openai-responses).
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.

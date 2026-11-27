@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const mapsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../payload/provider-maps.cjs");
 const maps = require(mapsPath) as {
+  documentedReasoningPolicy(modelId: string, baseUrl: string): { levels: readonly string[] } | undefined;
   applyProviderReasoningControls: (
     body: Record<string, unknown>,
     ctx: { modelId: string; baseUrl: string; apiType?: string; parameters: readonly { id: string; value: string }[] },
@@ -36,6 +37,36 @@ test("Kimi Code Pro drops inherited Off and maps explicit allowed reasoning", ()
     maps.applyProviderReasoningControls(other, { modelId, baseUrl, parameters: [{ id: "thinking", value: "false" }] });
     assert.deepEqual(other.thinking, { type: "disabled" });
   }
+});
+
+test("Alibaba Token Plan GLM-5.2 offers Off and maps it to each native protocol", () => {
+  const model = "glm-5.2";
+  for (const baseUrl of [alibabaTokenPlan, legacyAlibabaTokenPlan + "/"]) {
+    assert.deepEqual(maps.documentedReasoningPolicy(model, baseUrl)?.levels, ["default", "none", "high", "max"]);
+    for (const [saved, effort] of [["none", "none"], ["medium", "high"], ["xhigh", "max"]] as const) {
+      for (const apiType of ["chat-completions", "responses"]) {
+        const body = { model, enable_thinking: false, thinking_budget: 512, reasoning_effort: "medium",
+          thinking: { type: "disabled", clear_thinking: false } };
+        maps.applyProviderReasoningControls(body, {
+          modelId: model, baseUrl, apiType, parameters: [{ id: "effort", value: saved }],
+        });
+        assert.deepEqual(body, apiType === "responses" ? { model, reasoning_effort: effort } : {
+          model, enable_thinking: effort !== "none", clear_thinking: false,
+          ...(effort === "none" ? {} : { reasoning_effort: effort }),
+        });
+      }
+    }
+  }
+  assert.equal(maps.documentedReasoningPolicy(model, "https://api.z.ai/api/paas/v4"), undefined);
+});
+
+test("Alibaba Token Plan GLM-5.2 keeps a native budget at Default", () => {
+  const model = "glm-5.2";
+  const body = { model, enable_thinking: true, thinking_budget: 512, clear_thinking: false };
+  maps.applyProviderReasoningControls(body, {
+    modelId: model, baseUrl: alibabaTokenPlan, apiType: "chat-completions", parameters: [],
+  });
+  assert.deepEqual(body, { model, enable_thinking: true, thinking_budget: 512, clear_thinking: false });
 });
 
 const zaiCodingPlan = "https://api.z.ai/api/coding/paas/v4";

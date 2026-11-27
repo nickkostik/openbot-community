@@ -163,6 +163,10 @@ impl CredentialStore {
                 .iter_mut()
                 .find(|entry| entry["id"] == model_id)
                 .ok_or_else(store_error)?;
+            if effort == Effort::None {
+                // Older rows used "none" for Default and omitted the Default level.
+                entry["reasoningLevels"] = json!(model.levels);
+            }
             entry["activeReasoning"] = json!(effort);
         }
         edits::set_wildcard(&mut plan, model)?;

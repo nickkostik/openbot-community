@@ -915,6 +915,54 @@ async fn read_only_and_early_renewal_never_send_the_saved_refresh_token() {
 }
 
 #[tokio::test]
+async fn saved_glm52_off_survives_reload_of_a_legacy_model_row() {
+    let fixture = Upstream::start().await;
+    let root = seed();
+    let path = root.path().join("openbot-plan.json");
+    let mut plan: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    plan["catalog"]["providers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"alibaba", "origin":"https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
+        }));
+    plan["catalog"]["models"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"alibaba:glm-5.2", "slug":"glm-5.2", "providerId":"alibaba",
+            "reasoningLevels":["high","max"], "activeReasoning":"none"
+        }));
+    write(root.path(), "openbot-plan.json", &plan);
+    fs::write(root.path().join("openbot-mode"), "custom\n").unwrap();
+    let read_effort = || {
+        let state = State::new(root.path().into(), false).unwrap();
+        let routes = state
+            .resolve_routes(&["alibaba:glm-5.2".into()], None, CredentialKind::ApiKey)
+            .unwrap();
+        serde_json::to_value(&routes[0]).unwrap()["reasoningEffort"].clone()
+    };
+    assert_eq!(read_effort(), "default");
+
+    let router = account_router(root.path(), &fixture);
+    let (status, result) = post_json(
+        &router,
+        "/api/save",
+        json!({"kind":"use-model", "modelId":"alibaba:glm-5.2", "reasoning":"none"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let model = result["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "alibaba:glm-5.2")
+        .unwrap();
+    assert_eq!(model["activeReasoning"], "none");
+    assert_eq!(read_effort(), "none");
+}
+
+#[tokio::test]
 async fn saves_default_model_and_effort_without_collapsing_provider_accounts() {
     let fixture = Upstream::start().await;
     let root = seed();

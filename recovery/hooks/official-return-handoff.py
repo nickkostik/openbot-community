@@ -7,6 +7,7 @@ offline. Samples and complete double captures are not an admission fence.
 import base64
 import contextlib
 import hashlib
+import heapq
 import json
 import os
 import pathlib
@@ -16,6 +17,7 @@ import tempfile
 import subprocess
 import time
 import uuid
+from graphlib import CycleError, TopologicalSorter
 
 STATE = 'openbot-return-handoff.json'
 SCHEMA = 'openbot-official-return-handoff/v1'
@@ -44,6 +46,36 @@ def directory(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise RuntimeError('Return capture requires owned directories')
+
+
+def ordered_return_keys(additions, source_orders):
+    """Preserve each source's append order and the chronology of dated entries."""
+    sorter = TopologicalSorter()
+    for key in additions:
+        sorter.add(key)
+    for order in source_orders:
+        for before, after in zip(order, order[1:]):
+            sorter.add(after, before)
+    try:
+        sorter.prepare()
+    except CycleError:
+        raise RuntimeError('Return source ordering requires review') from None
+
+    ready = []
+    previous_date = None
+    while sorter.is_active():
+        for key in sorter.get_ready():
+            # An undated entry becomes eligible once its source predecessors
+            # have been emitted. The queue priority never becomes a saved date.
+            heapq.heappush(ready, (additions[key].get('timestampMs', -1), key))
+        _, key = heapq.heappop(ready)
+        timestamp = additions[key].get('timestampMs')
+        if timestamp is not None:
+            if previous_date is not None and timestamp < previous_date:
+                raise RuntimeError('Return source ordering requires review')
+            previous_date = timestamp
+        yield key
+        sorter.done(key)
 
 
 class Capture:
@@ -391,6 +423,7 @@ class FreshReturn(Capture):
             raise RuntimeError('Current Local published prefix is incomplete or divergent')
         last = max((value.get('timestampMs',0) for value in current), default=0)
         projections=[]; orders=[]; indexed={}; baseline=[]; occupied=set(); additions={}; literal_records={}; delta_sources=set()
+        tail_orders = []
         for value in current:
             normalized = self.r.merger.remap_transcript_owner(value, mapping)
             if value['id'] in occupied: raise RuntimeError('Current Local UI identifiers are ambiguous')
@@ -398,6 +431,7 @@ class FreshReturn(Capture):
             indexed[(value['id'], sha(encoded({k:v for k,v in normalized.items() if k!='id'})))] = value['id']
         for source in sources:
             values=self.source_values(source)
+            tail_order = []
             orders.append({'sourceId':source['agentId'], 'sourceKind':source['kind'], 'entryIds':[v['id'] for v in values]})
             if len({value['id'] for value in values}) != len(values):
                 raise RuntimeError('Return source has duplicate event identities')
@@ -408,21 +442,23 @@ class FreshReturn(Capture):
                     # Full envelopes are checked by the PR30 literal reader;
                     # no tools, peer destinations, rich payloads or streaming.
                     literal_records[key]=(*self.literal(value,source['agentId']),value)
-                    if value['timestampMs'] < last:
+                    if 'timestampMs' in value and value['timestampMs'] < last:
                         raise RuntimeError('Official return is not a completed literal append')
                     additions[key]=normalized
+                    tail_order.append(key)
                     if source['kind']=='platform': delta_sources.add(source['agentId'])
+            tail_orders.append(tail_order)
         if len(additions)>self.tail.MAX_ROWS:
             raise RuntimeError('Official return exceeds bounded literal import')
         records=[]; text_bytes=0
-        for key,value in sorted(additions.items(),key=lambda item:(item[1]['timestampMs'],item[0])):
+        for key in ordered_return_keys(additions, tail_orders):
+            value = additions[key]
             role,text,original=literal_records[key]; identifier=value['id']
             if identifier in occupied or len(identifier.encode())>128:
                 identifier=self.r.merger.compact_branch_identifier(identifier+':'+sha(encoded(value)),occupied)
             occupied.add(identifier); indexed[key]=identifier
             baseline.append({**value,'id':identifier})
-            records.append({'id':identifier,'originalId':value['id'],'kind':value['kind'],'role':role,'text':text,
-                            'timestampMs':value['timestampMs'],'sourcePayloadSha256':sha(encoded(original)), 'literalText':True})
+            records.append(self.tail.literal_record(original, identifier, role, text))
             text_bytes+=len(text.encode())
         if text_bytes>self.tail.MAX_TEXT: raise RuntimeError('Official return exceeds literal byte bound')
         positions={value['id']:i for i,value in enumerate(baseline)}

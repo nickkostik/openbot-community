@@ -188,6 +188,53 @@ class FreshReturnTests(unittest.TestCase):
         self.assertTrue(state['authorityCommitted']); self.assertFalse(state['nativeAppDeliveryVerified'])
         self.assert_protected(before)
 
+    def test_return_preserves_undated_literal_between_same_time_messages(self):
+        first = {**self.late, 'id': 'z-first'}
+        undated = {**self.late, 'id': 'undated', 'content': 'Saved without a date'}
+        del undated['timestampMs']
+        last = {**self.late, 'id': 'a-last'}
+        self.server_transcripts[fleet.OLD] = cloud([self.first, first, undated, last])
+        before = self.protected()
+
+        result = self.builder.run()
+        entry = result['entries'][0]
+        destination = self.root / 'agents' / entry['newId']
+        values = self.builder.validator.db_entries(destination / 'store.db')
+        self.assertEqual(values[2:], [{**event, 'agentId': entry['newId']}
+                                      for event in (first, undated, last)])
+        records = self.append_calls[0]['records']
+        self.assertEqual([record['id'] for record in records], ['z-first', 'undated', 'a-last'])
+        self.assertEqual(records[1]['timestampState'], 'missing')
+        self.assertNotIn('timestampMs', records[1])
+        self.assertEqual(records[1]['sourcePayloadSha256'], H.sha(H.encoded(undated)))
+        self.assertEqual(records[1]['text'], undated['content'])
+        self.builder.validator.validate(self.r, result, entry)
+        self.assert_protected(before)
+
+    def test_undated_return_refuses_incompatible_dated_source_order(self):
+        later = {**self.late, 'id': 'later', 'timestampMs': 4}
+        undated = {**self.late, 'id': 'undated'}
+        del undated['timestampMs']
+        earlier = {**self.late, 'id': 'earlier', 'timestampMs': 3}
+        self.server_transcripts[fleet.OLD] = cloud([self.first, later, undated, earlier])
+        before = self.protected()
+        previous = self.r.read()
+
+        with self.assertRaisesRegex(RuntimeError, 'Return source ordering requires review'):
+            self.builder.run()
+
+        self.assertEqual(self.r.read(), previous)
+        self.assertEqual(self.append_calls, [])
+        self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
+        self.assert_protected(before)
+
+    def test_return_order_refuses_incompatible_shared_source_constraints(self):
+        entries = {'dated': {'timestampMs': 3}, 'undated': {}}
+        sources = [['dated', 'undated'], ['undated', 'dated']]
+
+        with self.assertRaisesRegex(RuntimeError, 'Return source ordering requires review'):
+            list(H.ordered_return_keys(entries, sources))
+
     def test_temporal_harness_drift_without_messages_still_uses_fresh_identity(self):
         self.server_transcripts[fleet.OLD] = cloud([self.first])
         self.roster[1]['harness'] = 'temporal'

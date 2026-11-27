@@ -183,6 +183,16 @@ def literal(event):
     raise RuntimeError('Tail format needs explicit preservation review')
 
 
+def literal_record(event, identifier, role, text):
+    record = {'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
+              'kind': event['kind'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True}
+    if 'timestampMs' in event:
+        record['timestampMs'] = event['timestampMs']
+    else:
+        record['timestampState'] = 'missing'
+    return record
+
+
 def append_rows(r, mapping, store, additions):
     projections = []; records = []; text_bytes = 0
     with contextlib.closing(sqlite3.connect(store)) as connection:
@@ -198,13 +208,7 @@ def append_rows(r, mapping, store, additions):
             value['id'] = identifier; occupied.add(identifier); sequence += 1
             connection.execute('INSERT INTO transcript_entries(seq,id,entry)VALUES(?,?,?)', (sequence, identifier, encoded(value).decode()))
             projections.append({'sourceId': source['agentId'], 'sourceKind': 'platform', 'sourceEntryId': event['id'], 'targetEntryId': identifier})
-            record = {'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
-                      'kind': event['kind'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True}
-            if 'timestampMs' in event:
-                record['timestampMs'] = event['timestampMs']
-            else:
-                record['timestampState'] = 'missing'
-            records.append(record)
+            records.append(literal_record(event, identifier, role, text))
             text_bytes += len(text.encode())
         if len(records) > MAX_ROWS or text_bytes > MAX_TEXT: raise RuntimeError('Tail exceeds bounded import')
         connection.commit()

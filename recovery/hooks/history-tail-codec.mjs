@@ -111,11 +111,59 @@ export function forEachSqliteRow(db, query, visit) {
 
 function blobGraph(db) {
   const graph = Object.create(null); let count = 0;
-  forEachSqliteRow(db, 'SELECT id,data FROM blobs ORDER BY id', row => {
+  forEachSqliteRow(db, 'SELECT id,data FROM graph.blobs ORDER BY id', row => {
     check(typeof row.id === 'string' && row.data instanceof Uint8Array && !Object.hasOwn(graph, row.id), 'BLOB_SCHEMA');
     graph[row.id] = digest(row.data); check(++count <= 200000, 'BLOB_GRAPH_BOUND');
   });
   return graph;
+}
+
+export function commitHistoryTail(sql, { storePath, expectedStoreSHA, rawRoot, outRoot, added, oldGraph, kvBefore, updatedUnread }) {
+  // SQLite's cross-database commit needs the on-disk rollback journals for both files.
+  for (const schema of ['main', 'graph']) {
+    check(sql.prepare(`PRAGMA ${schema}.journal_mode`).get().journal_mode === 'delete', 'CANDIDATE_ROLLBACK_JOURNAL_REQUIRED');
+    sql.exec(`PRAGMA ${schema}.synchronous=FULL`);
+  }
+  sql.exec('BEGIN IMMEDIATE');
+  try {
+    check(digest(fs.readFileSync(storePath)) === expectedStoreSHA, 'STORE_GENERATION_CHANGED');
+    const read = sql.prepare('SELECT data FROM graph.blobs WHERE id=?');
+    const currentRoot = read.get(SLOT)?.data;
+    check(currentRoot && Buffer.from(currentRoot).equals(rawRoot), 'ROOT_GENERATION_CHANGED');
+    const put = sql.prepare('INSERT INTO graph.blobs(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data');
+    const oldRootSHA = digest(rawRoot), previous = read.get(oldRootSHA)?.data;
+    check(!previous || Buffer.from(previous).equals(rawRoot), 'BLOB_COLLISION');
+    put.run(oldRootSHA, rawRoot);
+    for (const [id, body] of added) {
+      const existing = read.get(id)?.data;
+      check(!existing || Buffer.from(existing).equals(body), 'BLOB_COLLISION');
+      put.run(id, body);
+    }
+    put.run(SLOT, outRoot);
+    const unread = JSON.stringify(updatedUnread);
+    const update = sql.prepare('UPDATE main.kv SET value=? WHERE key=?').run(unread, 'unreadState');
+    check(update.changes === 1, 'UNREAD_STATE_UPDATE');
+    const kvAfter = sql.prepare('SELECT key,value FROM main.kv ORDER BY key').all();
+    assert.deepEqual(kvAfter.map(({ key, value }) => [key, value]),
+      kvBefore.map(({ key, value }) => [key, key === 'unreadState' ? unread : value]));
+    for (const schema of ['main', 'graph']) {
+      assert.equal(sql.prepare(`PRAGMA ${schema}.quick_check`).get().quick_check, 'ok');
+    }
+    const completeGraph = blobGraph(sql);
+    for (const [id, hash] of Object.entries(oldGraph)) if (id !== SLOT) {
+      check(completeGraph[id] === hash, 'ARCHIVED_BLOB_CHANGED');
+    }
+    check(completeGraph[SLOT] === digest(outRoot) && completeGraph[oldRootSHA] === oldRootSHA, 'ROOT_ARCHIVE_MISSING');
+    sql.exec('COMMIT');
+    return completeGraph;
+  } catch (error) {
+    try {
+      if (sql.isTransaction !== false) sql.exec('ROLLBACK');
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], 'Could not roll back detached history');
+    }
+    throw error;
+  }
 }
 
 export function reviewedSource(raw, kind) {
@@ -230,17 +278,18 @@ export async function repairCandidate(options, plan) {
   check(digest(fs.readFileSync(storePath)) === plan.expectedStoreSHA, 'STORE_GENERATION_CHANGED');
   const native = loadNative(options.host, options.worker, options.allocatorHost);
   const { sdk, guard } = native;
-  let sql, blobs;
+  let sql;
   try {
     // Callers make independent consistent snapshots and normalize their journal
     // mode before this bridge. Opening a copied WAL-mode DB can create sidecars
     // even during reads, and would make the proof's generation ambiguous.
     for (const file of [storePath, blobsPath]) requireNonWalHeader(fs.readFileSync(file).subarray(0, 100));
     const { DatabaseSync } = require('node:sqlite');
-    sql = new DatabaseSync(storePath); blobs = new DatabaseSync(blobsPath);
-    assert.equal(sql.prepare('PRAGMA quick_check').get().quick_check, 'ok');
-    assert.equal(blobs.prepare('PRAGMA quick_check').get().quick_check, 'ok');
-    const oldGraph = blobGraph(blobs), getStatement = blobs.prepare('SELECT data FROM blobs WHERE id=?');
+    sql = new DatabaseSync(storePath);
+    sql.prepare('ATTACH DATABASE ? AS graph').run(blobsPath);
+    assert.equal(sql.prepare('PRAGMA main.quick_check').get().quick_check, 'ok');
+    assert.equal(sql.prepare('PRAGMA graph.quick_check').get().quick_check, 'ok');
+    const oldGraph = blobGraph(sql), getStatement = sql.prepare('SELECT data FROM graph.blobs WHERE id=?');
     const get = id => getStatement.get(id)?.data;
     const rawRoot = get(SLOT);
     check(rawRoot && digest(rawRoot) === plan.expectedRootSHA, 'ROOT_GENERATION_CHANGED');
@@ -358,22 +407,9 @@ export async function repairCandidate(options, plan) {
     for (const key of Object.keys(priorUnread).filter(key => key !== 'lastActivityAt')) assert.deepEqual(parsedAfter[key], priorUnread[key]);
     check(guard.counts.networkAttempts === 0 && guard.counts.toolAttempts === 0, 'DETACHED_SIDE_EFFECT');
     check(!sourcePlanFile.path || digest(fs.readFileSync(sourcePlanFile.path)) === sourcePlanFile.sha256, 'PLAN_FILE_CHANGED');
-    blobs.exec('BEGIN IMMEDIATE');
-    const put = blobs.prepare('INSERT INTO blobs(id,data)VALUES(?,?) ON CONFLICT(id)DO UPDATE SET data=excluded.data');
-    check(!get(digest(rawRoot)) || Buffer.from(get(digest(rawRoot))).equals(Buffer.from(rawRoot)), 'BLOB_COLLISION');
-    put.run(digest(rawRoot), rawRoot); for (const [id, body] of added) put.run(id, body); put.run(SLOT, outRoot);
-    blobs.exec('COMMIT');
-    sql.exec('BEGIN IMMEDIATE'); sql.prepare('UPDATE kv SET value=? WHERE key=?').run(JSON.stringify(updatedUnread), 'unreadState'); sql.exec('COMMIT');
-    const kvAfter = sql.prepare('SELECT key,value FROM kv ORDER BY key').all();
-    assert.deepEqual(kvAfter.filter(row => row.key !== 'unreadState'), kvBefore.filter(row => row.key !== 'unreadState'));
-    assert.equal(sql.prepare('PRAGMA quick_check').get().quick_check, 'ok');
-    assert.equal(blobs.prepare('PRAGMA quick_check').get().quick_check, 'ok');
-    const completeGraph = blobGraph(blobs);
-    for (const [id, hash] of Object.entries(oldGraph)) if (id !== SLOT) {
-      check(completeGraph[id] === hash, 'ARCHIVED_BLOB_CHANGED');
-    }
-    check(completeGraph[SLOT] === digest(outRoot) && completeGraph[digest(rawRoot)] === digest(rawRoot), 'ROOT_ARCHIVE_MISSING');
-    sql.close(); sql = undefined; blobs.close(); blobs = undefined;
+    const completeGraph = commitHistoryTail(sql, { storePath, expectedStoreSHA: plan.expectedStoreSHA,
+      rawRoot, outRoot, added, oldGraph, kvBefore, updatedUnread });
+    sql.close(); sql = undefined;
     for (const file of [storePath, blobsPath]) {
       regularPath(file, { limit: LIMITS.database, privateFile: true });
       for (const suffix of ['-wal', '-shm', '-journal']) check(!fs.existsSync(file + suffix), 'CANDIDATE_SIDECAR_CREATED');
@@ -401,7 +437,7 @@ export async function repairCandidate(options, plan) {
     const proofPath = path.join(directory, 'proof.json');
     fs.writeFileSync(proofPath, JSON.stringify(proof) + '\n', { mode: 0o600, flag: 'wx' });
     return proof;
-  } finally { sql?.close(); blobs?.close(); guard.restore(); }
+  } finally { sql?.close(); guard.restore(); }
 }
 
 async function main(args) {

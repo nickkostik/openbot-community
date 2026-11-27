@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validatePlan, regularPath, detachedDirectory, reviewedSource, allocatorSlice,
-  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier, planFileEvidence } from './history-tail-codec.mjs';
+  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier, planFileEvidence, commitHistoryTail } from './history-tail-codec.mjs';
 
 const require = createRequire(import.meta.url);
 const source = fileURLToPath(new URL('./history-tail-codec.mjs', import.meta.url));
@@ -221,4 +221,43 @@ test('plan-file proof binds exact Python JSON bytes rather than normalized JS nu
   const mismatched = structuredClone(parsed); mismatched.records[0].text = 'Different';
   assert.throws(() => planFileEvidence(file, mismatched), /PLAN_FILE_MISMATCH/);
   assert.equal(planFileEvidence('-', parsed).sha256, null);
+});
+
+test('failed unread update rolls back the detached context root and allows a retry', t => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { folder, write } = fixture(t);
+  const storePath = write('store.db', ''), graphPath = write('conversation-blobs.db', '');
+  const sql = new DatabaseSync(storePath);
+  const slot = Buffer.from('sand-live-conversation-root-v1__').toString('hex');
+  const rawRoot = Buffer.from('existing root'), outRoot = Buffer.from('verified root');
+  const saved = Buffer.from('existing prompt'), imported = Buffer.from('imported text');
+  try {
+    sql.prepare('ATTACH DATABASE ? AS graph').run(graphPath);
+    sql.exec(`CREATE TABLE main.kv(key TEXT PRIMARY KEY,value TEXT);
+      INSERT INTO main.kv VALUES ('other','preserve'),('unreadState','{"lastActivityAt":1}');
+      CREATE TABLE graph.blobs(id TEXT PRIMARY KEY,data BLOB);
+      CREATE TRIGGER fail_unread BEFORE UPDATE ON main.kv WHEN OLD.key='unreadState'
+        BEGIN SELECT RAISE(ABORT, 'fixture unread write failed'); END;`);
+    const put = sql.prepare('INSERT INTO graph.blobs VALUES (?,?)');
+    put.run(slot, rawRoot); put.run(digest(saved), saved);
+    const params = { storePath, expectedStoreSHA: digest(fs.readFileSync(storePath)), rawRoot, outRoot,
+      added: new Map([[digest(imported), imported]]), oldGraph: { [slot]: digest(rawRoot), [digest(saved)]: digest(saved) },
+      kvBefore: sql.prepare('SELECT key,value FROM main.kv ORDER BY key').all(), updatedUnread: { lastActivityAt: 2 } };
+    const snapshot = () => [storePath, graphPath].map(file => fs.readFileSync(file));
+    const before = snapshot();
+    assert.throws(() => commitHistoryTail(sql, params), /fixture unread write failed/);
+    assert.deepEqual(snapshot(), before);
+    assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM graph.blobs').get().n, 2);
+
+    sql.exec('DROP TRIGGER fail_unread');
+    params.expectedStoreSHA = digest(fs.readFileSync(storePath));
+    const graph = commitHistoryTail(sql, params);
+    assert.equal(graph[slot], digest(outRoot));
+    assert.equal(graph[digest(rawRoot)], digest(rawRoot));
+    assert.equal(graph[digest(saved)], digest(saved));
+    assert.equal(graph[digest(imported)], digest(imported));
+    const { value } = sql.prepare("SELECT value FROM main.kv WHERE key='unreadState'").get();
+    assert.deepEqual(JSON.parse(value), { lastActivityAt: 2 });
+    assert.deepEqual(fs.readdirSync(folder).sort(), ['.openbot-detached-history-tail.json', 'conversation-blobs.db', 'store.db']);
+  } finally { sql.close(); }
 });

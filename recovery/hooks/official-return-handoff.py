@@ -362,10 +362,30 @@ class FreshReturn(Capture):
                 raise RuntimeError('Return historical wake metadata requires review')
         return self.tail.literal(value)
 
+    def check_return_dates(self, store, entries):
+        limit = self.tail.MAX_DATE_MS
+        for entry in entries:
+            for key in ('timestampMs', 'sentWhileOfflineAtMs'):
+                if key in entry:
+                    value = entry[key]
+                    if type(value) not in (int, float) or not -limit <= value <= limit:
+                        raise RuntimeError('Return store contains an unrenderable ' + key)
+        with self.tail.db(store, True) as db:
+            state = db.execute("SELECT value FROM kv WHERE key='unreadState'").fetchone()
+        if state is None:
+            return
+        try:
+            unread = json.loads(state[0])
+        except (TypeError, ValueError):
+            raise RuntimeError('Return store unread state is malformed') from None
+        if not isinstance(unread, dict) or not self.tail.valid_timestamp(unread.get('lastActivityAt', 0)):
+            raise RuntimeError('Return store contains an unrenderable unread activity timestamp')
+
     def union(self, entry, folder, sources, mapping):
         terminal = entry['newId']; base = folder/'sources'/terminal/'store.db'
         store = folder/'store.db'; self.tail.snapshot(base, store)
         current = self.validator.db_entries(store)
+        self.check_return_dates(store, current)
         published = next(self.source_values(s) for s in sources if s['agentId']==terminal and s['kind']=='platform')
         if published[:len(current)] != current:
             raise RuntimeError('Current Local published prefix is incomplete or divergent')
@@ -593,19 +613,23 @@ class FreshReturn(Capture):
 
     def install(self, entry):
         import shutil
-        source=pathlib.Path(entry['returnFolder'])/'sources'/entry['oldId']
+        folder = pathlib.Path(entry['returnFolder'])
+        store = folder/'store.db'
+        # Resumed intents can contain a store staged before the date checks.
+        self.check_return_dates(store, self.validator.db_entries(store))
+        source=folder/'sources'/entry['oldId']
         target=self.root/'agents'/entry['newId']
         if target.exists():
             marker=json.loads(self.tail.owned(target/'.openbot-official-return.json'))
             if marker!={'requestId':self.state['requestId'],'receipt':entry['historyMergeReceipt']}:
                 raise RuntimeError('Return destination already exists outside this request')
-            if (self.tail.graph(target/'conversation-blobs.db')!=self.tail.graph(pathlib.Path(entry['returnFolder'])/'conversation-blobs.db') or
-                    self.tail.rows(target/'store.db')!=self.tail.rows(pathlib.Path(entry['returnFolder'])/'store.db') or
+            if (self.tail.graph(target/'conversation-blobs.db')!=self.tail.graph(folder/'conversation-blobs.db') or
+                    self.tail.rows(target/'store.db')!=self.tail.rows(store) or
                     json.loads(self.tail.owned(target/'settings.json')).get('hiddenFromSidebar') is not True or
                     any(json.loads(self.tail.owned(p)).get('enabled') is not False for p in(target/'automations').rglob('automation.json'))):
                 raise RuntimeError('Prepared return destination changed; never overwrite it')
             return
-        temp=pathlib.Path(entry['returnFolder'])/('install-agent-'+uuid.uuid4().hex)
+        temp=folder/('install-agent-'+uuid.uuid4().hex)
         shutil.copytree(source,temp)
         profile=json.loads(self.tail.owned(temp/'profile.json'))
         for key in ('id','agentId','legacyAgentId'):
@@ -626,11 +650,11 @@ class FreshReturn(Capture):
         if entry.get('returnRoutineAuthority'):
             authority=json.loads(self.validator.referenced(self.r.read()['backup'],entry['returnRoutineAuthority']))
             for relative in authority.get('materialized',[]):
-                source=pathlib.Path(entry['returnFolder'])/relative
+                source=folder/relative
                 destination=temp/relative;destination.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                 shutil.copyfile(source,destination);destination.chmod(0o600)
         for name in ('store.db','conversation-blobs.db'):
-            shutil.copyfile(pathlib.Path(entry['returnFolder'])/name,temp/name)
+            shutil.copyfile(folder/name,temp/name)
         self.tail.write(temp/'.openbot-official-return.json',{'requestId':self.state['requestId'],'receipt':entry['historyMergeReceipt']},True)
         (temp/'.openbot-local-copy').write_text(entry['oldId']+'\n');(temp/'.openbot-local-copy').chmod(0o600)
         entry['copyProof']={'transcriptEntries':len(self.validator.db_entries(temp/'store.db')),

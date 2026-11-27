@@ -200,6 +200,58 @@ class FreshReturnTests(unittest.TestCase):
         self.assertEqual(len(self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')), 2)
         self.assert_protected(before)
 
+    def test_temporal_drift_rejects_invalid_checkpoint_dates_and_retries(self):
+        self.server_transcripts[fleet.OLD] = cloud([self.first])
+        self.roster[1]['harness'] = 'temporal'
+        journal = self.r.read()
+        first = {**self.first, 'agentId': fleet.NEW}
+        limit = self.builder.tail.MAX_DATE_MS
+        for key, bad_date in (('timestampMs', limit + 1), ('sentWhileOfflineAtMs', -limit - 1),
+                              ('timestampMs', None), ('timestampMs', True)):
+            with self.subTest(key=key, bad_date=bad_date):
+                current = [first, {**self.local, key: bad_date}]
+                self.set_rows(self.target, current)
+                self.server_transcripts[fleet.NEW] = cloud(current)
+                before = self.protected()
+                with self.assertRaisesRegex(RuntimeError, 'unrenderable ' + key):
+                    self.builder.run()
+                self.assertEqual(self.r.read(), journal)
+                self.assertEqual(self.checkpoint_calls, [])
+                self.assertEqual(self.append_calls, [])
+                self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
+                self.assert_protected(before)
+
+        undated = {key: value for key, value in self.local.items() if key != 'timestampMs'}
+        historical = {**self.local, 'id': 'pre-epoch-checkpoint', 'timestampMs': -limit}
+        current = [first, undated, historical]
+        self.set_rows(self.target, current)
+        self.server_transcripts[fleet.NEW] = cloud(current)
+        before = self.protected()
+        entry = self.builder.run()['entries'][0]
+        installed = self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')
+        self.assertEqual(installed, [{**event, 'agentId': entry['newId']} for event in current])
+        self.assert_protected(before)
+
+    def test_resume_refuses_older_prepared_return_with_invalid_unread_date(self):
+        with contextlib.closing(sqlite3.connect(self.target / 'store.db')) as db:
+            unread = {'lastActivityAt': self.builder.tail.MAX_DATE_MS + 1}
+            db.execute('INSERT OR REPLACE INTO kv VALUES (?, ?)', ('unreadState', json.dumps(unread)))
+            db.commit()
+        before = self.protected()
+        journal = self.r.read()
+        with (mock.patch.object(self.builder, 'check_return_dates'),
+              mock.patch.object(self.builder, 'install', side_effect=RuntimeError('interrupted before install'))):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted before install'):
+                self.builder.run()
+        self.assertIn('preparedIntent', json.loads((self.root / H.STATE).read_bytes()))
+
+        with self.assertRaisesRegex(RuntimeError, 'unrenderable unread activity timestamp'):
+            self.builder.run()
+
+        self.assertEqual(self.r.read(), journal)
+        self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
+        self.assert_protected(before)
+
     def test_actual_temporal_current_source_keeps_advanced_local_checkpoint_and_cloud_tail(self):
         self.roster[1]['harness'] = 'temporal'
         self.live_listing = [{'id': fleet.NEW, 'harness': 'temporal', 'isRunning': False, 'isRunningTurn': False}]

@@ -644,6 +644,46 @@ class MigrationVerificationTests(unittest.TestCase):
             callback.assert_not_called()
         return output.getvalue()
 
+    def replace_staged_messages(self, *messages):
+        with contextlib.closing(sqlite3.connect(self.path(MEMBER, 'store.db'))) as conn, conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+            conn.execute('DELETE FROM transcript_entries')
+            conn.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',
+                             [(i, message['id'], json.dumps(message)) for i, message in enumerate(messages, 1)])
+
+    def test_verify_rejects_an_invalid_date_in_an_existing_staged_copy(self):
+        message = {'id': 'archived-message', 'timestampMs': 8_640_000_000_000_001, 'content': 'Saved message'}
+        self.replace_staged_messages(message)
+        self.verify("Invalid timestampMs in transcript entry 'archived-message'")
+        message.pop('timestampMs')
+        self.replace_staged_messages(message, {'id': 'earlier-date', 'timestampMs': -1})
+        self.verify()
+
+    def test_finalize_validates_staged_dates_before_room_or_platform_updates(self):
+        self.journal['entries'][0]['finalized'] = False
+        self.journal['deliveryVerified'] = {'agentId': MEMBER}
+        self.save(self.journal_path, self.journal)
+        self.plan.side_effect = None
+        self.plan.return_value = self.journal
+        rooms = self.start_mock('_restore_room_members', side_effect=AssertionError('Room recovery reached'))
+        with MODULE.migration_lock():
+            pass
+        message = {'id': 'archived-message', 'timestampMs': 8_640_000_000_000_001, 'content': 'Saved message'}
+        self.replace_staged_messages(message)
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "Invalid timestampMs in transcript entry 'archived-message'"):
+            MODULE.finalize()
+        rooms.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+        message.pop('timestampMs')
+        self.replace_staged_messages(message)
+        with self.assertRaisesRegex(AssertionError, 'Room recovery reached'):
+            MODULE.finalize()
+        rooms.assert_called_once_with(self.journal)
+        for callback in (self.rpc, self.gateway, self.write, self.atomic):
+            callback.assert_not_called()
+
     def test_unregistered_box_copies_require_no_platform_lookup(self):
         self.verify()
         self.update_profile(serverId=None)

@@ -247,6 +247,23 @@ def fetch_transcript(old, backup):
     return rows
 
 
+def validate_transcript_date(entry):
+    if not isinstance(entry, dict):
+        return
+    # Missing dates keep the merge's existing fallback order.
+    timestamp = entry.get('timestampMs', 0)
+    if (type(timestamp) not in (int, float) or
+            not -MAX_TRANSCRIPT_TIMESTAMP_MS <= timestamp <= MAX_TRANSCRIPT_TIMESTAMP_MS):
+        raise ValueError('Invalid timestampMs in transcript entry ' + repr(entry.get('id')))
+
+
+def validate_staged_transcript_dates(conn):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transcript_entries'").fetchone():
+        return
+    for (raw,) in conn.execute('SELECT entry FROM transcript_entries'):
+        validate_transcript_date(json.loads(raw))
+
+
 def copy_agent(old, new, mapping, journal):
     spec = importlib.util.spec_from_file_location('fleet_state_merge',
         pathlib.Path(__file__).with_name('fleet-state-merge.py'))
@@ -327,12 +344,7 @@ def copy_agent(old, new, mapping, journal):
             local = [json.loads(row[0]) for row in conn.execute('SELECT entry FROM transcript_entries ORDER BY seq')]
             cloud = [json.loads(base64.b64decode(row['body'], validate=True)) for row in remote]
             for entry in itertools.chain(local, cloud):
-                if isinstance(entry, dict):
-                    # Missing dates keep the merge's existing fallback order.
-                    timestamp = entry.get('timestampMs', 0)
-                    if (type(timestamp) not in (int, float) or
-                            not -MAX_TRANSCRIPT_TIMESTAMP_MS <= timestamp <= MAX_TRANSCRIPT_TIMESTAMP_MS):
-                        raise ValueError('Invalid timestampMs in transcript entry ' + repr(entry.get('id')))
+                validate_transcript_date(entry)
             merged, collisions = merger.merge_entries({'local': local, 'platform': cloud}, mapping)
             ordered = [(record['entry']['id'], json.dumps(record['entry'], ensure_ascii=False, separators=(',', ':')))
                        for record in merged]
@@ -572,6 +584,14 @@ def _finalize():
         raise RuntimeError('All copies must be staged and verified before finalizing')
     if not journal.get('deliveryVerified'):
         raise RuntimeError('Record successful local gateway delivery before finalizing')
+    if not effects_completed:
+        # Earlier versions could stage a store with a date that clients cannot render.
+        for entry in journal['entries']:
+            if entry.get('finalized'):
+                continue
+            database = SD / 'agents' / entry['newId'] / 'store.db'
+            with contextlib.closing(sqlite3.connect(database.absolute().as_uri() + '?mode=ro', uri=True)) as conn:
+                validate_staged_transcript_dates(conn)
     rooms = _restore_room_members(journal)
     unresolved = [room['agentId'] for room in rooms if room['status'] == 'unresolved']
     if unresolved:
@@ -668,6 +688,10 @@ def verify():
                 metadata = conn.execute("SELECT value FROM kv WHERE key='metadata'").fetchone()
                 if metadata and json.loads(bytes.fromhex(metadata[0])).get('agentId') != entry['newId']:
                     bad.append((entry['name'], 'metadata identity mismatch'))
+                try:
+                    validate_staged_transcript_dates(conn)
+                except ValueError as error:
+                    bad.append((entry['name'], str(error)))
         except (sqlite3.Error, ValueError, TypeError):
             bad.append((entry['name'], 'SQLite verification failed'))
     protected = journal.get('protectedProfiles', {})

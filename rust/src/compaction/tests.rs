@@ -517,12 +517,14 @@ async fn completed_chunk_resumes_after_restart_without_resending_it() {
         sent
     );
     assert!(read_state(dir.path())["pending"].is_null());
-    assert!(
+    // The completed brief is published before the scratch transcript is removed.
+    wait_for(|| {
         fs::read_dir(dir.path().join("openbot/compact-state"))
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().ends_with(".transcript"))
-    );
+    })
+    .await;
     compactor.stop();
     runtime.stop().await;
     upstream.stop().await;

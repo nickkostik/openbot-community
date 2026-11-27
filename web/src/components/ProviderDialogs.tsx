@@ -39,17 +39,20 @@ export function EditProviderDialog({
   open,
   onClose,
   provider,
+  hasCredential,
   busy,
   onSave,
 }: {
   open: boolean;
   onClose: () => void;
   provider: Provider | null;
+  hasCredential: boolean;
   busy?: boolean;
-  onSave: (name: string, origin: string, apiType: ApiType) => Promise<void>;
+  onSave: (name: string, origin: string, apiType: ApiType, secret?: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [origin, setOrigin] = useState("");
+  const [secret, setSecret] = useState("");
   const [apiType, setApiType] = useState<ApiType>("chat-completions");
   const [error, setError] = useState<string | null>(null);
 
@@ -57,10 +60,15 @@ export function EditProviderDialog({
     if (open && provider) {
       setName(provider.name);
       setOrigin(provider.origin);
+      setSecret("");
       setApiType(provider.apiType ?? "chat-completions");
       setError(null);
     }
   }, [open, provider]);
+
+  const nextSite = URL.canParse(origin.trim()) ? new URL(origin.trim()).origin : null;
+  const savedSite = provider && URL.canParse(provider.origin) ? new URL(provider.origin).origin : null;
+  const needsCredential = hasCredential && nextSite !== null && nextSite !== savedSite;
 
   const submit = async () => {
     const n = name.trim();
@@ -73,8 +81,12 @@ export function EditProviderDialog({
       setError("Base URL is required.");
       return;
     }
+    if (needsCredential && !secret.trim()) {
+      setError("Enter a credential for the new endpoint.");
+      return;
+    }
     setError(null);
-    await onSave(n, o, apiType);
+    await onSave(n, o, apiType, needsCredential ? secret.trim() : undefined);
   };
 
   return (
@@ -98,6 +110,11 @@ export function EditProviderDialog({
           <Field label="Base URL" htmlFor="ep-origin" helper="Trailing slash is stripped.">
             <Input id="ep-origin" mono value={origin} onChange={(e) => setOrigin(e.target.value)} />
           </Field>
+          {needsCredential ? (
+            <Field label="Credential for the new endpoint" htmlFor="ep-key">
+              <PasswordInput id="ep-key" value={secret} onChange={setSecret} />
+            </Field>
+          ) : null}
           <Field label="API type" htmlFor="ep-api-type">
             <select id="ep-api-type" className="input" value={apiType} onChange={(e) => setApiType(e.target.value as ApiType)}>
               <option value="chat-completions">Chat Completions</option>

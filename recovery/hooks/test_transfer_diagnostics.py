@@ -21,7 +21,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.root = pathlib.Path(temp.name)
         (self.root / 'openbot-mode').write_text('custom')
         self.plan = {'agents': {'*': {'providerId': 'opencode-2', 'modelId': 'muse'}}, 'catalog': {
-            'providers': [{'id': 'opencode-2', 'origin': 'https://opencode.ai/zen/go/v1'}],
+            'providers': [{'id': 'opencode-2', 'origin': 'https://opencode.ai/inference/go'}],
             'models': [{'id': 'opencode-2:muse', 'providerId': 'opencode-2', 'slug': 'muse', 'reasoningLevels': ['default', 'low', 'medium', 'high', 'xhigh'], 'activeReasoning': 'xhigh', 'maxOutputTokens': 65536, 'contextTokens': 1048576, 'catalogLimits': {'maxOutputTokens':131072}}]}}
         self.save_plan()
         self.state = {'jobId': '00000000-0000-4000-8000-000000000004', 'phase': 'review-needed',
@@ -311,11 +311,20 @@ console.log(JSON.stringify({wire:converters.chatToResponses(body), savedParamete
         marker.touch()
         self.assertEqual(m.run(self.root, now=1000)['reason'], 'opted-out')
         marker.unlink()
-        for origin in ('https://n5.example/v1', 'http://127.0.0.1:9465/v1', 'https://opencode.ai/zen/v1', 'https://opencode.ai/zen/go/v1?key=secret'):
+        for origin in (
+            'https://n5.example/v1', 'http://127.0.0.1:9465/v1', 'https://opencode.ai/zen/v1',
+            'https://opencode.ai/inference/go?key=secret', 'https://opencode.ai/zen/go/v1?key=secret',
+        ):
             self.plan['catalog']['providers'][0]['origin'] = origin
             self.save_plan()
             self.assertEqual(m.run(self.root, now=1000)['reason'], 'unsupported-selected-route')
         self.request.assert_not_called()
+
+    def test_legacy_go_origin_still_uses_the_selected_account(self):
+        self.plan['catalog']['providers'][0]['origin'] = 'https://opencode.ai/zen/go/v1'
+        self.save_plan()
+        self.assertEqual(m.run(self.root, now=1000)['status'], 'available')
+        self.assertEqual(self.request.call_args.args[0], 'opencode-2:muse')
 
     def test_missing_or_ambiguous_effort_never_makes_a_model_call(self):
         for levels in (None, ['default'], ['low','low']):

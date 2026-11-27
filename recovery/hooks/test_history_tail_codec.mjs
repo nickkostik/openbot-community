@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validatePlan, regularPath, detachedDirectory, reviewedSource, allocatorSlice,
-  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier, planFileEvidence } from './history-tail-codec.mjs';
+  installDenials, digest, LIMITS, REVIEWED, nativeContextJson, activityFrontier, planFileEvidence, commitHistoryTail } from './history-tail-codec.mjs';
 
 const require = createRequire(import.meta.url);
 const source = fileURLToPath(new URL('./history-tail-codec.mjs', import.meta.url));
@@ -171,25 +171,41 @@ test('native optional undefined properties normalize without losing defined cont
   }
 });
 
-test('activity frontier never moves backward or coerces invalid native state', () => {
+test('activity frontier preserves valid times and excludes unrenderable dates', () => {
   assert.equal(activityFrontier(3000, 2000), 3000);
   assert.equal(activityFrontier(2000, 3000), 3000);
   assert.equal(activityFrontier(3000, 3000), 3000);
   assert.equal(activityFrontier(3.5, 2.5), 3.5);
-  for (const invalid of [undefined, null, '9000', true, NaN, Infinity, -Infinity, -1]) {
+  assert.equal(activityFrontier(8_640_000_000_000_000, 3000), 8_640_000_000_000_000);
+  for (const invalid of [undefined, null, '9000', true, NaN, Infinity, -Infinity, -1,
+    8_640_000_000_000_001, Number.MAX_SAFE_INTEGER, 180_000_000_000_000_000]) {
     assert.equal(activityFrontier(invalid, 2000), 2000);
     assert.equal(activityFrontier(2000, invalid), 2000);
     assert.equal(activityFrontier(invalid, invalid), 0);
   }
 });
 
-test('native finite fractional timestamps remain exact and non-numeric timestamps refuse', () => {
-  for (const value of [0, 1.25, 1792440417263.125, Number.MAX_SAFE_INTEGER]) {
+test('native fractional timestamps remain exact within the renderer date range', () => {
+  for (const value of [0, 1.25, 1792440417263.125, 8_640_000_000_000_000]) {
     const input = plan(); input.records[0].timestampMs = value;
     assert.equal(validatePlan(input).records, 1); assert.equal(input.records[0].timestampMs, value);
   }
-  for (const value of [NaN, Infinity, -Infinity, -1, true, false, null, '1000.5', Number.MAX_SAFE_INTEGER + 1]) {
+  for (const value of [NaN, Infinity, -Infinity, -1, true, false, null, '1000.5',
+    8_640_000_000_000_001, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
     const input = plan(); input.records[0].timestampMs = value;
+    assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
+  }
+});
+
+test('a reviewed undated row keeps its missing date distinct from an invalid supplied date', () => {
+  const input = plan(), row = input.records[0];
+  delete row.timestampMs;
+  assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
+  row.timestampState = 'missing';
+  assert.equal(validatePlan(input).records, 1);
+  assert.equal(activityFrontier(6000, row.timestampMs), 6000);
+  for (const supplied of [undefined, null, 0, false, 8_640_000_000_000_001]) {
+    row.timestampMs = supplied;
     assert.throws(() => validatePlan(input), /PLAN_RECORD_PROVENANCE/);
   }
 });
@@ -205,4 +221,43 @@ test('plan-file proof binds exact Python JSON bytes rather than normalized JS nu
   const mismatched = structuredClone(parsed); mismatched.records[0].text = 'Different';
   assert.throws(() => planFileEvidence(file, mismatched), /PLAN_FILE_MISMATCH/);
   assert.equal(planFileEvidence('-', parsed).sha256, null);
+});
+
+test('failed unread update rolls back the detached context root and allows a retry', t => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { folder, write } = fixture(t);
+  const storePath = write('store.db', ''), graphPath = write('conversation-blobs.db', '');
+  const sql = new DatabaseSync(storePath);
+  const slot = Buffer.from('sand-live-conversation-root-v1__').toString('hex');
+  const rawRoot = Buffer.from('existing root'), outRoot = Buffer.from('verified root');
+  const saved = Buffer.from('existing prompt'), imported = Buffer.from('imported text');
+  try {
+    sql.prepare('ATTACH DATABASE ? AS graph').run(graphPath);
+    sql.exec(`CREATE TABLE main.kv(key TEXT PRIMARY KEY,value TEXT);
+      INSERT INTO main.kv VALUES ('other','preserve'),('unreadState','{"lastActivityAt":1}');
+      CREATE TABLE graph.blobs(id TEXT PRIMARY KEY,data BLOB);
+      CREATE TRIGGER fail_unread BEFORE UPDATE ON main.kv WHEN OLD.key='unreadState'
+        BEGIN SELECT RAISE(ABORT, 'fixture unread write failed'); END;`);
+    const put = sql.prepare('INSERT INTO graph.blobs VALUES (?,?)');
+    put.run(slot, rawRoot); put.run(digest(saved), saved);
+    const params = { storePath, expectedStoreSHA: digest(fs.readFileSync(storePath)), rawRoot, outRoot,
+      added: new Map([[digest(imported), imported]]), oldGraph: { [slot]: digest(rawRoot), [digest(saved)]: digest(saved) },
+      kvBefore: sql.prepare('SELECT key,value FROM main.kv ORDER BY key').all(), updatedUnread: { lastActivityAt: 2 } };
+    const snapshot = () => [storePath, graphPath].map(file => fs.readFileSync(file));
+    const before = snapshot();
+    assert.throws(() => commitHistoryTail(sql, params), /fixture unread write failed/);
+    assert.deepEqual(snapshot(), before);
+    assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM graph.blobs').get().n, 2);
+
+    sql.exec('DROP TRIGGER fail_unread');
+    params.expectedStoreSHA = digest(fs.readFileSync(storePath));
+    const graph = commitHistoryTail(sql, params);
+    assert.equal(graph[slot], digest(outRoot));
+    assert.equal(graph[digest(rawRoot)], digest(rawRoot));
+    assert.equal(graph[digest(saved)], digest(saved));
+    assert.equal(graph[digest(imported)], digest(imported));
+    const { value } = sql.prepare("SELECT value FROM main.kv WHERE key='unreadState'").get();
+    assert.deepEqual(JSON.parse(value), { lastActivityAt: 2 });
+    assert.deepEqual(fs.readdirSync(folder).sort(), ['.openbot-detached-history-tail.json', 'conversation-blobs.db', 'store.db']);
+  } finally { sql.close(); }
 });

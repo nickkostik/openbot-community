@@ -9,6 +9,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import heapq
 import importlib.util
 import json
 import os
@@ -18,6 +19,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from graphlib import CycleError, TopologicalSorter
 
 SD = pathlib.Path('/home/box/sand-data')
 
@@ -103,16 +105,39 @@ def branch_identifier(original,payload_sha,occupied):
     return compact_branch_identifier(legacy,occupied)
 
 
-def merge_entries(sources, mapping=None):
+def order_source_keys(source_orders, priorities):
+    """Use priority only among entries whose source predecessors are settled."""
+    graph = TopologicalSorter({key: () for key in priorities})
+    for sequence in source_orders:
+        for before, after in zip(sequence, sequence[1:]):
+            if before != after:
+                graph.add(after, before)
+    try:
+        graph.prepare()
+    except CycleError:
+        raise ValueError('The observed source orders contradict each other') from None
+    ready = []
+    while graph.is_active():
+        for key in graph.get_ready():
+            heapq.heappush(ready, (priorities[key], key))
+        _, key = heapq.heappop(ready)
+        yield key
+        graph.done(key)
+
+
+def merge_entries(sources, mapping=None, *, preserve_source_order=False):
     """Retain differing same-ID payloads; deduplicate exact normalized records.
 
 The result is an archival view with provenance, not a live automation inbox. IDs
 are deterministic across retries. No prompt text, tool result or timestamp is
 discarded; every original body is also retained in its branch snapshot.
+Staged transcript copies preserve the native sequence of each input.
 """
     mapping = mapping or {}
     groups = {}
+    source_orders = []
     for source, entries in sorted(sources.items()):
+        order = []
         for value in entries:
             if not isinstance(value, dict) or not isinstance(value.get('id'), str):
                 raise ValueError('Transcript entry has no string identity')
@@ -125,8 +150,11 @@ discarded; every original body is also retained in its branch snapshot.
             record = group.setdefault(key, {'entry': entry, 'sources': []})
             if source not in record['sources']:
                 record['sources'].append(source)
+            if preserve_source_order:
+                order.append((entry['id'], key))
+        source_orders.append(order)
     occupied = set(groups)
-    output, conflicts = [], 0
+    output, conflicts = {}, 0
     for original, variants in sorted(groups.items()):
         for index, (sha, record) in enumerate(sorted(variants.items())):
             aid = original
@@ -136,11 +164,14 @@ discarded; every original body is also retained in its branch snapshot.
                 aid = branch_identifier(original,sha,occupied)
                 occupied.add(aid)
                 conflicts += 1
-            output.append({'entry': {**record['entry'], 'id': aid},
-                           'originalEntryId': original, 'payloadSha256': sha,
-                           'sources': sorted(record['sources'])})
-    output.sort(key=lambda row: (row['entry'].get('timestampMs', 0), row['entry']['id']))
-    return output, conflicts
+            output[(original, sha)] = {'entry': {**record['entry'], 'id': aid},
+                                      'originalEntryId': original, 'payloadSha256': sha,
+                                      'sources': sorted(record['sources'])}
+    priorities = {key: (row['entry'].get('timestampMs', 0), row['entry']['id'])
+                  for key, row in output.items()}
+    ordered = (order_source_keys(source_orders, priorities) if preserve_source_order else
+               sorted(priorities, key=priorities.__getitem__))
+    return [output[key] for key in ordered], conflicts
 
 
 def read_entries(path):

@@ -11,7 +11,6 @@ import fcntl
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import pathlib
 import sqlite3
@@ -25,6 +24,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 MAX_ROWS = 128
 MAX_TEXT = 4 * 1024 * 1024
 MAX_ROUNDS = 8
+MAX_DATE_MS = 8_640_000_000_000_000
 REVIEWED_HOST_SHA = '74278c1ec791b38a235bf68e386dbbe86428bd2f9966baceb29a1173bc574dc3'
 FRESHNESS_ERROR = 'Source history changed after reviewed merge; incremental preservation required before activation'
 
@@ -147,17 +147,19 @@ def cloud_tail(rpc, source, capture):
     return {'generation': generation, 'entries': old + added}, added
 
 
+def valid_timestamp(value):
+    return type(value) in (int, float) and 0 <= value <= MAX_DATE_MS
+
+
 def literal(event):
     # This is deliberately narrower than the full native transcript schema.
     # Unknown fields may carry tools, recipients, attachments or failure state;
     # retaining their raw UI payload alone would not preserve their SDK meaning.
     common = {'id','kind','timestampMs'}
-    def timestamp(value):
-        return type(value) in (int,float) and 0 <= value <= 9007199254740991 and math.isfinite(value)
     def correlation(value):
         return isinstance(value,str) and 0 < len(value) <= 1024 and not any(ord(c)<32 for c in value)
     if (not isinstance(event,dict) or not isinstance(event.get('id'),str) or not event['id'] or
-            not timestamp(event.get('timestampMs'))):
+            ('timestampMs' in event and not valid_timestamp(event['timestampMs']))):
         raise RuntimeError('Tail requires a completed literal native text event')
     if event.get('kind') == 'message':
         metadata = {'requestId','clientNonce','batchId','sentWhileOfflineAtMs'}
@@ -165,7 +167,7 @@ def literal(event):
             raise RuntimeError('Unknown message semantics require explicit preservation review')
         if (event.get('isStreaming') is not False or any(not correlation(event[key]) for key in
                 ('requestId','clientNonce','batchId') if key in event) or
-                ('sentWhileOfflineAtMs' in event and not timestamp(event['sentWhileOfflineAtMs']))):
+                ('sentWhileOfflineAtMs' in event and not valid_timestamp(event['sentWhileOfflineAtMs']))):
             raise RuntimeError('Incomplete or unknown native message metadata requires review')
         if event.get('role') in ('user','assistant') and isinstance(event.get('content'),str):
             return event['role'],event['content']
@@ -179,6 +181,16 @@ def literal(event):
                 message.get('type')=='text' and isinstance(message.get('content'),str)):
             return 'assistant',message['content']
     raise RuntimeError('Tail format needs explicit preservation review')
+
+
+def literal_record(event, identifier, role, text):
+    record = {'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
+              'kind': event['kind'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True}
+    if 'timestampMs' in event:
+        record['timestampMs'] = event['timestampMs']
+    else:
+        record['timestampState'] = 'missing'
+    return record
 
 
 def append_rows(r, mapping, store, additions):
@@ -196,8 +208,7 @@ def append_rows(r, mapping, store, additions):
             value['id'] = identifier; occupied.add(identifier); sequence += 1
             connection.execute('INSERT INTO transcript_entries(seq,id,entry)VALUES(?,?,?)', (sequence, identifier, encoded(value).decode()))
             projections.append({'sourceId': source['agentId'], 'sourceKind': 'platform', 'sourceEntryId': event['id'], 'targetEntryId': identifier})
-            records.append({'id': identifier, 'originalId': event['id'], 'role': role, 'text': text,
-                            'kind': event['kind'], 'timestampMs': event['timestampMs'], 'sourcePayloadSha256': sha(encoded(event)), 'literalText': True})
+            records.append(literal_record(event, identifier, role, text))
             text_bytes += len(text.encode())
         if len(records) > MAX_ROWS or text_bytes > MAX_TEXT: raise RuntimeError('Tail exceeds bounded import')
         connection.commit()
@@ -439,6 +450,21 @@ class TailRepair:
             raise RuntimeError('Tail target settings or selected route changed')
         receipt = json.loads(self.validator.referenced(journal['backup'], intent['oldReceipt']))
         self.local_sources(journal, entry, receipt); self.fresh_cloud(intent['sourceHeads']); self.require()
+        before_rows, planned_rows = rows(intent['beforeStore']['path']), rows(intent['plannedStore']['path'])
+        if planned_rows[:len(before_rows)] != before_rows:
+            raise RuntimeError('Prepared tail rewrites published prefix')
+        added_rows = planned_rows[len(before_rows):]
+        before_kv, planned_kv = kv(intent['beforeStore']['path']), kv(intent['plannedStore']['path'])
+        # Prepared snapshots from older versions can contain dates outside the renderer range.
+        for _, _, raw in added_rows:
+            event = json.loads(raw)
+            if not isinstance(event, dict) or any(
+                key in event and not valid_timestamp(event[key]) for key in ('timestampMs', 'sentWhileOfflineAtMs')
+            ):
+                raise RuntimeError('Prepared tail contains an unrenderable timestamp')
+        unread = json.loads(dict(planned_kv).get('unreadState', '{}'))
+        if not isinstance(unread, dict) or not valid_timestamp(unread.get('lastActivityAt', 0)):
+            raise RuntimeError('Prepared tail contains an unrenderable timestamp in unread state')
         # Legitimate idempotent hide ACK, never claimed as server readback.
         self.r.m.rpc('SetGrokBotAgentClientState', {'agentId': entry['newId'], 'hiddenFromSidebar': True})
         write(marker, {'phase': 'prepared', 'intent': intent_ref, 'serverHiddenAcknowledgedAtMs': int(time.time() * 1000)})
@@ -446,8 +472,6 @@ class TailRepair:
         target = self.root / 'agents' / entry['newId']
         if {name: database_identity(target / name) for name in ('store.db','conversation-blobs.db')} != intent['databaseInodes']:
             raise RuntimeError('Live tail database inode changed')
-        before_rows, planned_rows = rows(intent['beforeStore']['path']), rows(intent['plannedStore']['path'])
-        before_kv, planned_kv = kv(intent['beforeStore']['path']), kv(intent['plannedStore']['path'])
         before_graph, planned_graph = graph(intent['beforeSDK']['path']), graph(intent['plannedSDK']['path'])
         with self.r.m.migration_lock():
             if graph(target / 'conversation-blobs.db') not in (before_graph, planned_graph): raise RuntimeError('Tail SDK CAS failed')
@@ -458,8 +482,7 @@ class TailRepair:
                 if (actual_rows, actual_kv) not in ((before_rows, before_kv), (planned_rows, planned_kv)):
                     raise RuntimeError('Tail UI CAS failed')
                 if actual_rows == before_rows:
-                    if planned_rows[:len(before_rows)] != before_rows: raise RuntimeError('Prepared tail rewrites published prefix')
-                    sql.executemany('INSERT INTO transcript_entries(seq,id,entry)VALUES(?,?,?)', planned_rows[len(before_rows):])
+                    sql.executemany('INSERT INTO transcript_entries(seq,id,entry)VALUES(?,?,?)', added_rows)
                     changes = [(value, key) for key, value in planned_kv if dict(before_kv).get(key) != value]
                     if any(key != 'unreadState' for _, key in changes): raise RuntimeError('Tail changes unrelated UI state')
                     sql.executemany('UPDATE kv SET value=? WHERE key=?', changes)

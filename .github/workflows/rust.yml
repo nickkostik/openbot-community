@@ -1,0 +1,19 @@
+name: rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.95.0 fmt --all --check
+      - run: cargo +1.95.0 clippy --locked --all-targets -- -D warnings
+      - run: cargo +1.95.0 test --locked

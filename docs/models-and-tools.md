@@ -71,7 +71,7 @@ Automatic saved-provider discovery defaults to every six hours while the unified
 
 ## Compaction
 
-Compaction aims to trigger above **85%** estimated context and trim toward **35%**, keeping leading instructions and the latest complete message/tool group. Token estimates are not a provider tokenizer. Large tool schemas or a protected tool group can keep the result above the target.
+Compaction trims toward **35%** estimated input. Its trigger is at most **85%** of the model window and can move down to 35% to reserve room for the requested completion. Leading instructions and the latest user turn and tool exchange stay together. If protected input fills more of the window, the hop reduces the completion allowance to fit the estimated space available. Provider usage reports actual token counts.
 
 The bot's selected model is the primary summarizer. A recognized context overflow can use a configured approved wider route: DeepSeek 4.1 Flash, GPT-6.1 Sol, or Muse 1.3 Contributor/Max. GPT/Muse fallback effort prefers supported Max, then XHigh. Each account keeps its own credentials and endpoint. Kimi K3 is excluded from compaction, including when it is selected for chat.
 

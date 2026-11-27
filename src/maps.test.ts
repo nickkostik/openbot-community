@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const mapsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../payload/provider-maps.cjs");
 const maps = require(mapsPath) as {
+  documentedReasoningPolicy(modelId: string, baseUrl: string): { levels: readonly string[] } | undefined;
   applyProviderReasoningControls: (
     body: Record<string, unknown>,
     ctx: { modelId: string; baseUrl: string; apiType?: string; parameters: readonly { id: string; value: string }[] },
@@ -36,6 +37,36 @@ test("Kimi Code Pro drops inherited Off and maps explicit allowed reasoning", ()
     maps.applyProviderReasoningControls(other, { modelId, baseUrl, parameters: [{ id: "thinking", value: "false" }] });
     assert.deepEqual(other.thinking, { type: "disabled" });
   }
+});
+
+test("Alibaba Token Plan GLM-5.2 offers Off and maps it to each native protocol", () => {
+  const model = "glm-5.2";
+  for (const baseUrl of [alibabaTokenPlan, legacyAlibabaTokenPlan + "/"]) {
+    assert.deepEqual(maps.documentedReasoningPolicy(model, baseUrl)?.levels, ["default", "none", "high", "max"]);
+    for (const [saved, effort] of [["none", "none"], ["medium", "high"], ["xhigh", "max"]] as const) {
+      for (const apiType of ["chat-completions", "responses"]) {
+        const body = { model, enable_thinking: false, thinking_budget: 512, reasoning_effort: "medium",
+          thinking: { type: "disabled", clear_thinking: false } };
+        maps.applyProviderReasoningControls(body, {
+          modelId: model, baseUrl, apiType, parameters: [{ id: "effort", value: saved }],
+        });
+        assert.deepEqual(body, apiType === "responses" ? { model, reasoning_effort: effort } : {
+          model, enable_thinking: effort !== "none", clear_thinking: false,
+          ...(effort === "none" ? {} : { reasoning_effort: effort }),
+        });
+      }
+    }
+  }
+  assert.equal(maps.documentedReasoningPolicy(model, "https://api.z.ai/api/paas/v4"), undefined);
+});
+
+test("Alibaba Token Plan GLM-5.2 keeps a native budget at Default", () => {
+  const model = "glm-5.2";
+  const body = { model, enable_thinking: true, thinking_budget: 512, clear_thinking: false };
+  maps.applyProviderReasoningControls(body, {
+    modelId: model, baseUrl: alibabaTokenPlan, apiType: "chat-completions", parameters: [],
+  });
+  assert.deepEqual(body, { model, enable_thinking: true, thinking_budget: 512, clear_thinking: false });
 });
 
 const zaiCodingPlan = "https://api.z.ai/api/coding/paas/v4";
@@ -83,7 +114,8 @@ test("the direct Z.AI GLM-5.3 rule preserves Off for GLM-5.2 and other endpoints
   }
 });
 
-const alibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+const alibabaTokenPlan = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+const legacyAlibabaTokenPlan = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
 test("direct Nemotron Bolt and Lightning use the native thinking switch", () => {
   const baseUrl = "https://integrate.api.nvidia.com/v1";
@@ -151,14 +183,19 @@ test("Alibaba Token Plan sends its native Off setting for Qwen 3.8 and Qwen4 Max
   }
 });
 
-test("Alibaba Token Plan applies selected Qwen effort without a conflicting wire budget", () => {
-  for (const [model, effort] of [["qwen3.8-flash", "medium"], ["qwen4-max", "high"]] as const) {
+test("Alibaba Token Plan applies selected Qwen effort on both direct hostnames", () => {
+  for (const [model, effort, origin] of [
+    ["qwen3.8-flash", "medium", alibabaTokenPlan],
+    ["qwen4-max", "high", alibabaTokenPlan],
+    ["qwen4-max", "none", legacyAlibabaTokenPlan],
+    ["qwen4-max", "high", legacyAlibabaTokenPlan],
+  ] as const) {
     const body: Record<string, unknown> = {
       model, reasoning_effort: "low", thinking: { type: "disabled" }, enable_thinking: false, thinking_budget: 4096,
     };
     maps.applyProviderReasoningControls(body, {
       modelId: model,
-      baseUrl: alibabaTokenPlan + "/",
+      baseUrl: origin + "/",
       parameters: [{ id: "effort", value: effort }],
     });
     assert.deepEqual(body, { model, reasoning_effort: effort });
@@ -173,6 +210,26 @@ test("Alibaba Token Plan keeps an explicit Qwen budget at the default setting", 
     parameters: [],
   });
   assert.deepEqual(body, { model: "qwen3.8-max", thinking_budget: 4096 });
+});
+
+test("Alibaba Token Plan GLM-5.3 uses native thinking and effort fields", () => {
+  for (const baseUrl of [alibabaTokenPlan, legacyAlibabaTokenPlan + "/"]) {
+    for (const [selected, incoming, expected] of [
+      ["low", "max", "low"], ["high", "low", "high"], ["max", "high", "max"],
+      ["default", "high", "high"], ["default", "medium", undefined], ["none", "none", undefined],
+    ] as const) {
+      const body: Record<string, unknown> = {
+        model: "glm-5.3", enable_thinking: false, reasoning_effort: incoming, thinking_budget: 4096,
+        thinking: { type: "disabled", clear_thinking: true }, clear_thinking: false,
+      };
+      maps.applyProviderReasoningControls(body, {
+        modelId: "glm-5.3", baseUrl, apiType: "chat-completions",
+        parameters: [{ id: "fast", value: "true" }, { id: "effort", value: selected }],
+      });
+      assert.deepEqual(body, { model: "glm-5.3", enable_thinking: true, clear_thinking: false,
+        ...(expected ? { reasoning_effort: expected } : {}) });
+    }
+  }
 });
 
 test("Alibaba Token Plan Qwen mapping does not apply to the same slug at another provider", () => {

@@ -730,13 +730,22 @@ test("new Go accounts enforce direct Go origins and Alibaba accounts require sub
     assert.throws(() => parseUiProviderSave({ ...go, origin }, paths(), zhipuCatalog()), /Go accounts must use/);
   }
   const alibabaPlans = [
+    ["alibaba-token-plan", "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"],
     ["alibaba-token-plan", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"],
     ["alibaba-coding-plan", "https://coding-intl.dashscope.aliyuncs.com/v1"],
   ] as const;
   for (const [familyId, origin] of alibabaPlans) {
     const account = { kind: "add-provider", familyId, origin, name: "Alibaba", secret: "sk-sp-plan-fixture" };
-    assert.equal(parseUiProviderSave(account, paths(), zhipuCatalog()).createdProviderId, familyId);
+    const saved = parseUiProviderSave(account, paths(), zhipuCatalog());
+    assert.equal(saved.createdProviderId, familyId);
+    assert.equal(saved.catalogWrite?.providers.find(row => row.id === familyId)?.origin, origin);
     assert.throws(() => parseUiProviderSave({ ...account, secret: "sk-payg-fixture" }, paths(), zhipuCatalog()), /sk-sp- subscription key/);
+  }
+  for (const origin of ["https://coding-intl.dashscope.aliyuncs.com/v1", "https://n5.example/v1",
+    "https://token-plan.maas.qwencloudapi.com.example/compatible-mode/v1"]) {
+    assert.throws(() => parseUiProviderSave({
+      kind: "add-provider", familyId: "alibaba-token-plan", name: "Alibaba", origin, secret: "sk-sp-plan-fixture",
+    }, paths(), zhipuCatalog()), /Token Plan accounts must use/);
   }
 });
 

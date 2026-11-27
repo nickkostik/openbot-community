@@ -46,6 +46,25 @@ def directory(path):
         raise RuntimeError('Return capture requires owned directories')
 
 
+def ordered_return_keys(merger, additions, source_orders):
+    """Preserve each source's append order and the chronology of dated entries."""
+    # The queue priority for an undated entry never becomes a saved date.
+    priorities = {key: value.get('timestampMs', -1) for key, value in additions.items()}
+    try:
+        order = list(merger.order_source_keys(source_orders, priorities))
+    except ValueError:
+        raise RuntimeError('Return source ordering requires review') from None
+
+    previous_date = None
+    for key in order:
+        timestamp = additions[key].get('timestampMs')
+        if timestamp is not None:
+            if previous_date is not None and timestamp < previous_date:
+                raise RuntimeError('Return source ordering requires review')
+            previous_date = timestamp
+        yield key
+
+
 class Capture:
     def __init__(self, recovery):
         self.recovery, self.r, self.root = recovery, recovery.r, recovery.root
@@ -362,15 +381,36 @@ class FreshReturn(Capture):
                 raise RuntimeError('Return historical wake metadata requires review')
         return self.tail.literal(value)
 
+    def check_return_dates(self, store, entries):
+        limit = self.tail.MAX_DATE_MS
+        for entry in entries:
+            for key in ('timestampMs', 'sentWhileOfflineAtMs'):
+                if key in entry:
+                    value = entry[key]
+                    if type(value) not in (int, float) or not -limit <= value <= limit:
+                        raise RuntimeError('Return store contains an unrenderable ' + key)
+        with self.tail.db(store, True) as db:
+            state = db.execute("SELECT value FROM kv WHERE key='unreadState'").fetchone()
+        if state is None:
+            return
+        try:
+            unread = json.loads(state[0])
+        except (TypeError, ValueError):
+            raise RuntimeError('Return store unread state is malformed') from None
+        if not isinstance(unread, dict) or not self.tail.valid_timestamp(unread.get('lastActivityAt', 0)):
+            raise RuntimeError('Return store contains an unrenderable unread activity timestamp')
+
     def union(self, entry, folder, sources, mapping):
         terminal = entry['newId']; base = folder/'sources'/terminal/'store.db'
         store = folder/'store.db'; self.tail.snapshot(base, store)
         current = self.validator.db_entries(store)
+        self.check_return_dates(store, current)
         published = next(self.source_values(s) for s in sources if s['agentId']==terminal and s['kind']=='platform')
         if published[:len(current)] != current:
             raise RuntimeError('Current Local published prefix is incomplete or divergent')
         last = max((value.get('timestampMs',0) for value in current), default=0)
         projections=[]; orders=[]; indexed={}; baseline=[]; occupied=set(); additions={}; literal_records={}; delta_sources=set()
+        tail_orders = []
         for value in current:
             normalized = self.r.merger.remap_transcript_owner(value, mapping)
             if value['id'] in occupied: raise RuntimeError('Current Local UI identifiers are ambiguous')
@@ -378,6 +418,7 @@ class FreshReturn(Capture):
             indexed[(value['id'], sha(encoded({k:v for k,v in normalized.items() if k!='id'})))] = value['id']
         for source in sources:
             values=self.source_values(source)
+            tail_order = []
             orders.append({'sourceId':source['agentId'], 'sourceKind':source['kind'], 'entryIds':[v['id'] for v in values]})
             if len({value['id'] for value in values}) != len(values):
                 raise RuntimeError('Return source has duplicate event identities')
@@ -388,21 +429,23 @@ class FreshReturn(Capture):
                     # Full envelopes are checked by the PR30 literal reader;
                     # no tools, peer destinations, rich payloads or streaming.
                     literal_records[key]=(*self.literal(value,source['agentId']),value)
-                    if value['timestampMs'] < last:
+                    if 'timestampMs' in value and value['timestampMs'] < last:
                         raise RuntimeError('Official return is not a completed literal append')
                     additions[key]=normalized
+                    tail_order.append(key)
                     if source['kind']=='platform': delta_sources.add(source['agentId'])
+            tail_orders.append(tail_order)
         if len(additions)>self.tail.MAX_ROWS:
             raise RuntimeError('Official return exceeds bounded literal import')
         records=[]; text_bytes=0
-        for key,value in sorted(additions.items(),key=lambda item:(item[1]['timestampMs'],item[0])):
+        for key in ordered_return_keys(self.r.merger, additions, tail_orders):
+            value = additions[key]
             role,text,original=literal_records[key]; identifier=value['id']
             if identifier in occupied or len(identifier.encode())>128:
                 identifier=self.r.merger.compact_branch_identifier(identifier+':'+sha(encoded(value)),occupied)
             occupied.add(identifier); indexed[key]=identifier
             baseline.append({**value,'id':identifier})
-            records.append({'id':identifier,'originalId':value['id'],'kind':value['kind'],'role':role,'text':text,
-                            'timestampMs':value['timestampMs'],'sourcePayloadSha256':sha(encoded(original)), 'literalText':True})
+            records.append(self.tail.literal_record(original, identifier, role, text))
             text_bytes+=len(text.encode())
         if text_bytes>self.tail.MAX_TEXT: raise RuntimeError('Official return exceeds literal byte bound')
         positions={value['id']:i for i,value in enumerate(baseline)}
@@ -593,19 +636,23 @@ class FreshReturn(Capture):
 
     def install(self, entry):
         import shutil
-        source=pathlib.Path(entry['returnFolder'])/'sources'/entry['oldId']
+        folder = pathlib.Path(entry['returnFolder'])
+        store = folder/'store.db'
+        # Resumed intents can contain a store staged before the date checks.
+        self.check_return_dates(store, self.validator.db_entries(store))
+        source=folder/'sources'/entry['oldId']
         target=self.root/'agents'/entry['newId']
         if target.exists():
             marker=json.loads(self.tail.owned(target/'.openbot-official-return.json'))
             if marker!={'requestId':self.state['requestId'],'receipt':entry['historyMergeReceipt']}:
                 raise RuntimeError('Return destination already exists outside this request')
-            if (self.tail.graph(target/'conversation-blobs.db')!=self.tail.graph(pathlib.Path(entry['returnFolder'])/'conversation-blobs.db') or
-                    self.tail.rows(target/'store.db')!=self.tail.rows(pathlib.Path(entry['returnFolder'])/'store.db') or
+            if (self.tail.graph(target/'conversation-blobs.db')!=self.tail.graph(folder/'conversation-blobs.db') or
+                    self.tail.rows(target/'store.db')!=self.tail.rows(store) or
                     json.loads(self.tail.owned(target/'settings.json')).get('hiddenFromSidebar') is not True or
                     any(json.loads(self.tail.owned(p)).get('enabled') is not False for p in(target/'automations').rglob('automation.json'))):
                 raise RuntimeError('Prepared return destination changed; never overwrite it')
             return
-        temp=pathlib.Path(entry['returnFolder'])/('install-agent-'+uuid.uuid4().hex)
+        temp=folder/('install-agent-'+uuid.uuid4().hex)
         shutil.copytree(source,temp)
         profile=json.loads(self.tail.owned(temp/'profile.json'))
         for key in ('id','agentId','legacyAgentId'):
@@ -626,11 +673,11 @@ class FreshReturn(Capture):
         if entry.get('returnRoutineAuthority'):
             authority=json.loads(self.validator.referenced(self.r.read()['backup'],entry['returnRoutineAuthority']))
             for relative in authority.get('materialized',[]):
-                source=pathlib.Path(entry['returnFolder'])/relative
+                source=folder/relative
                 destination=temp/relative;destination.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                 shutil.copyfile(source,destination);destination.chmod(0o600)
         for name in ('store.db','conversation-blobs.db'):
-            shutil.copyfile(pathlib.Path(entry['returnFolder'])/name,temp/name)
+            shutil.copyfile(folder/name,temp/name)
         self.tail.write(temp/'.openbot-official-return.json',{'requestId':self.state['requestId'],'receipt':entry['historyMergeReceipt']},True)
         (temp/'.openbot-local-copy').write_text(entry['oldId']+'\n');(temp/'.openbot-local-copy').chmod(0o600)
         entry['copyProof']={'transcriptEntries':len(self.validator.db_entries(temp/'store.db')),

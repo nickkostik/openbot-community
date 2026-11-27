@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sqlite3
+import tempfile
 import types
 import unittest
 import uuid
@@ -87,6 +88,42 @@ class CompletedEnvelopeTests(unittest.TestCase):
             with self.subTest(extra=extra),self.assertRaises(RuntimeError):T.literal({**event,**extra})
             with self.subTest(nested=extra),self.assertRaises(RuntimeError):T.literal({**event,'message':{**event['message'],**extra}})
 
+    def test_literal_dates_must_fit_the_renderer_range(self):
+        event = json.loads(base64.b64decode(item(1)['body']))
+        limit = 8_640_000_000_000_000
+        for field in ('timestampMs', 'sentWhileOfflineAtMs'):
+            with self.subTest(field=field):
+                self.assertEqual(T.literal({**event, field: limit}), ('user', 'literal text'))
+                with self.assertRaises(RuntimeError):
+                    T.literal({**event, field: limit + 1})
+
+    def test_append_keeps_an_undated_message_in_its_original_order(self):
+        first = item(1, 'before')
+        undated = item(2, 'message with no known time')
+        event = json.loads(base64.b64decode(undated['body']))
+        del event['timestampMs']
+        event.update(requestId='original-request', clientNonce='original-nonce')
+        undated['body'] = base64.b64encode(T.encoded(event)).decode()
+        last = item(3, 'after')
+        recovery = types.SimpleNamespace(merger=T.module('fleet-state-merge'))
+        source = {'agentId': OLD}
+        with tempfile.TemporaryDirectory() as folder:
+            store = pathlib.Path(folder) / 'store.db'
+            with contextlib.closing(sqlite3.connect(store)) as sql:
+                sql.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+            _, records = T.append_rows(recovery, {}, store, [(source, value) for value in (first, undated, last)])
+            rows = T.rows(store)
+        self.assertEqual([p[0] for p in rows], [1, 2, 3])
+        self.assertEqual([p[1] for p in rows], [p['entryId'] for p in (first, undated, last)])
+        self.assertEqual(json.loads(rows[1][2]), event)
+        self.assertEqual(records[1]['timestampState'], 'missing')
+        self.assertNotIn('timestampMs', records[1])
+        self.assertEqual(records[1]['sourcePayloadSha256'], T.sha(T.encoded(event)))
+        self.assertEqual([records[0]['timestampMs'], records[2]['timestampMs']], [1, 3])
+        for supplied in (None, True, '0'):
+            with self.subTest(supplied=supplied), self.assertRaises(RuntimeError):
+                T.literal({**event, 'timestampMs': supplied})
+
 
 class ApplyTests(ReceiptTests):
     def setup_apply(self):
@@ -131,6 +168,35 @@ class ApplyTests(ReceiptTests):
         self.assertEqual((target/'profile.json').read_bytes(),before_profile);self.assertEqual(T.graph(target/'conversation-blobs.db'),before_sdk)
         self.assertEqual(self.r.read()['entries'][0]['historyMergeReceipt'],T.reference(path))
         self.assertFalse(self.r.read()['entries'][0]['phase']=='active')
+
+    def test_prepared_unrenderable_dates_refuse_before_state_writes(self):
+        repair, intent_ref, target, _ = self.setup_apply()
+        intent_path = pathlib.Path(intent_ref['path'])
+        intent = json.loads(intent_path.read_text())
+        planned = pathlib.Path(intent['plannedStore']['path'])
+        planned_before = planned.read_bytes()
+        live_before = {path: path.read_bytes() for path in
+                       (target / 'store.db', target / 'conversation-blobs.db', target / 'settings.json')}
+        bad = 8_640_000_000_000_001
+        for field in ('timestampMs', 'sentWhileOfflineAtMs', 'lastActivityAt'):
+            with self.subTest(field=field):
+                planned.write_bytes(planned_before)
+                with contextlib.closing(sqlite3.connect(planned)) as sql:
+                    if field == 'lastActivityAt':
+                        sql.execute('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)',
+                                    ('unreadState', json.dumps({field: bad})))
+                    else:
+                        event = json.loads(sql.execute('SELECT entry FROM transcript_entries WHERE seq=2').fetchone()[0])
+                        sql.execute('UPDATE transcript_entries SET entry=? WHERE seq=2',
+                                    (json.dumps({**event, field: bad}),))
+                    sql.commit()
+                T.write(intent_path, {**intent, 'plannedStore': T.reference(planned)})
+                with mock.patch.object(self.r.m, 'rpc', wraps=self.r.m.rpc) as rpc:
+                    with self.assertRaisesRegex(RuntimeError, 'unrenderable timestamp'):
+                        repair.apply(self.r.read(), T.reference(intent_path))
+                    self.assertNotIn('SetGrokBotAgentClientState', [call.args[0] for call in rpc.call_args_list])
+                self.assertEqual({path: path.read_bytes() for path in live_before}, live_before)
+                self.assertFalse((intent_path.parent / 'apply-progress.json').exists())
 
     def test_prepared_tail_evidence_recovers_before_exact_apply_without_replanning(self):
         repair, intent, target, receipt = self.setup_apply()

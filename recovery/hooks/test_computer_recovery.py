@@ -470,6 +470,9 @@ class ComputerRecoveryTests(unittest.TestCase):
             with mock.patch.object(m, 'SD', sd), mock.patch.object(m, 'HOST', host), \
                     mock.patch.object(m, 'ensure_named_tunnel', side_effect=concurrent_publish), \
                     mock.patch.object(m, 'ensure_backup_permissions', return_value={'state': 'mocked'}), \
+                    mock.patch.object(m, 'ensure_upstream_sync', return_value={'state': 'waiting'}), \
+                    mock.patch.object(m, 'ensure_custom_dispatch', return_value={'phase': 'idle'}), \
+                    mock.patch.object(m, 'check_server_roster', return_value={'state': 'current'}), \
                     mock.patch.object(m, 'repair_bundle', return_value=False), \
                     mock.patch.object(m, 'host_pids', return_value=[os.getpid()]), \
                     mock.patch.object(m, 'gateway_status', return_value={'isBusy': False}), \

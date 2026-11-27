@@ -105,6 +105,231 @@ Bot-mode upgrades use `openbot-pending-bounce.json`, `openbot-turn-lease.json` a
 
 CLI includes `openbot status`, `openbot official`, `openbot tunnel on|off|status` and `openbot finalize-host`. Source install/repair uses `install`; explicit new `--origin`/`--model` requires private `OPENBOT_API_KEY`. `--dry-run` proves wrapping; `--census-only` is observation. `install --keep-service` is owned service repair, not a source upgrade: only explicitly saved Official selects the guarded [controls-only path](#official-controls-without-logging-rewrap), while Custom retains normal checked wrap/reload behavior and deferred-idle rules.
 
+### Rust hop candidate
+
+Use the candidate to verify provider inference on IPv4 loopback against a private, disposable OpenBot state directory. Pass `--enable-hop` to add the inference route. Run the command from the source checkout with `--port 0` to bind a separate ephemeral listener.
+
+```bash
+cargo +1.95.0 run --locked --manifest-path rust/Cargo.toml -- \
+  --sand-data /tmp/openbot-candidate-state --port 0 --enable-hop
+```
+
+Use the printed `http://127.0.0.1:<bound-port>`. `GET /healthz` returns `{"ok":true,"service":"openbot"}` when the listener is up. `POST /v1/chat/completions` uses the saved catalog and credential for the selected route. Test account IDs and model IDs can use `fixture-account:fixture-model`. Keep credentials private.
+
+Dispatch rereads files in the directory passed to `--sand-data` on each request:
+
+| File | Candidate behavior |
+| --- | --- |
+| `openbot-mode` | Requires trimmed `custom`. Official or a missing file returns HTTP 503 `official_mode`. |
+| `openbot-pause.json` | `{"paused":true}` returns HTTP 503 `paused`. |
+| `openbot-pause-bots.json` | A matching bot ID in `pausedBotIds` returns HTTP 503 `bot_paused`. |
+| `openbot-plan.json`, `openbot-bot-models.json` | Use the existing providers and models. An intentional bot pin takes priority and a supported saved bot effort applies to its exact routed model. |
+| `secrets.json` | Use the selected provider ID's existing private credential record. |
+
+The hop generates the selected protocol's headers and converts upstream Chat Completions, Responses and Messages JSON or SSE into the caller's Chat Completions shape. Provider-specific session and cache identifiers are scoped to the selected account and available conversation or bot context. Eligible transient errors and temporary rate limits get bounded retries before client output. A later upstream error ends the original stream with the error.
+
+With `--enable-hop` alone, the candidate uses valid saved OpenAI access tokens. An expired login returns HTTP 503 `provider_sign_in_required`. To rehearse renewal, enable the account flow below.
+
+Use the Node installer and unified supervisor for the live panel and hop on port 9280. Official uses stock server/Temporal delivery. Use `/healthz` for candidate listener readiness and a completion for candidate inference verification.
+
+#### Rust account sign-in and renewal
+
+Add `--enable-accounts` to the candidate command to rehearse credential saves and renewal in the same disposable directory. Include `--enable-hop` when checking renewal during inference. The account listener uses the printed IPv4 loopback address. Open sign-in in a browser that can reach that exact `http://127.0.0.1:<bound-port>` address.
+
+1. Send `POST /api/oauth/chatgpt/start` with `{}` for a new account or `{"providerId":"openai-2"}` to reauthorize that saved direct OpenAI provider. Open the returned `authorizationUrl` and keep the response’s `sessionId` for polling. The candidate uses the local callback `GET /auth/callback` on its bound port and reuses the private `openbot-chatgpt-host-id` in the disposable state.
+2. Send `POST /api/oauth/chatgpt/status` with `{"sessionId":"<session-id>"}`. A response with `phase: "ready"` provides an expiring, process-local `credentialId`. Use this draft in an explicit account save.
+3. Send `POST /api/save` with one of these JSON bodies. A successful save consumes the draft.
+
+| Intent | Save body |
+| --- | --- |
+| Add an independent OpenAI account | `{"kind":"add-provider","familyId":"openai","name":"Fixture OpenAI","origin":"https://api.openai.com/v1","apiType":"responses","credentialId":"<credential-id>"}` |
+| Reauthorize the provider that started sign-in | `{"kind":"set-secret","providerId":"openai-2","credentialId":"<credential-id>"}` |
+
+An add returns `createdProviderId` for the next available `openai` account ID. Use that ID when configuring a model in the disposable catalog. A targeted draft saves under the original provider ID after checking the saved account revision. A direct credential save uses `secret` in place of `credentialId`. Legacy Codex OAuth uses `POST /api/oauth/openai/start` and `POST /api/oauth/openai/complete` with the attempt's `sessionId` and its `http://localhost:1455/auth/callback` URL as `callbackUrl`. Save the resulting legacy draft as a new account.
+
+With both flags active, inference can renew a due OpenAI login when its renewal window permits. Concurrent requests for the same provider ID share one renewal. The candidate rereads the current credential and persists refreshed credentials only while the original value still matches. It atomically replaces the compatible `secrets.json` file, keeping the credential as a JSON-encoded string under `providers[providerId]`. The account routes and inference share the candidate writer guarded by `.openbot-rust-secrets.lock`. If a login is unusable, the hop returns HTTP 503 `provider_sign_in_required`. Use the existing Node panel for live account sign-in and renewal.
+
+#### Rust provider and model saves
+
+Use the disposable candidate's loopback `POST /api/save` with `--enable-accounts`. Ordinary provider and model saves preserve the saved mode.
+
+| Save kind | Fields and behavior |
+| --- | --- |
+| `add-provider` | Send `familyId`, `name`, `origin`, optional `apiType`, and a credential in `secret` or an eligible OpenAI `credentialId`. The reply returns the new independent `createdProviderId`. IDs use the family and numeric suffixes and reserve IDs still present in the credential store, including removed accounts. |
+| `update-provider` | Send the existing `providerId`, `name` and `origin`. Preserve the saved protocol by omitting `apiType`. Include the replacement `secret` when moving a keyed account to another origin. |
+| `set-secret` | Replace the saved credential for an existing direct provider ID using `secret` or a bound ChatGPT draft. |
+| `upsert-model` | Import or edit a `providerId:slug` row using the existing `providerId` and `slug`. Optional fields include `apiType`, `modelType`, `contextTokens`, `maxOutputTokens`, `modalities`, `catalogLimits`, `reasoningLevels` and `activeReasoning`. With no wildcard, the first eligible direct chat model can become the default. |
+| `remove-model` | Remove the selected `modelId` and its bindings. For a removed default, prefer another direct chat model in the same provider, then the first eligible surviving route. Removing the last active model can leave its provider with zero models and no wildcard while preserving the mode. |
+| `remove-provider` | Remove the `providerId`, its models and their bindings, keeping the credential ID reserved. The first remaining direct chat route becomes the default if needed. In Custom, deletion that would leave no direct chat route returns HTTP 409 and needs the managed host controls. |
+
+The provider editor prompts for a credential when a keyed account changes URL scheme, host or port. Submit the credential for the new endpoint with the same provider ID. A cross-origin save temporarily writes the private `.openbot-rust-provider-move.json` receipt. It clears the old key, saves the new route and publishes the replacement key in that order. The writable Rust store completes an interrupted move at startup or before a later write, refuses conflicts with newer saved state, and removes the receipt after completion. Keep the receipt private because it contains the replacement credential.
+
+OpenCode accounts use their own direct Go credentials and the direct Go base `https://opencode.ai/inference/go` or a supported saved Go form. Alibaba Token Plan accounts use either accepted direct Chat Completions base and the matching `sk-sp-` subscription key. The Rust hop rejects retired N5, MetaKey and ModelHub routes already present in the catalog before dispatch. [Token Plan bases](#alibaba-token-plan-qwen-reasoning).
+
+Use the [managed Rust Computer host](#rust-computer-host-management) for candidate Official/Custom transitions and the existing ingress controls for tunnel changes. The legacy `upsert-provider` and `custom` save kinds require the candidate to be in Custom already.
+
+#### Rust model selection and pauses
+
+Start the disposable candidate with `--enable-accounts` to use `POST /api/save` for a global model selection. Submit `{"kind":"use-model","modelId":"opencode-2:fixture-model","reasoning":"high"}` with an installed direct chat model and supported effort. Omit `reasoning` or send null to keep that model's saved effort. A successful save returns `activeModelId` and current panel state.
+
+Separate direct OpenCode Go accounts keep their own model IDs, protocols and credentials. `opencode:fixture-model` and `opencode-2:fixture-model` select independent routes. The save updates the global wildcard and preserves explicit conversation bindings, bot pins and per-bot efforts. A supported per-bot effort for the routed model still takes priority. In Official, a candidate without explicit host management returns HTTP 409. The [managed Rust Computer host](#rust-computer-host-management) can activate Custom.
+
+The candidate exposes both GET routes for pause readback. Add `--write-bot-settings` for atomic PUT writes in the disposable directory.
+
+| Endpoint | Saved file | Synthetic PUT body |
+| --- | --- | --- |
+| `GET /api/pause`, `PUT /api/pause` | `openbot-pause.json` | `{"paused":true,"note":"Fixture pause"}` |
+| `GET /api/pause-bots`, `PUT /api/pause-bots` | `openbot-pause-bots.json` | `{"botId":"fixture-bot","paused":true}` or full list replacement with `{"pausedBotIds":["fixture-bot"]}` |
+
+Set `paused` to false to resume the gateway or a single bot. The hop reads pause state per request. A paused gateway or bot returns HTTP 503 with `paused` or `bot_paused` and the header `x-openbot-retryable: false`. The shared stock host adapter propagates marked terminal refusals without retry and preserves their HTTP status in error records. The Custom wrapper and an active Official stock tap also recheck global pause at stream start.
+
+#### Rust panel and provider discovery
+
+Add `--ui-dir ui` to the disposable candidate command from the built source checkout to serve the existing panel assets. `GET /api/state` and `GET /api/snapshot` read back the saved providers and models, active model, keyed provider IDs, candidate listener status and log settings. Add `--enable-accounts` for provider and model saves. Successful saves return the current panel state.
+
+Use `POST /api/providers/{id}/fetch-models` for on-demand discovery from a saved provider's direct endpoint with `--enable-hop`, `--enable-accounts` or `--enable-model-refresh`. Use read-only `GET /api/model-catalog` with `--ui-dir` or `--enable-model-refresh`. Pass `modelId` and `providerId` to look up metadata scoped to the saved provider origin. The remaining panel control routes are pending.
+
+##### Rust Grok Bot user skills
+
+On the native rehearsal panel with `--ui-dir`, use `GET /api/grok-skills` to inspect the copy status and `POST /api/grok-skills/install` with `{}` or `{"slug":"openbot-config"}` to install. The binary embeds the checkout's `skills/openbot-config/SKILL.md` and `reference.md`, so copying works offline. When set, `OPENBOT_COMMIT` supplies the reported `ref`. This native route accepts the `openbot-config` slug and rejects other slugs.
+
+Write access requires `--write-bot-settings`. Target the normal user workflows directory. `OPENBOT_WORKFLOWS` overrides `OPENBOT_AGENT_DATA/workflows`, which defaults to `/home/box/agent-data/workflows`. The installer rejects protected `plugins` and `managed-skills` paths and symlinks in the destination path or either target file. It replaces only the two bundled files under `workflows/openbot-config/` and preserves other user files. The copy needs no OpenBot service restart.
+
+#### Rust model catalog refresh
+
+Add `--enable-model-refresh` to the disposable candidate command. Copy the plan, any bot settings under test and the needed direct account credentials into that private state. Keep the account entries in `secrets.json` under their saved provider IDs. Discovery uses each account's matching credential and saved direct origin, including separate OpenCode Go accounts.
+
+`POST /api/model-catalog/refresh` starts a manual run and returns HTTP 202. Manual requests and scheduled checks share an in-flight run. Poll `GET /api/model-catalog` for `autoRefresh` status. Auto refresh defaults to every six hours, with the first scheduler check after 15 seconds and later checks every minute. Set a numeric `intervalHours` in `openbot-model-refresh.json` to adjust the interval within 1–168 hours. Setting `"enabled": false` stops the scheduled runs and makes a manual run refresh only the public metadata.
+
+The candidate loads `openbot-model-catalog.json` at startup and persists public catalog updates from OpenRouter and models.dev. The managed `openbot-model-refresh-status.json` records timing, merge counts, held reasoning choices and provider outcomes. Edit the policy in `openbot-model-refresh.json`.
+
+When saved-provider refresh is enabled, it adds new routes under existing provider accounts and enriches existing rows while retaining model IDs, bindings, explicit protocols, custom context, and active and per-bot reasoning choices. A narrower published output limit can reduce the output cap. The merge reads current bot settings under the shared `.openbot-rust-bot-settings.lock` lease and serializes plan updates with bot settings saves. Use `--write-bot-settings` on the same candidate to rehearse both writes.
+
+#### Rust delivery hardening
+
+With `--ui-dir`, the rehearsal panel serves `GET /api/settings/delivery`. `PUT /api/settings/delivery` requires `--write-bot-settings` and accepts a `mode` with optional boolean `layers.l1`, `layers.l2` and `layers.l3`. It saves to `openbot-injection.json` in the `--sand-data` directory, or the explicit `OPENBOT_INJECTION` path. The next hop request reads the saved policy without a restart. Saves preserve valid top-level or nested layer settings and tuning, and environment pins retain priority. Scope and field purposes are described in the [existing delivery policy](#injection).
+
+The default is `off`. `dry-run` records observations only. In `enforce`, L1 adds eligible reminders, L2 permits at most one additional generation per active direct-chat epoch, and L3 can add a reminder to the next eligible request in the same unresolved silent epoch. The request needs recognized direct-chat evidence, a real user-message boundary, bot and conversation IDs, and an available `SendToUser` tool. L2 and L3 also require an epoch ID. The candidate tracks epoch limits in its process. Group chats, routines, hidden context, subagents, auxiliary requests, Official traffic and compaction summary calls are outside this scope.
+
+An L2 candidate has a single `stop` choice without tool calls while delivery is owed. The additional run keeps the same provider, model, credential, effort and cache identity. Prompt, completion and timeout budgets apply, and a protocol that cannot carry the output cap skips L2. When model rates are available, the hop estimates the extra cost against the configured cap. Unknown rates are reported as `unknown` and can use the token and run budgets when the dollar cap is positive. A zero dollar cap blocks unknown-rate retries.
+
+The hop waits for a complete validated second response before forwarding its output or tool calls. An unavailable, malformed or timed-out follow-up releases the original response. With request logging enabled, the request record includes `injection` metadata. The existing Logs panel reads sampled counts, outcomes, skips, extra calls and latency from `GET /api/logs/stats`.
+
+#### Rust request logs
+
+Add `--enable-request-logs` with `--enable-hop` in disposable state to record candidate requests. Recording uses the existing `openbot-logs.json` and requires `"loggingEnabled": true`. The candidate reads this setting per request and checks it again before writing.
+
+The candidate appends request metadata to `openbot-requests.jsonl`. Rows capture the selected provider and model, route, status, retries, timing and available provider-reported prompt, completion, cached and reasoning tokens. Optional redacted request and response captures go to `openbot-request-bodies/<id>.json` according to `logBodies` and `logBodiesOnError`. Each capture is limited by `maxBodyCaptureBytes` (65,536 bytes by default). Oversized captures are marked as truncated.
+
+The candidate exposes these read routes with `--ui-dir` or `--enable-request-logs`.
+
+- `GET /api/logs` lists request metadata. `GET /api/logs/{id}` reads a record and its saved body capture.
+- `GET /api/logs/settings`, `GET /api/logs/stats` and `GET /api/logs/facets` read settings, sampled statistics and available filters.
+- `GET /api/logs/events` reads existing rows from `openbot-events.jsonl`. `GET /api/logs/usage` summarizes sampled provider usage by model, provider, purpose and time.
+
+Provider token totals in stats and usage exclude `custom-host` harness rows.
+
+##### Rust log maintenance
+
+With `--enable-request-logs`, the candidate also accepts settings changes and archive maintenance in the disposable directory. Replace `42880` with the port printed by the candidate and run the command for the intended operation.
+
+```bash
+rust_log_origin=http://127.0.0.1:42880
+curl --fail-with-body -sS -X PUT -H 'Content-Type: application/json' \
+  --data '{"logBodies":false,"logBodiesOnError":false}' "$rust_log_origin/api/logs/settings"
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/cleanup"
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/strip-bodies"
+```
+
+`PUT /api/logs/settings` saves capture and retention policy in `openbot-logs.json`. A change to `loggingEnabled` requires saved Custom mode. In Official, the candidate returns HTTP 409 for a recording toggle. Use the existing Node service for the Official stock tap and live context compaction.
+
+`POST /api/logs/cleanup` prunes expired request rows under `logRetentionDays` and cleans up eligible sidecars. A retention change also attempts cleanup immediately. The automatic task first checks after one minute and then every 30 minutes, whether recording is on or off. Invalid or unreadable log settings block automatic and manual retention cleanup. A missing settings file uses default retention. `POST /api/logs/strip-bodies` removes body captures and preserves request metadata.
+
+To empty the disposable request archive and remove its body captures, run Clear. Existing events remain in `openbot-events.jsonl`.
+
+```bash
+curl --fail-with-body -sS -X POST "$rust_log_origin/api/logs/clear"
+```
+
+#### Rust context compaction
+
+Run the disposable Custom candidate with `--enable-hop --enable-compaction`. For requests with complete canonical chat `messages`, the hop uses the normal completion allowance for the selected model, protocol and request limit. It checks for a trim when estimated input exceeds 85% of the configured context window. If that completion allowance needs more room, the threshold can fall as low as the 35% retention target. A smaller selected window can also trigger a trim above that target. A matching saved boundary can be reused if it fits the current threshold.
+
+The estimate includes instructions, assistant reasoning, tool calls and results, and tool definitions. ASCII text is estimated at about four characters per token. Non-ASCII characters and images use separate allowances. The compactor keeps system and developer instructions, the full latest user turn and its following messages, and matched calls and results together across the trim boundary. Protected material can keep the request above the target. If the completion allowance exceeds the estimated space left, the hop lowers the outgoing completion cap to that space with a one-token minimum. This can apply even when there is no safe trim. The candidate accepts up to 64 MiB inbound and caps the encoded provider request at 16 MiB.
+
+Compaction skips marked auxiliary and internal summary requests, native Responses input or continuation IDs, and models without a configured context size. Requests with too little history or without a safe trim also skip compaction.
+
+The candidate stores private 0600 `<key>.rust.json` checkpoints and `<key>.<job-id>.rust.transcript` source sidecars under `openbot/compact-state`. It can reuse a complete matching legacy brief read-only. Rust resumption uses its own checkpoint and hash-verified source. Eligible later turns resume at the last completed chunk after any cooldown, provided the saved history receipt and route still match.
+
+The initial outgoing brief can use local excerpts while an eligible background summary runs. Summary jobs use the selected canonical route and effort when eligible, processing up to 65,536 estimated transcript tokens per chunk within the route's budget. Candidate routes must fit the estimated prompt and output allowance. Once a summary request is sent, advancing to another route requires a recognized context overflow. Approved alternates come from configured direct DeepSeek V4.1 or V4 Flash, GPT-6.1 Sol and Muse 1.3 Contributor routes. The route policy excludes Kimi K3 as a summarizer and excludes retired intermediary endpoints. If there is no eligible summary route, the local excerpt remains available.
+
+With request logging enabled, the chat record's `compaction` fields show estimated input and retained sizes, target, configured context, covered messages and summary source when available. Summary requests appear in separate records with `purpose: "compaction"` for usage reporting. Provider-reported usage is measured separately from the compaction estimates.
+
+#### Rust Computer host management
+
+To observe the Computer host from the panel, supply an absolute `--host-main` path or set `OPENBOT_HOST_MAIN` as its fallback. Observation reports the entrypoint shape and a matching Node process or known Desktop PID in the panel snapshot.
+
+For a separate Linux management rehearsal, use an owned, supervised Node host and disposable state. Supply the explicit `--host-main` and installed `--host-adapter` paths along with `--managed-service`, `--enable-hop`, `--enable-accounts`, the built UI and a fixed loopback port. `--host-node` optionally selects the Node executable for syntax checks and defaults to `node`.
+
+```bash
+openbot-runtime --sand-data /tmp/openbot-host-fixture/data --port 42880 \
+  --ui-dir /tmp/openbot-host-fixture/ui --managed-service --enable-hop --enable-accounts \
+  --host-main /tmp/openbot-host-fixture/host-main.cjs \
+  --host-adapter /tmp/openbot-host-fixture/payload/runtime.cjs
+```
+
+On this listener, `POST /api/save` with `kind: "use-model"` checks the installed direct chat route, its saved credential record and any selected effort. The reconciler validates staged source changes with Node, saves the selected model and `http://127.0.0.1:<port>/v1` hop URL in the retained plan, and then selects Custom. `kind: "official"` retains the plan and credentials. It restores stock source when logging is off and keeps the stock logging tap when enabled. Source edits require a recognized entrypoint shape and retain the first stock copy at `host-main.cjs.pre-openbot`.
+
+The deferred reload receipt `.openbot-rust-host-reload.json` holds the expected source digest and Node process identities. Only the exact Node entrypoint with a still-matching PID and start time is eligible for a deferred SIGTERM and supervised restart. The Desktop PID is for observation. The reload waits at least 120 seconds from arming and respects native in-flight turns and `openbot-turn-lease.json`. Quiet time is 90 seconds when the legacy lease records `stop` and 300 seconds otherwise. An existing `openbot-pending-bounce.json` halts native reconciliation until the prior managed reload is resolved.
+
+The [Linux managed service](#linux-managed-rust-service) can install the same adapter from the source payload. The separate [Access configuration](#rust-cloudflare-access-panel) is for protected panel ingress.
+
+#### Linux managed Rust service
+
+Use the Linux command as the owner of an existing OpenBot systemd user service with its configured fixed port. Rehearse against the service and state set aside for verification. Substitute the actual data directory, unit, built panel directory and full Git revision. Add the source payload directory and absolute supervised Computer entrypoint together to enable host management.
+
+```bash
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service status
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service \
+  install --ui-dir BUILT_UI --revision FULL_GIT_SHA \
+  --payload-dir PAYLOAD_DIR --host-main /path/to/host-main.cjs
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback
+openbot-runtime --sand-data DIR --port PORT service --unit openbot-fixture.service rollback --original
+```
+
+`status` checks that systemd's `MainPID`, `openbot-ui.pid` and the actual IPv4 loopback socket identify one process. It verifies `/healthz` and checks process identity again. Install stages the invoking binary and the four built assets, then restarts the existing unit and verifies the new command and listener. The managed native process publishes its PID after binding the fixed port.
+
+| Location | Purpose |
+| --- | --- |
+| `DIR/.openbot-rust-releases/<bundle-hash>/` | Content-verified `openbot-runtime`, `revision` and `ui/{index.html,app.js,styles.css,favicon.svg}`. Optional `payload/` and `access.json` are staged in the same release. |
+| `$XDG_CONFIG_HOME/systemd/user/<unit>.d/90-openbot-native-runtime.conf` | The managed command override. With the default user configuration path, it is under `~/.config/systemd/user/`. |
+| `DIR/.openbot-rust-deployment.json` | Recovery journal with the original selection, preceding deployment and any pending change. |
+
+Use `--host-node /absolute/node` to select a different Node executable for staged source validation. Use `--access-config /path/to/access.json` on `install` to bundle [Cloudflare Access settings](#rust-cloudflare-access-panel). The payload and host entrypoint arguments are optional as a pair. Earlier releases without add-ons remain eligible for normal rollback.
+
+The release digest covers the binary, UI assets and revision, plus the optional `access.json` and the adapter modules, vendored JPEG and PNG dependencies and `payload/version.json` when bundled. The adapter selects the Rust loopback port from that stamp and derives the state directory from the release location. Systemd is the sole supervisor for the managed hop.
+
+`rollback` restores the preceding verified selection or recovers an interrupted change. `rollback --original` restores the command saved at the first native install. The managed drop-in is removed when the restored selection used the original unit command. A pending change is recovered on install or rollback after ownership and drop-in checks.
+
+The deployment transaction preserves the saved mode, plan, credentials and routine settings. Once the native process starts, its refresh and retention workers use the saved policies. Use the existing Node production path and stock Official/Temporal delivery. Production promotion and remaining panel control routes are separate from the managed-service rehearsal.
+
+#### Rust Cloudflare Access panel
+
+Use `--access-config /path/to/access.json` with `--ui-dir` on a standalone Rust candidate, or pass it to the Linux user-service `install` command. Set `teamDomain` to the exact HTTPS Cloudflare team origin. Each `origins` entry uses an exact HTTPS public hostname and the corresponding Access application's 64-hex-character AUD. Use the scheme and hostname for both origins and replace the placeholders before use. [Cloudflare JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
+
+```json
+{
+  "teamDomain": "https://<team>.cloudflareaccess.com",
+  "origins": [
+    {"origin": "https://panel.example.test", "audience": "<Access application AUD>"}
+  ]
+}
+```
+
+Keep the existing Cloudflare service as the connector to the fixed loopback listener. The external proxy must preserve the original public `Host` and forward `Cf-Access-Jwt-Assertion`. Rust verifies the signature against the team's signing keys and checks the issuer, audience, application token type and validity times. Public browser writes require the matching `Origin`. The hop and OAuth routes, including the sign-in callback, use loopback. [Cloudflare Tunnel origin parameters](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/).
+
+The first configured origin appears as the protected panel URL. `OPENBOT_PUBLIC_URL` alone is advisory. For a rehearsal, check loopback health and read back `/api/state` in an authenticated browser at the configured public origin. Quick-tunnel lifecycle uses the existing controls.
+
 ### Official controls without logging rewrap
 
 For an already selected literal Official mode, the reviewed installed CLI can recover the owned panel independently of optional native logging compatibility:
@@ -244,10 +469,10 @@ Known presets use their direct origins and correct credential family. Use the `h
 
 | Preset | `familyId` | Direct Chat Completions base |
 |---|---|---|
-| Alibaba Token Plan | `alibaba-token-plan` | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` |
+| Alibaba Token Plan | `alibaba-token-plan` | `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` |
 | Alibaba Coding Plan | `alibaba-coding-plan` | `https://coding-intl.dashscope.aliyuncs.com/v1` |
 
-Use the dedicated `sk-sp-` key for the matching subscription. Add one account per subscription. The presets apply to new accounts, and existing providers retain their assigned IDs and configured origins. The Qwen effort mapping uses the Singapore Token Plan Chat Completions base. [Alibaba Cloud base URLs](https://www.alibabacloud.com/help/en/model-studio/base-url) · [Qwen reasoning](#alibaba-token-plan-qwen-reasoning).
+Use the dedicated `sk-sp-` key for the matching subscription and add each subscription as its own account. OpenBot calls the account's saved base directly, including the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. To move an existing account, edit its provider explicitly and supply the matching key. [QwenCloud Token Plan endpoints](https://docs.qwencloud.com/developer-guides/clients-and-developer-tools/other-tools) · [Alibaba Cloud Singapore endpoint](https://www.alibabacloud.com/help/en/model-studio/base-url) · [Qwen reasoning](#alibaba-token-plan-qwen-reasoning).
 
 ## Models and bot overrides
 
@@ -338,10 +563,33 @@ For a direct Go chat entry, `POST /api/providers/:id/fetch-models` returns norma
 | `modalities.input` | Recognized MIME categories become deduplicated `text`, `image`, `video` and `audio` values. |
 | `capabilities.reasoning` | Explicitly unsupported reasoning gives Default. Supported reasoning adds the advertised effort values in order, and a supported toggle adds Off. |
 
-An explicit provider type is saved as optional `modelType`. Recognized values are `chat`, `embedding`, `decision`, `image` and `other`. A reported unrecognized type becomes `other`. Older rows without a type keep chat eligibility. The Models inventory still lists non-chat rows, while the global picker, bot bindings and compaction use chat-capable models. Importing an explicitly typed non-chat row in Official keeps Official. A request for a known non-chat model at the chat hop returns HTTP 400 with `model_not_chat`.
+An explicit provider type is saved as optional `modelType`. Recognized values are `chat`, `embedding`, `decision`, `image` and `other`. A reported unrecognized type becomes `other`. Older rows without a type generally keep chat eligibility; known direct NVIDIA retrieval embeddings below remain excluded even without upstream categories. The Models inventory still lists non-chat rows, while the global picker, bot bindings and compaction use chat-capable models. Importing an explicitly typed non-chat row in Official keeps Official. A request for a known non-chat model at the chat hop returns HTTP 400 with `model_not_chat`.
 
 The managed public cache shares Go metadata across accepted direct Go bases. Account-specific discovery uses the selected provider's credential and can update an existing row's reported type and reasoning list even when the public catalog is unavailable. Saved explicit protocols take priority. A proposed effort list that would exclude a saved selected effort is held for that route. The optional transfer advisor applies its own saved-origin and effort rules. [Transfer advisor scope](#optional-tool-free-transfer-advisor).
 
+
+### Direct NVIDIA retrieval embeddings
+
+Known retrieval models at the direct NVIDIA origin `https://integrate.api.nvidia.com/v1` (also the host-only base and trailing slashes) use documented input capabilities. This classification also covers native model lists with missing categories. OpenBot marks these exact routes with the existing `modelType: "embedding"` and `modalities` fields:
+
+| Saved model slug | Input `modalities` |
+|---|---|
+| `nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1` | `["text","image"]` |
+| `nvidia/llama-nemotron-embed-vl-1b-v2` | `["text","image"]` |
+| `nvidia/nemotron-3.5-embed-1b` | `["text","image"]` |
+| `nvidia/nemotron-3.5-embed-8b` | `["text","image"]` |
+| `nvidia/nvclip` | `["text","image"]` |
+| `nvidia/embed-qa-4` | `["text"]` |
+| `nvidia/llama-3.2-nv-embedqa-1b-v1` | `["text"]` |
+| `nvidia/nemotron-3-embed-1b` | `["text"]` |
+| `nvidia/nv-embedqa-mistral-7b-v2` | `["text"]` |
+| `snowflake/arctic-embed-l` | `["text"]` |
+
+These models return embedding vectors. The `modalities` describe accepted inputs. NVIDIA documents the [retrieval API family](https://docs.api.nvidia.com/nim/reference/retrieval-apis), [Llama Nemotron vision-language embedding inputs](https://docs.api.nvidia.com/nim/reference/nvidia-llama-nemotron-embed-vl-1b-v2), [NV-CLIP text/image embeddings](https://docs.api.nvidia.com/nim/reference/nvidia-nvclip) and [embedding query/passage usage](https://docs.nvidia.com/nim/nemo-retriever/embedding/latest/use-the-api-openai.html). NVIDIA defines each endpoint's input formats and query/passage restrictions.
+
+Keep these rows in every independent saved direct NVIDIA account, including both accounts in a two-account setup. Preserve each provider ID, credential and `providerId:slug`, and keep account inventories separate during chat-route cleanup. Discovery, imports, effective saved-row normalization and refresh apply the documented classification and inputs to older untyped or incorrectly chat-typed rows. When discovery or the public catalog omits a saved known route, refresh preserves its row and applies the documented embedding metadata.
+
+The Models inventory retains these rows. Models classified as embeddings are excluded from active global bot chat, per-bot model assignments and compaction. The same eligibility checks cover existing catalog rows and direct chat-hop requests with missing upstream categories; direct chat requests return HTTP 400 with a message that the model does not support bot chat. A stale bot pin uses the existing global fallback and `bot-models.stale` behavior. Select a supported chat model for bot routing. The override applies to the exact NVIDIA origin and listed slugs; routes at other origins keep their existing classification. Generic routes, save kinds, settings schema and per-request reload rules remain unchanged. Verify current provider access and retrieval inference separately.
 
 ### Direct Z.AI GLM-5.3 reasoning
 
@@ -349,15 +597,29 @@ The hop applies this reasoning map to `glm-5.3` and `glm-5.3-flash` on the `http
 
 A supported selected effort sets `reasoning_effort` on the outgoing request and takes priority over any incoming value. The map ignores legacy Fast and Off settings on these routes. It preserves a supported incoming effort when no supported effort is selected, and removes an unsupported `reasoning_effort` so the provider default can apply.
 
-If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
+If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles routes without a dedicated map, including GLM-5.2.
 
 ### Alibaba Token Plan Qwen reasoning
 
-The hop uses this mapping for the Chat Completions base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` with an optional trailing slash and the model slugs `qwen4-max`, `qwen3.8-max`, `qwen3.8-max-0902`, `qwen3.8-flash`, `qwen3.8-2.4t-a95b` and `qwen3.8-27b`. Choose an effort from the saved model's `reasoningLevels`.
+The hop applies this map to the direct Chat Completions bases `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`, including a trailing slash, for `qwen4-max`, `qwen3.8-max`, `qwen3.8-max-0902`, `qwen3.8-flash`, `qwen3.8-2.4t-a95b` and `qwen3.8-27b`. Choose an effort from the saved model's `reasoningLevels`.
 
 Off sends `reasoning_effort: "none"`. An explicit effort sends the selected value. Both choices remove the top-level `thinking`, `enable_thinking` and `thinking_budget` fields. Default leaves the caller's reasoning and thinking fields in place at this mapping step.
 
 Alibaba treats `none` as Off for these models and makes `reasoning_effort` and `thinking_budget` mutually exclusive. The provider can map compatible effort values to the same model-specific level. [Alibaba Cloud Chat Completions parameters](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions).
+
+### Direct Alibaba Token Plan GLM-5.3 reasoning
+
+For Custom Chat Completions, this map applies to `glm-5.3` on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. The hop sends top-level `enable_thinking: true` and forwards only `low`, `high` or `max` as explicit `reasoning_effort` values. A supported selected effort takes priority over the incoming value.
+
+OpenBot preserves a top-level `clear_thinking` boolean or promotes a boolean from legacy `thinking.clear_thinking` when there is no top-level boolean. This also applies with a saved per-bot effort. When neither field supplies a boolean, OpenBot omits `clear_thinking` and the provider applies its default. Direct Z.AI's GLM-5.3 route uses nested `thinking`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
+
+### Direct Alibaba Token Plan GLM-5.2 reasoning
+
+The exact `glm-5.2` route offers Default, Off, High and Max on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. Legacy `minimal`, `low` and `medium` normalize to `high`, and `xhigh` normalizes to `max`.
+
+For Chat Completions, Off sends `enable_thinking: false`. High and Max send `enable_thinking: true` with `reasoning_effort: "high"` or `reasoning_effort: "max"`. The hop keeps an explicit boolean `clear_thinking` at the top level or promotes a legacy boolean `thinking.clear_thinking` when no top-level boolean is supplied. Default without a per-bot override can retain native Chat `enable_thinking` and `thinking_budget`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
+
+For Responses, Off, High and Max send `reasoning.effort` values of `none`, `high` and `max` respectively. [QwenCloud Responses reference](https://docs.qwencloud.com/api-reference/chat/openai-responses).
 
 ### Direct Kimi Code K3.1 Pro reasoning
 
@@ -921,7 +1183,7 @@ Before activation, the coordinator checks the entire known source set through ca
 | Destination | `registered-box` only, local hidden flag literally true and every copied routine explicitly disabled. Fresh actual owned BOX authority must match the journal and profile numeric server IDs. Profile/settings/routine hashes and effective selected model/capacity are captured and compared again before apply. A visible or active copy, changed SDK graph, destination messages after its baseline, changed settings or ambiguous route refuses. |
 | Context | An existing reviewed typed SDK root and exact reviewed engine, native SDK worker and allocator contracts are required. Empty-room roots, unknown source formats, nonliteral imported events, pending tool calls, changed source SDK state or a tail that cannot fit the selected model's context after reserving its configured output budget require review. There is no summarizer, provider fallback, inference or account/key change in this path. |
 
-Supported tails use a strict reviewed field allowlist for completed native text events, deliberately narrower than the full native transcript schema. The admitted core is a nonempty ID, kind and finite nonnegative native timestamp no greater than JavaScript’s maximum safe integer; native fractional timestamp values are preserved rather than rounded. A `message` requires a user/assistant role, string content and explicit literal `isStreaming: false`; absence of that completion marker does not qualify. A text `send-message` must retain only its reviewed text message shape. Known native correlation metadata is admitted only with checked types: bounded nonempty control-free `requestId,clientNonce,batchId` strings and a validated `sentWhileOfflineAtMs` timestamp on messages, or checked `requestId` on sends. Any additional metadata needs an explicit reviewed native contract before admission; raw string content alone never makes an arbitrary event safe. Unknown root/nested fields, failed/cancelled status, tool/image/attachment/parts envelopes, recipients, peer/DM/rich-message semantics or cross-bot destination metadata require preservation review. Retaining such fields only in raw UI history would be insufficient if SDK conversion silently dropped their semantics; the helper must refuse instead of claiming a lossless context transfer.
+Supported tails use a strict reviewed field allowlist for completed native text events, deliberately narrower than the full native transcript schema. Each event requires a nonempty ID and a supported kind. When present, `timestampMs` and `sentWhileOfflineAtMs` must be finite numbers from 0 through 8,640,000,000,000,000 ms inclusive. Finite fractions are preserved. Explicit `null`, `undefined`, nonnumeric, nonfinite and out-of-range values fail validation. An event with no `timestampMs` keeps the field absent in the stored transcript. Its plan provenance records `timestampState: "missing"`, and native readback verifies the omission. The event contributes no timestamp to activity recomputation. A `message` requires a user/assistant role, string content and explicit literal `isStreaming: false`; absence of that completion marker does not qualify. A text `send-message` must retain only its reviewed text message shape. Known native correlation metadata is admitted only with checked types: bounded nonempty control-free `requestId,clientNonce,batchId` strings and a validated `sentWhileOfflineAtMs` timestamp on messages, or checked `requestId` on sends. Any additional metadata needs an explicit reviewed native contract before admission; raw string content alone never makes an arbitrary event safe. Unknown root/nested fields, failed/cancelled status, tool/image/attachment/parts envelopes, recipients, peer/DM/rich-message semantics or cross-bot destination metadata require preservation review. Retaining such fields only in raw UI history would be insufficient if SDK conversion silently dropped their semantics; the helper must refuse instead of claiming a lossless context transfer.
 
 For admitted events, the full original event payload remains in the UI/source evidence, with only owner normalization and a deterministic bounded entry-ID alias where needed to avoid a collision. The SDK receives the exact reviewed literal text and role through actual native conversion, preceded by a notice that it is background history rather than pending requests or instructions. Imported text is never executed as an old action, regenerated as an assistant reply or dispatched to a tool/provider. Unsupported semantic fields stay in their preserved original branches pending explicit review; no success receipt may substitute plain text for their meaning.
 
@@ -929,7 +1191,7 @@ Preparation creates private independent coherent UI/SDK snapshots under the curr
 
 The bridge uses the selected route only to fit estimated context plus the configured output reserve and update provisional SDK capacity metadata. It does not call that model or change billed usage counters. It archives the previous exact active SDK root under its digest and retains every previous non-root blob before adding literal context and selecting the new root. Only the permitted native activity metadata changes in the detached UI; other unread/settings fields remain. The new SDK proof and `openbot-history-merge-receipt/incremental-v1` receipt retain the exact prior receipt reference, every original source, projection/order prefix, prior root and complete blob history. Canonical receipt validation runs against an independent detached mirror before acceptance is possible.
 
-A private first-round `bounded-tail-job-<jobId>.json` records preparing/prepared/completed/review-needed state under the journal backup and remains compatible with its retained legacy format. Each candidate has immutable `intent.json` containing previous/new receipt references, expected profile/settings/routine guards, exact server binding, route, source heads and before/planned UI and SDK snapshots. A known prepared intent resumes its exact plan. Unknown interrupted legacy preparation still requires review; a later schema-v2 round resumes only its recorded accepted parents, witnesses and preparation cursor. Keep every prior file and its evidence through disconnects/restarts.
+A private first-round `bounded-tail-job-<jobId>.json` records preparing/prepared/completed/review-needed state under the journal backup and remains compatible with its retained legacy format. Each candidate has immutable `intent.json` containing previous/new receipt references, expected profile/settings/routine guards, exact server binding, route, source heads and before/planned UI and SDK snapshots. A known prepared intent resumes its exact plan after validating explicit appended timestamps, optional offline-send times and planned `unreadState.lastActivityAt` before any state write. An older plan containing an invalid date requires review with its source evidence retained. Recomputing `lastActivityAt` takes the largest renderable eligible activity timestamp or existing activity value, using zero when neither qualifies. Existing transcript rows and other unread fields are preserved. This validation governs new tail admission and prepared resume. Previously accepted or cloud history keeps its existing data. Unknown interrupted legacy preparation still requires review; a later schema-v2 round resumes only its recorded accepted parents, witnesses and preparation cursor. Keep every prior file and its evidence through disconnects/restarts.
 
 #### Linked late-history rounds
 
@@ -992,9 +1254,11 @@ Custom `payload/context-truncate.cjs` normally chooses the selected chat-capable
 
 Only recognized context/input-size overflow can advance a dispatched chunk to an approved fallback. Auth, quota, generic errors and transport failures do not switch accounts. Sequential chunks are at most 65536 estimated transcript tokens, fitted to context and generation allowance; each request has an absolute 180-second deadline and each active run a ten-minute budget. Incomplete results retain accepted chunks and bounded exponential cooldown rather than fabricating a summary.
 
-Trigger above 85% estimated input or above 35% after a window shrink; trim aims toward 35%, keeping leading instructions and the complete latest message/tool group. Estimates include assistant reasoning, tool calls and schemas; they are not provider tokenizer/billing evidence. A protected group can exceed the target. Never manufacture missing tool results.
+The Node hop normalizes and caps the protocol completion limit before checking for a trim. With `window` as the configured context size, the effective trigger is `min(floor(0.85 * window), max(floor(0.35 * window), window - capped requested output))`. Estimated input above that threshold can trigger compaction. A smaller window can also trigger compaction above the 35% input target. Node preserves leading instructions and the complete latest user turn and tool group. If retained input leaves too little room, Node reduces only the completion limit, with a one-token minimum. A protected turn can exceed the target. Estimates include assistant reasoning, tool calls and schemas. Verify provider usage separately. Never manufacture missing tool results.
 
 State is `<data>/openbot/compact-state/<chat-key>.json`, with private immutable transcript sidecars for resumable work. Useful fields include `lastContextTokens,lastEstimate,lastDropped,lastTrigger,compactedPrefixCount,compactedPrefixHash,summaryForDropped,summaryPrefixHash,summarySource,summaryContextTokens,pendingDroppedCount`, optional per-row hashes and private summaries.
+
+Node records `lastTrigger` as `model-window-shrink` when a smaller window forces compaction, `pct-85` above the normal 85% threshold, `completion-room` when input exceeds only the lower threshold, or `retained-prefix` when a matching prefix is reused with input at or below the effective threshold before reuse.
 
 A v2 `summaryJob` records `version:2,fingerprint,routingKey,coveredCount,coveredHash,coveredHashes,transcriptHash,cursor,text,chunks,failures,nextAttemptAtMs,lastError`. Exact content/route/effort authority and a bounded owned nonsymlink hash-checked sidecar are required. A guarded oldest-message eviction rebase needs at least four original rows, three retained rows, two distinct hashes and exactly one exact suffix match. Edits/reordering/ambiguous coverage reject reuse. Never hand-edit cursor/hashes/text or publish cached data.
 
@@ -1031,7 +1295,7 @@ python3 /home/box/sand-data/openbot/recovery/hooks/transfer-diagnostics.py \
 
 Only strict allowlisted phases/refusal codes, bounded aggregate counts and boolean merge/publication observations form the model's diagnostic facts. No bot names/IDs, histories, instructions, summaries, sessions, credentials, raw errors, arbitrary strings or tool arguments leave through this diagnostic. Its opaque local job-scoped request identity is not a bot/conversation identity. Accept only the exact single-object JSON advice-code schema, either raw or inside one whole optional `json` code fence; the sole key must be one allowed `adviceCode`. Surrounding prose, multiple blocks, duplicate/extra keys, tool/function requests, malformed/oversized answers and unrecognized codes refuse. Display only product-owned static allowlisted advice, never returned prose or commands. Length-truncated output reports inert `advice-truncated`; bounded numeric usage can also identify a reasoning-starved answer without retaining response text. A failed/truncated classification cannot become a decision or trigger extra unbounded calls.
 
-The selected global model must have one unambiguous saved route on an approved direct origin: OpenCode Go `https://opencode.ai/zen/go/v1`, OpenAI API `https://api.openai.com/v1`, or NVIDIA `https://integrate.api.nvidia.com/v1`. Other origins, including unsupported OAuth/backend origins, report unavailable; neither a provider family label nor a same-slug route authorizes substitution. The helper verifies the owned loopback hop process/listener and calls that existing hop, which retains provider credential/protocol handling. It does not read provider secrets, contact a provider directly, pool accounts, add a provider or fall back. Custom and current route/state authority are rechecked around the request; changes discard the result.
+The selected global model must have one unambiguous saved route on an exact approved direct origin: canonical OpenCode Go `https://opencode.ai/inference/go`, retained legacy Go `https://opencode.ai/zen/go/v1`, OpenAI API `https://api.openai.com/v1`, or NVIDIA `https://integrate.api.nvidia.com/v1`. Other origins, including unsupported OAuth/backend origins, report unavailable; neither a provider family label nor a same-slug route authorizes substitution. The helper verifies the owned loopback hop process/listener and calls that existing hop, which retains provider credential/protocol handling. It does not read provider secrets, contact a provider directly, pool accounts, add a provider or fall back. Custom and current route/state authority are rechecked around the request; changes discard the result.
 
 For this auxiliary classification only, derive the lowest explicitly catalog-supported `reasoning_effort` in order `none · low · medium · high · xhigh · max`. Do not inherit a costly bot/global effort or invent `none` when the model does not advertise it; a catalog declaring `low` as its minimum requests `low`. A missing/duplicate selected model, malformed/duplicate effort metadata or no explicit supported level refuses instead of guessing, changing models/providers or falling back. This request-scoped effort leaves all bot, global model and compactor settings untouched.
 

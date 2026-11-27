@@ -5,12 +5,11 @@ Use this only when an affected **Linux Grok Bot desktop** shows stale bots or
 Installing OpenBot on the shared Computer does not repair a separate desktop.
 The ordinary OpenBot installer does not run these scripts.
 
-The exact reviewed layouts are Grok Bot **0.75.0 and 0.75.3**. Unknown builds,
-partial patches and mixed release anchors refuse installation. Do not relax
-those checks to make a newer build pass. This does not repair standalone mobile
-delivery or add features removed from the upstream execution engine.
+The composite roster and conversation repair supports Grok Bot **0.75.0 and
+0.75.3**. The current renderer guard below supports the reviewed **1.3.0**
+layout. Unknown builds, partial patches, and mixed release anchors are refused.
 
-## Repair a conversation that crashes
+## Repair a conversation on 0.75.0 or 0.75.3
 
 1. Save any draft and let pending sends finish. Quit the desktop normally.
 2. From a fresh checkout of this public repository, run the preflight:
@@ -55,6 +54,26 @@ bytecode, the composite installer refuses a running app and backs up only its
 `main-app-*.v8` caches before invalidating them. Other caches are retained.
 
 ## Optional update watcher
+
+For the current renderer, use `patch-current-date.py` with
+`ensure-date-guard.sh`. The repair bounds message timestamps before date
+formatting. In compatible layouts, owned Temporal chats sort by recorded
+conversation activity within each section. Chats with a missing or invalid
+activity date use their creation date. Shared chats and other harnesses use the
+stock ordering rules.
+
+Copy both scripts and `patch-sidebar-authority.py` into
+`~/.local/share/openbot/desktop-sidebar-recovery/`. Make
+`ensure-date-guard.sh` executable. Install
+`systemd/grokbot-date-guard.{service,timer}` as user units and enable the timer
+after reviewing the paths and saving any open drafts. Its minute checks use the
+owner's existing sudo permission. The first compatible repair stores an
+archive backup before reloading the desktop through its existing launcher. An
+interrupted reload is retried on the next check. A current failure appears in
+`~/.local/state/openbot/date-guard.alert` and clears after a successful check.
+Open the affected chat and scroll into older history after applying the guard.
+
+### Composite repair for 0.75.0 and 0.75.3
 
 Only configure this if you already manage this desktop with a working
 `grokbot-desktop.service` and have authorized unattended compatible repair.

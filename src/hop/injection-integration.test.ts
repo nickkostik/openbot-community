@@ -914,7 +914,8 @@ test("OFF chat-completions SSE: bytes are exactly the classic passthrough frames
   assert.equal(offOut.raw, expected, "OFF streams the upstream document untouched");
 });
 
-test("OFF anthropic SSE: the converted document is byte-identical to whole-document anthropicSseToChat", async () => {
+test("OFF anthropic SSE: the converted document is byte-identical to whole-document anthropicSseToChat", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
   hardening.resetForTests();
   const env = await fixture({ protocol: "anthropic", mode: "off" });
   env.plan = [{ text: ["Hel", "lo"] }];

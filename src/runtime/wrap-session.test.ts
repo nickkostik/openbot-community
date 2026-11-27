@@ -99,32 +99,46 @@ test("wrapSession is sync, replaces stream, and throws without a binding", () =>
 test("wrapSession chain re-resolves the plan on every stream and getModelId", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-rt-lazy-"));
   const planPath = path.join(dir, "plan.json");
+  const assignmentsPath = path.join(dir, "openbot-bot-models.json");
+  const botId = "00000000-0000-4000-8000-000000000001";
+  const assign = (modelId?: string) => writeFileSync(
+    assignmentsPath, JSON.stringify({ assignments: modelId ? { [botId]: modelId } : {} }),
+  );
+  assign();
   const writePlan = (modelId: string) =>
     writeFileSync(
       planPath,
       JSON.stringify({
         kind: "custom",
         agents: { "*": { modelId, providerId: "p" } },
-        catalog: { providers: [], models: [], bindings: [] },
+        catalog: {
+          providers: [],
+          models: [
+            { id: "q:model-a", providerId: "q", slug: "model-a", maxOutputTokens: 4096 },
+            { id: "p:model-a", providerId: "p", slug: "model-a", maxOutputTokens: 32768 },
+            { id: "q:model-b", providerId: "q", slug: "model-b", maxOutputTokens: 65536 },
+            { id: "p:model-b", providerId: "p", slug: "model-b", maxOutputTokens: 8192 },
+          ],
+          bindings: [],
+        },
       }),
     );
   writePlan("model-a");
 
   const prevPlan = process.env.OPENBOT_PLAN;
+  const prevBotModels = process.env.OPENBOT_BOT_MODELS;
   const prevHost = process.env.OPENBOT_HOP_HOST;
   const prevPort = process.env.OPENBOT_HOP_PORT;
   process.env.OPENBOT_PLAN = planPath;
+  process.env.OPENBOT_BOT_MODELS = assignmentsPath;
 
-  const seen: string[] = [];
+  const seen: { model: string; max_tokens: number }[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      try {
-        seen.push((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string }).model ?? "");
-      } catch {
-        seen.push("");
-      }
+      const { model, max_tokens } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      seen.push({ model, max_tokens });
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.end('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n');
     });
@@ -150,7 +164,10 @@ test("wrapSession chain re-resolves the plan on every stream and getModelId", as
                   throw new Error("stock stream should not run on custom wrap");
                 },
                 getMessages() {
-                  return [{ role: "user", content: "hi" }];
+                  return [
+                    { role: "system", content: `Profile /home/box/agent-data/agents/${botId}/profile.json` },
+                    { role: "user", content: "hi" },
+                  ];
                 },
               };
             },
@@ -174,9 +191,9 @@ test("wrapSession chain re-resolves the plan on every stream and getModelId", as
     };
     assert.equal(provider.getModelId(), "model-a");
 
-    const drain = async () => {
-      const session = provider.getSession((exec: unknown) => exec);
-      const result = session.getExecutor().stream({}, "inv-1", [], {}) as {
+    const executor = provider.getSession((exec: unknown) => exec).getExecutor();
+    const drain = async (maxTokens = 70_000) => {
+      const result = executor.stream({}, "inv-1", [], { maxTokens }) as {
         fullStream: AsyncIterable<unknown>;
       };
       for await (const _part of result.fullStream) {
@@ -184,7 +201,12 @@ test("wrapSession chain re-resolves the plan on every stream and getModelId", as
       }
     };
     await drain();
-    assert.deepEqual(seen, ["model-a"]);
+    assign("q:model-b");
+    await drain();
+    await drain(1200);
+    assign("q:removed");
+    await drain();
+    assign();
 
     // Rewrite the plan without bouncing the host: the very next stream and
     // getModelId must use the new model.
@@ -193,12 +215,20 @@ test("wrapSession chain re-resolves the plan on every stream and getModelId", as
     const session = provider.getSession((exec: unknown) => exec);
     assert.equal(session.getModelId(), "model-b");
     await drain();
-    assert.deepEqual(seen, ["model-a", "model-b"]);
+    assert.deepEqual(seen, [
+      { model: "p:model-a", max_tokens: 32768 },
+      { model: "q:model-b", max_tokens: 65536 },
+      { model: "q:model-b", max_tokens: 1200 },
+      { model: "p:model-a", max_tokens: 32768 },
+      { model: "p:model-b", max_tokens: 8192 },
+    ]);
   } finally {
     server.close();
     server.closeAllConnections();
     if (prevPlan === undefined) delete process.env.OPENBOT_PLAN;
     else process.env.OPENBOT_PLAN = prevPlan;
+    if (prevBotModels === undefined) delete process.env.OPENBOT_BOT_MODELS;
+    else process.env.OPENBOT_BOT_MODELS = prevBotModels;
     if (prevHost === undefined) delete process.env.OPENBOT_HOP_HOST;
     else process.env.OPENBOT_HOP_HOST = prevHost;
     if (prevPort === undefined) delete process.env.OPENBOT_HOP_PORT;

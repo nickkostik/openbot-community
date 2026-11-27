@@ -1,0 +1,29 @@
+[package]
+name = "openbot-runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+httpdate = "1"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tempfile = "3"
+time = { version = "0.3.47", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+url = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }

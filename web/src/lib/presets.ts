@@ -63,7 +63,7 @@ export const PRESETS: readonly Preset[] = [
   {
     id: "alibaba-token-plan", name: "Alibaba Token Plan", origin: ALIBABA_TOKEN_PLAN_ORIGIN, model: "",
     hint: "Use the sk-sp- key for your Singapore Token Plan. Add each subscription as a separate account.",
-    docsUrl: "https://www.alibabacloud.com/help/en/model-studio/base-url",
+    docsUrl: "https://docs.qwencloud.com/developer-guides/clients-and-developer-tools/other-tools",
   },
   {
     id: "alibaba-coding-plan", name: "Alibaba Coding Plan", origin: "https://coding-intl.dashscope.aliyuncs.com/v1", model: "",

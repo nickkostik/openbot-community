@@ -19,7 +19,7 @@ var requestLog = require("./request-log.cjs");
 var turnLease = require("./turn-lease.cjs");
 var contextTruncate = require("./context-truncate.cjs");
 var botModels = require("./bot-models.cjs");
-var { DEEPSEEK_ORIGIN, documentedReasoningEffort, documentedReasoningPolicy, isDirectDeepSeekOrigin, isZaiGlm53Route } = require("./provider-maps.cjs");
+var { DEEPSEEK_ORIGIN, documentedReasoningEffort, documentedReasoningPolicy, isDirectDeepSeekOrigin, isAlibabaGlm53Route, isZaiGlm53Route } = require("./provider-maps.cjs");
 var protocolConverters = require("./protocol-converters.cjs");
 var injectionHardening = require("./injection-hardening.cjs");
 var chatGPTPlan = require("./chatgpt-plan.cjs");
@@ -691,6 +691,12 @@ function hopParameters(model) {
   return params;
 }
 
+function outputTokenField(body, apiType) {
+  if (apiType === "responses") return "max_output_tokens";
+  if (apiType !== "anthropic" && body.max_completion_tokens !== undefined) return "max_completion_tokens";
+  return "max_tokens";
+}
+
 function applyMaxTokens(body, model, apiType) {
   // Generic outbound governance (all providers): the model cap itself is
   // clamped to the global ceiling first, because a poisoned catalog row
@@ -699,15 +705,17 @@ function applyMaxTokens(body, model, apiType) {
   // default); the ceiling only truncates, never inflates.
   var rawCap = Number(model && model.maxOutputTokens);
   var cap = HIGH_AGENT_MAX_TOKENS;
-  if (Number.isFinite(rawCap) && rawCap > 0) {
+  if (Number.isFinite(rawCap) && rawCap >= 1) {
     cap = Math.min(Math.floor(rawCap), MAX_OUTPUT_TOKENS_CEILING);
   }
-  var requested = Number(apiType === "responses" ? (body.max_output_tokens !== undefined ? body.max_output_tokens : body.max_tokens) : body.max_tokens);
-  if (!Number.isFinite(requested) || requested <= 0) {
-    if (apiType === "responses") body.max_output_tokens = cap; else body.max_tokens = cap;
-    return;
-  }
-  if (requested > cap) { if (apiType === "responses") body.max_output_tokens = cap; else body.max_tokens = cap; }
+  var field = outputTokenField(body, apiType);
+  var value = body[field] ?? body.max_completion_tokens ?? body.max_tokens;
+  var requested = Number(value);
+  delete body.max_output_tokens;
+  delete body.max_completion_tokens;
+  delete body.max_tokens;
+  body[field] = Number.isFinite(requested) && requested >= 1 ? Math.min(Math.floor(requested), cap) : cap;
+  return field;
 }
 
 function applyMaps(body, ctx) {
@@ -725,6 +733,9 @@ function applyMaps(body, ctx) {
 
 function encodeUpstreamBody(body, route, apiType) {
   var origin = route.provider.origin;
+  // The existing provider maps adjust the Chat Completions cap via max_tokens.
+  var usesCompletionTokens = apiType === "chat-completions" && body.max_completion_tokens !== undefined;
+  if (usesCompletionTokens) body.max_tokens = body.max_completion_tokens;
   applyMaps(body, {
     modelId: route.model.slug,
     baseUrl: origin,
@@ -732,6 +743,10 @@ function encodeUpstreamBody(body, route, apiType) {
     maxMode: false,
     parameters: hopParameters(route.model),
   });
+  if (usesCompletionTokens) {
+    body.max_completion_tokens = body.max_tokens;
+    delete body.max_tokens;
+  }
   if (apiType === "responses") return protocolConverters.chatToResponses(body, isDirectDeepSeekOrigin(origin));
   if (apiType === "anthropic") return protocolConverters.chatToAnthropic(body);
   return body;
@@ -1679,8 +1694,7 @@ function buildInjectionOutbound(baseBody, messages, route, apiType, maxCompletio
   var next = Object.assign({}, baseBody);
   next.messages = Array.isArray(messages) ? messages.slice() : [];
   if (maxCompletionTokens !== undefined) {
-    if (apiType === "responses") next.max_output_tokens = maxCompletionTokens;
-    else next.max_tokens = maxCompletionTokens;
+    next[outputTokenField(next, apiType)] = maxCompletionTokens;
   }
   applyMaxTokens(next, route.model, apiType);
   var outbound = encodeUpstreamBody(next, route, apiType);
@@ -2013,7 +2027,7 @@ async function handleCompletionsInner(req, res) {
       sendJson(res, 400, unknown);
       return;
     }
-    if (!botModels.modelSupportsChat(route.model)) {
+    if (!botModels.modelSupportsChat(route.model, route.provider.origin)) {
       var unsupported = { error: { message: route.model.slug + " does not support bot chat", code: "model_not_chat" } };
       fields.model = route.model.slug;
       fields.providerId = route.provider.id;
@@ -2041,7 +2055,8 @@ async function handleCompletionsInner(req, res) {
       // normal provider maps and protocol converter then serialize it.
       delete body.reasoning_effort;
       delete body.reasoning;
-      if (isZaiGlm53Route(route.model.slug, route.provider.origin) && isRecord(body.thinking)
+      if ((reasoningPolicy?.kind === "alibaba-glm52" || isZaiGlm53Route(route.model.slug, route.provider.origin) || isAlibabaGlm53Route(route.model.slug, route.provider.origin))
+          && isRecord(body.thinking)
           && typeof body.thinking.clear_thinking === "boolean") {
         // This setting controls prior reasoning history independently of effort.
         body.thinking = { clear_thinking: body.thinking.clear_thinking };
@@ -2049,6 +2064,7 @@ async function handleCompletionsInner(req, res) {
         delete body.thinking;
       }
       delete body.enable_thinking;
+      if (reasoningPolicy?.kind === "alibaba-glm52") delete body.thinking_budget;
       if ((reasoningPolicy?.kind === "nvidia-nemotron-toggle" || reasoningPolicy?.kind === "nvidia-super-vl") && isRecord(body.chat_template_kwargs)) {
         body.chat_template_kwargs = Object.assign({}, body.chat_template_kwargs);
         delete body.chat_template_kwargs.enable_thinking;
@@ -2124,13 +2140,13 @@ async function handleCompletionsInner(req, res) {
       signal: undefined,
     };
     injectionRuntime.signal = injectionRuntime.abortController.signal;
-    try { if (contextTruncate && body && body.openbot_internal_model !== true) contextTruncate.applyContextTruncation(body, route.model); } catch (e) {}
+    var outputField = applyMaxTokens(body, route.model, apiType);
+    try { if (contextTruncate && body && body.openbot_internal_model !== true) contextTruncate.applyContextTruncation(body, route.model, outputField); } catch (e) {}
     if (Array.isArray(body.messages)) {
       omitTextToWireBudget(body.messages, MAX_REQUEST_WIRE_BYTES - outboundEnvelopeBytes(body) - WIRE_HEADROOM_BYTES);
       injectionRuntime.canonicalMessages = body.messages.slice();
     }
     var canonicalBody = Object.assign({}, body, { messages: Array.isArray(body.messages) ? body.messages.slice() : [] });
-    applyMaxTokens(body, route.model, apiType);
     var outboundBody = encodeUpstreamBody(body, route, apiType);
     var __cacheOrigin = String((route.provider && route.provider.origin) || "");
     var __cacheScope = conversationId || (injectionContext && injectionContext.observed && injectionContext.observed.botId) || "";

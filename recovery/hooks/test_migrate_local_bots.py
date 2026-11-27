@@ -1,4 +1,5 @@
 """Room recovery and migration verification must preserve existing identities."""
+import base64
 import copy
 import contextlib
 import importlib.util
@@ -504,6 +505,105 @@ class RoomRecoveryTests(unittest.TestCase):
             MODULE.restore_room_members(self.journal)
 
 
+class MigrationTranscriptTests(unittest.TestCase):
+    def test_stage_preserves_source_sequences_across_undated_and_tied_entries(self):
+        first = {'id': 'z-first', 'timestampMs': 5, 'content': 'First native row'}
+        middle = {'id': 'undated', 'content': 'Undated native row'}
+        last = {'id': 'a-last', 'timestampMs': 5, 'content': 'Last native row'}
+        local = [first, middle, last]
+        cloud = [{'id': 'cloud-earlier', 'timestampMs': 4, 'content': 'Cloud row'}, first, last]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / 'agents' / OLD_MEMBER
+            backup = root / 'backup'
+            save = RoomRecoveryTests.save
+            save(source / 'profile.json', {'agentId': OLD_MEMBER, 'harness': 'temporal'})
+            store = source / 'store.db'
+            with contextlib.closing(sqlite3.connect(store)) as conn, conn:
+                conn.execute('CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)')
+                conn.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT UNIQUE, entry TEXT)')
+                conn.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',
+                                 [(i, row['id'], json.dumps(row)) for i, row in enumerate(local, 1)])
+            cloud_path = backup / 'cloud-transcripts' / (OLD_MEMBER + '.json')
+            def save_cloud(entries):
+                save(cloud_path, {'entries': [
+                    {'seq': str(i), 'body': base64.b64encode(json.dumps(row).encode()).decode()}
+                    for i, row in enumerate(entries, 1)]})
+
+            save_cloud([cloud[0], last, first])
+            original, conflicting_cloud = store.read_bytes(), cloud_path.read_bytes()
+            with mock.patch.object(MODULE, 'SD', root), \
+                    mock.patch.object(MODULE, 'rpc', side_effect=AssertionError('Unexpected remote call')):
+                with self.assertRaisesRegex(ValueError, 'source orders contradict'):
+                    MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+                self.assertFalse((root / 'agents' / MEMBER).exists())
+                self.assertFalse((root / ('local-copy-' + MEMBER)).exists())
+                self.assertFalse((backup / 'history-merge').exists())
+                self.assertEqual(cloud_path.read_bytes(), conflicting_cloud)
+                save_cloud(cloud)
+                original_cloud = cloud_path.read_bytes()
+                MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+            self.assertEqual(store.read_bytes(), original)
+            self.assertEqual(cloud_path.read_bytes(), original_cloud)
+            with contextlib.closing(sqlite3.connect(root / 'agents' / MEMBER / 'store.db')) as conn:
+                rows = [json.loads(row[0]) for row in conn.execute(
+                    'SELECT entry FROM transcript_entries ORDER BY seq')]
+            self.assertEqual(rows, [cloud[0], *local])
+
+    def test_invalid_timestamp_does_not_stage_copy_and_allows_corrected_retry(self):
+        for source, value in (('local', 8_640_000_000_000_001),
+                              ('platform', -8_640_000_000_000_001),
+                              ('platform', None), ('local', True)):
+            with self.subTest(source=source, value=value), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                old = root / 'agents' / OLD_MEMBER
+                target = root / 'agents' / MEMBER
+                backup = root / 'backup'
+                cloud_path = backup / 'cloud-transcripts' / (OLD_MEMBER + '.json')
+                save = RoomRecoveryTests.save
+                save(old / 'profile.json', {'harness': 'temporal'})
+                local = {'id': 'local-message', 'kind': 'message', 'content': 'Local'}
+                cloud = {'id': 'cloud-message', 'kind': 'send-message',
+                         'message': {'type': 'text', 'content': 'Cloud'},
+                         'timestampMs': 8_640_000_000_000_000}
+                (local if source == 'local' else cloud)['timestampMs'] = value
+
+                def save_cloud():
+                    body = base64.b64encode(json.dumps(cloud).encode()).decode()
+                    save(cloud_path, {'entries': [{'seq': '2', 'body': body}]})
+
+                with contextlib.closing(sqlite3.connect(old / 'store.db')) as conn, conn:
+                    conn.execute('CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT)')
+                    conn.execute('CREATE TABLE transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+                    conn.execute('INSERT INTO transcript_entries VALUES(1, ?, ?)',
+                                 (local['id'], json.dumps(local)))
+                save_cloud()
+                original_store = (old / 'store.db').read_bytes()
+                original_cloud = cloud_path.read_bytes()
+                with mock.patch.object(MODULE, 'SD', root), \
+                        mock.patch.object(MODULE, 'rpc', side_effect=AssertionError('Unexpected remote call')):
+                    with self.assertRaisesRegex(ValueError, 'Invalid timestampMs'):
+                        MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER}, {'backup': str(backup)})
+                    self.assertFalse(target.exists())
+                    self.assertFalse((root / ('local-copy-' + MEMBER)).exists())
+                    self.assertFalse((backup / 'history-merge').exists())
+                    self.assertEqual((old / 'store.db').read_bytes(), original_store)
+                    self.assertEqual(cloud_path.read_bytes(), original_cloud)
+
+                    # The corrected input can preserve an undated message and a valid boundary date.
+                    local.pop('timestampMs', None)
+                    cloud['timestampMs'] = 8_640_000_000_000_000
+                    with contextlib.closing(sqlite3.connect(old / 'store.db')) as conn, conn:
+                        conn.execute('UPDATE transcript_entries SET entry=?', (json.dumps(local),))
+                    save_cloud()
+                    result = MODULE.copy_agent(OLD_MEMBER, MEMBER, {OLD_MEMBER: MEMBER},
+                                               {'backup': str(backup)})
+                self.assertEqual(result['transcriptEntries'], 2)
+                with contextlib.closing(sqlite3.connect(target / 'store.db')) as conn:
+                    staged = conn.execute('SELECT seq, entry FROM transcript_entries ORDER BY seq').fetchall()
+                self.assertEqual([(seq, json.loads(entry)) for seq, entry in staged], [(1, local), (2, cloud)])
+
+
 class MigrationVerificationTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -587,6 +687,46 @@ class MigrationVerificationTests(unittest.TestCase):
         for callback in (self.gateway, self.plan, self.write, self.atomic, self.new_uuid):
             callback.assert_not_called()
         return output.getvalue()
+
+    def replace_staged_messages(self, *messages):
+        with contextlib.closing(sqlite3.connect(self.path(MEMBER, 'store.db'))) as conn, conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS transcript_entries(seq INTEGER PRIMARY KEY, id TEXT, entry TEXT)')
+            conn.execute('DELETE FROM transcript_entries')
+            conn.executemany('INSERT INTO transcript_entries VALUES(?,?,?)',
+                             [(i, message['id'], json.dumps(message)) for i, message in enumerate(messages, 1)])
+
+    def test_verify_rejects_an_invalid_date_in_an_existing_staged_copy(self):
+        message = {'id': 'archived-message', 'timestampMs': 8_640_000_000_000_001, 'content': 'Saved message'}
+        self.replace_staged_messages(message)
+        self.verify("Invalid timestampMs in transcript entry 'archived-message'")
+        message.pop('timestampMs')
+        self.replace_staged_messages(message, {'id': 'earlier-date', 'timestampMs': -1})
+        self.verify()
+
+    def test_finalize_validates_staged_dates_before_room_or_platform_updates(self):
+        self.journal['entries'][0]['finalized'] = False
+        self.journal['deliveryVerified'] = {'agentId': MEMBER}
+        self.save(self.journal_path, self.journal)
+        self.plan.side_effect = None
+        self.plan.return_value = self.journal
+        rooms = self.start_mock('_restore_room_members', side_effect=AssertionError('Room recovery reached'))
+        with MODULE.migration_lock():
+            pass
+        message = {'id': 'archived-message', 'timestampMs': 8_640_000_000_000_001, 'content': 'Saved message'}
+        self.replace_staged_messages(message)
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "Invalid timestampMs in transcript entry 'archived-message'"):
+            MODULE.finalize()
+        rooms.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+        message.pop('timestampMs')
+        self.replace_staged_messages(message)
+        with self.assertRaisesRegex(AssertionError, 'Room recovery reached'):
+            MODULE.finalize()
+        rooms.assert_called_once_with(self.journal)
+        for callback in (self.rpc, self.gateway, self.write, self.atomic):
+            callback.assert_not_called()
 
     def test_unregistered_box_copies_require_no_platform_lookup(self):
         self.verify()

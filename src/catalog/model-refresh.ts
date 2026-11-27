@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { nvidiaEmbeddingInputs } from "../../payload/provider-maps.cjs";
 import path from "node:path";
 import { makeModel } from "../domain/model.ts";
 import { isOpenCodeGoOrigin } from "../domain/opencode-go.ts";
@@ -70,9 +71,10 @@ export function mergeModelRefresh(raw: string, lists: ProviderList[], manager: P
       if (!current || current.providerId !== provider.id) continue;
       const lookup = manager.snapshot(current.slug, provider.origin).lookup;
       const direct = goModels.get(current.slug);
+      const embeddingInputs = nvidiaEmbeddingInputs(current.slug, provider.origin);
       const directEfforts = direct?.reasoningLevels.length ? direct.reasoningLevels : undefined;
       const modelType = direct?.modelType === "chat" && current.modelType === undefined ? undefined : direct?.modelType;
-      if (!lookup?.found && !directEfforts && !modelType) continue;
+      if (!lookup?.found && !directEfforts && !modelType && !embeddingInputs) continue;
       const fields: ReturnType<typeof modelRefreshFields> = lookup?.found ? modelRefreshFields(current, lookup.model) : { slug: current.slug };
       const levels = directEfforts ?? fields.reasoningLevels;
       const required = new Set([current.activeReasoning, ...(protectedEfforts.get(current.id) ?? [])]);
@@ -82,6 +84,7 @@ export function mergeModelRefresh(raw: string, lists: ProviderList[], manager: P
       }
       const next = { ...(models[i] as Record<string, unknown>), ...fields,
         ...(modelType ? { modelType } : {}),
+        ...(embeddingInputs ? { modelType: "embedding", modalities: embeddingInputs } : {}),
         ...(levels ? { reasoningLevels: hold ? current.reasoningLevels : levels } : {}) };
       if (!isDeepStrictEqual(next, models[i])) { models[i] = next; updated++; }
     }

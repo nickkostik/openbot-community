@@ -188,6 +188,53 @@ class FreshReturnTests(unittest.TestCase):
         self.assertTrue(state['authorityCommitted']); self.assertFalse(state['nativeAppDeliveryVerified'])
         self.assert_protected(before)
 
+    def test_return_preserves_undated_literal_between_same_time_messages(self):
+        first = {**self.late, 'id': 'z-first'}
+        undated = {**self.late, 'id': 'undated', 'content': 'Saved without a date'}
+        del undated['timestampMs']
+        last = {**self.late, 'id': 'a-last'}
+        self.server_transcripts[fleet.OLD] = cloud([self.first, first, undated, last])
+        before = self.protected()
+
+        result = self.builder.run()
+        entry = result['entries'][0]
+        destination = self.root / 'agents' / entry['newId']
+        values = self.builder.validator.db_entries(destination / 'store.db')
+        self.assertEqual(values[2:], [{**event, 'agentId': entry['newId']}
+                                      for event in (first, undated, last)])
+        records = self.append_calls[0]['records']
+        self.assertEqual([record['id'] for record in records], ['z-first', 'undated', 'a-last'])
+        self.assertEqual(records[1]['timestampState'], 'missing')
+        self.assertNotIn('timestampMs', records[1])
+        self.assertEqual(records[1]['sourcePayloadSha256'], H.sha(H.encoded(undated)))
+        self.assertEqual(records[1]['text'], undated['content'])
+        self.builder.validator.validate(self.r, result, entry)
+        self.assert_protected(before)
+
+    def test_undated_return_refuses_incompatible_dated_source_order(self):
+        later = {**self.late, 'id': 'later', 'timestampMs': 4}
+        undated = {**self.late, 'id': 'undated'}
+        del undated['timestampMs']
+        earlier = {**self.late, 'id': 'earlier', 'timestampMs': 3}
+        self.server_transcripts[fleet.OLD] = cloud([self.first, later, undated, earlier])
+        before = self.protected()
+        previous = self.r.read()
+
+        with self.assertRaisesRegex(RuntimeError, 'Return source ordering requires review'):
+            self.builder.run()
+
+        self.assertEqual(self.r.read(), previous)
+        self.assertEqual(self.append_calls, [])
+        self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
+        self.assert_protected(before)
+
+    def test_return_order_refuses_incompatible_shared_source_constraints(self):
+        entries = {'dated': {'timestampMs': 3}, 'undated': {}}
+        sources = [['dated', 'undated'], ['undated', 'dated']]
+
+        with self.assertRaisesRegex(RuntimeError, 'Return source ordering requires review'):
+            list(H.ordered_return_keys(self.r.merger, entries, sources))
+
     def test_temporal_harness_drift_without_messages_still_uses_fresh_identity(self):
         self.server_transcripts[fleet.OLD] = cloud([self.first])
         self.roster[1]['harness'] = 'temporal'
@@ -198,6 +245,58 @@ class FreshReturnTests(unittest.TestCase):
         self.assertEqual(len(self.checkpoint_calls), 1)
         self.assertEqual(result['previousGenerations'][-1], previous)
         self.assertEqual(len(self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')), 2)
+        self.assert_protected(before)
+
+    def test_temporal_drift_rejects_invalid_checkpoint_dates_and_retries(self):
+        self.server_transcripts[fleet.OLD] = cloud([self.first])
+        self.roster[1]['harness'] = 'temporal'
+        journal = self.r.read()
+        first = {**self.first, 'agentId': fleet.NEW}
+        limit = self.builder.tail.MAX_DATE_MS
+        for key, bad_date in (('timestampMs', limit + 1), ('sentWhileOfflineAtMs', -limit - 1),
+                              ('timestampMs', None), ('timestampMs', True)):
+            with self.subTest(key=key, bad_date=bad_date):
+                current = [first, {**self.local, key: bad_date}]
+                self.set_rows(self.target, current)
+                self.server_transcripts[fleet.NEW] = cloud(current)
+                before = self.protected()
+                with self.assertRaisesRegex(RuntimeError, 'unrenderable ' + key):
+                    self.builder.run()
+                self.assertEqual(self.r.read(), journal)
+                self.assertEqual(self.checkpoint_calls, [])
+                self.assertEqual(self.append_calls, [])
+                self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
+                self.assert_protected(before)
+
+        undated = {key: value for key, value in self.local.items() if key != 'timestampMs'}
+        historical = {**self.local, 'id': 'pre-epoch-checkpoint', 'timestampMs': -limit}
+        current = [first, undated, historical]
+        self.set_rows(self.target, current)
+        self.server_transcripts[fleet.NEW] = cloud(current)
+        before = self.protected()
+        entry = self.builder.run()['entries'][0]
+        installed = self.builder.validator.db_entries(self.root / 'agents' / entry['newId'] / 'store.db')
+        self.assertEqual(installed, [{**event, 'agentId': entry['newId']} for event in current])
+        self.assert_protected(before)
+
+    def test_resume_refuses_older_prepared_return_with_invalid_unread_date(self):
+        with contextlib.closing(sqlite3.connect(self.target / 'store.db')) as db:
+            unread = {'lastActivityAt': self.builder.tail.MAX_DATE_MS + 1}
+            db.execute('INSERT OR REPLACE INTO kv VALUES (?, ?)', ('unreadState', json.dumps(unread)))
+            db.commit()
+        before = self.protected()
+        journal = self.r.read()
+        with (mock.patch.object(self.builder, 'check_return_dates'),
+              mock.patch.object(self.builder, 'install', side_effect=RuntimeError('interrupted before install'))):
+            with self.assertRaisesRegex(RuntimeError, 'interrupted before install'):
+                self.builder.run()
+        self.assertIn('preparedIntent', json.loads((self.root / H.STATE).read_bytes()))
+
+        with self.assertRaisesRegex(RuntimeError, 'unrenderable unread activity timestamp'):
+            self.builder.run()
+
+        self.assertEqual(self.r.read(), journal)
+        self.assertEqual({p.name for p in (self.root / 'agents').iterdir()}, {fleet.OLD, fleet.NEW})
         self.assert_protected(before)
 
     def test_actual_temporal_current_source_keeps_advanced_local_checkpoint_and_cloud_tail(self):

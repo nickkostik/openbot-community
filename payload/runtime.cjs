@@ -12,16 +12,18 @@ var { toOpenAIMessages } = require("./openai-messages.cjs");
 var openaiStream = require("./openai-stream.cjs");
 var requestLog = require("./request-log.cjs");
 var botModels = require("./bot-models.cjs");
+var { managedService } = require("./version.cjs");
 var profileNameCache = Object.create(null);
 
 function sandDir() {
+  if (managedService) return managedService.sandData;
   if (process.env.OPENBOT_SAND_DATA) return process.env.OPENBOT_SAND_DATA;
   if (process.env.OPENBOT_PLAN) return path.dirname(process.env.OPENBOT_PLAN);
   return "/home/box/sand-data";
 }
 
 function pausePath() {
-  if (process.env.OPENBOT_PAUSE) return process.env.OPENBOT_PAUSE;
+  if (!managedService && process.env.OPENBOT_PAUSE) return process.env.OPENBOT_PAUSE;
   return path.join(sandDir(), "openbot-pause.json");
 }
 
@@ -40,7 +42,7 @@ function readPauseState() {
 }
 
 function pauseBotsPath() {
-  if (process.env.OPENBOT_PAUSE_BOTS) return process.env.OPENBOT_PAUSE_BOTS;
+  if (!managedService && process.env.OPENBOT_PAUSE_BOTS) return process.env.OPENBOT_PAUSE_BOTS;
   return path.join(sandDir(), "openbot-pause-bots.json");
 }
 
@@ -64,11 +66,11 @@ function assertNotPaused() {
   }
 }
 
-var PLAN = process.env.OPENBOT_PLAN || path.join(sandDir(), "openbot-plan.json");
-var MODE = process.env.OPENBOT_MODE || path.join(sandDir(), "openbot-mode");
-var LOG = process.env.OPENBOT_LOG || "/tmp/openbot-session.log";
-var HOP_HOST = process.env.OPENBOT_HOP_HOST || "127.0.0.1";
-var HOP_PORT = Number(process.env.OPENBOT_HOP_PORT || "9280");
+var PLAN = !managedService && process.env.OPENBOT_PLAN || path.join(sandDir(), "openbot-plan.json");
+var MODE = !managedService && process.env.OPENBOT_MODE || path.join(sandDir(), "openbot-mode");
+var LOG = managedService ? path.join(sandDir(), "openbot-session.log") : process.env.OPENBOT_LOG || "/tmp/openbot-session.log";
+var HOP_HOST = !managedService && process.env.OPENBOT_HOP_HOST || "127.0.0.1";
+var HOP_PORT = managedService ? managedService.port : Number(process.env.OPENBOT_HOP_PORT || "9280");
 var HIGH_AGENT_MAX_TOKENS = 65536;
 var MAX_SAFE_STRING = 32768;
 
@@ -301,22 +303,23 @@ function defaultMaxTokens(requested, cap) {
   return limit;
 }
 
-function lookupMaxOutput(plan, agent) {
+function findCatalogModel(plan, modelId, providerId) {
   var models = plan && plan.catalog && plan.catalog.models;
-  if (!Array.isArray(models) || !agent) return HIGH_AGENT_MAX_TOKENS;
-  for (var i = 0; i < models.length; i++) {
-    var row = models[i];
-    if (!row) continue;
-    if (row.slug === agent.modelId || row.id === agent.modelId) {
-      var n = Number(row.maxOutputTokens);
-      // Clamp at the source: a poisoned row (e.g. 943718) falls back to the
-      // default instead of flowing into max_tokens and sailing through the
-      // hop-side self-comparison.
-      if (Number.isFinite(n) && n > 0 && n <= MAX_OUTPUT_TOKENS_CEILING) return Math.floor(n);
-      return HIGH_AGENT_MAX_TOKENS;
-    }
-  }
+  if (!Array.isArray(models)) return undefined;
+  return models.find((row) => row && row.id === modelId)
+    || (providerId && models.find((row) => row && row.slug === modelId && row.providerId === providerId))
+    || models.find((row) => row && row.slug === modelId && (!providerId || !row.providerId));
+}
+
+function modelOutputCap(model) {
+  var n = Number(model && model.maxOutputTokens);
+  // Keep invalid caps from overriding the default at the host boundary.
+  if (Number.isFinite(n) && n > 0 && n <= MAX_OUTPUT_TOKENS_CEILING) return Math.floor(n);
   return HIGH_AGENT_MAX_TOKENS;
+}
+
+function lookupMaxOutput(plan, agent) {
+  return modelOutputCap(agent && findCatalogModel(plan, agent.modelId, agent.providerId));
 }
 
 function collectIds(args) {
@@ -702,7 +705,7 @@ var lastSpawnPid = 0;
 function hopHealTarget(overrides) {
   var o = overrides && typeof overrides === "object" ? overrides : {};
   var port = Number.isFinite(Number(o.port)) && Number(o.port) > 0 ? Number(o.port) : HOP_PORT;
-  var unified = port === 9280 || o.unified === true;
+  var unified = managedService !== null || port === 9280 || o.unified === true;
   var repoRoot = process.env.OPENBOT_REPO || path.resolve(__dirname, "..");
   var hostMain = process.env.OPENBOT_HOST_MAIN || process.argv.find(function (arg) {
     return path.isAbsolute(arg) && path.basename(arg) === "host-main.cjs";
@@ -984,7 +987,8 @@ function ensureHopUp(overrides, allowSpawn) {
   return hopHealReady(target).then(function (open) {
     if (open) return { ok: true, action: "already-up" };
     if (healInFlight) return healInFlight;
-    healInFlight = doHealUp(target, allowSpawn);
+    // The installed systemd unit owns this listener and its PID file.
+    healInFlight = doHealUp(target, !managedService && allowSpawn);
     return healInFlight.then(
       function (result) {
         healInFlight = null;
@@ -1047,7 +1051,8 @@ async function hopRequestWithRetry(body, healOverrides, retryState, ctx) {
     if (status >= 200 && status < 300) {
       return res;
     }
-    if (state.attemptIndex >= HOP_RETRY.maxRetries || !isRetryableHopStatus(status)) {
+    if (res.headers["x-openbot-retryable"] === "false" ||
+        state.attemptIndex >= HOP_RETRY.maxRetries || !isRetryableHopStatus(status)) {
       return res;
     }
     if (!state.budgetStart) state.budgetStart = Date.now();
@@ -1077,7 +1082,9 @@ async function* hopPartsWithRetry(body, voiceTool, ctx) {
       var status = res.statusCode || 0;
       if (status < 200 || status >= 300) {
         var raw = await readAll(res);
-        throw new Error("openbot-runtime: hop HTTP " + status + " " + String(raw || "").slice(0, 300));
+        var rejected = new Error("openbot-runtime: hop HTTP " + status + " " + String(raw || "").slice(0, 300));
+        rejected.hopStatus = status;
+        throw rejected;
       }
       for await (var part of iterateOpenAiResponse(res, voiceTool)) {
         exposed = true;
@@ -1110,6 +1117,7 @@ function swallow(p) {
 // it: the hop body then carries no identity fields and the hop-side
 // injection gate reports its honest missing-identity skip reasons.
 function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity) {
+  assertNotPaused();
   var settled = { u: false, e: false, m: false, i: false, r: false };
   var resU, rejU, resE, rejE, resM, rejM, resI, rejI, resR, rejR;
   var usage = swallow(new Promise(function (res, rej) { resU = res; rejU = rej; }));
@@ -1212,8 +1220,10 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       // Per-bot model override: read assignments and the plan fresh on every
       // turn. A stale assignment (model removed from the catalog) falls back
       // to the global model with a log line instead of failing the chat.
+      var livePlan;
       try {
-        var assignment = botModels.resolveAssignment(hostMsgs, loadPlan());
+        livePlan = loadPlan();
+        var assignment = botModels.resolveAssignment(hostMsgs, livePlan);
         if (assignment && assignment.stale) {
           log("bot model assignment " + assignment.modelId + " for bot " + assignment.botId + " is not in the catalog; using the global model");
         } else if (assignment) {
@@ -1222,19 +1232,18 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       } catch (err) {
         /* plan or assignments unreadable: keep the global model */
       }
-      try {
-        var livePlan = loadPlan();
-        var effectiveModel = livePlan.catalog.models.find(function (model) {
-          return model.id === effectiveModelId || (model.slug === effectiveModelId && model.providerId === agent.providerId);
-        });
-        if (effectiveModel) { effectiveModelId = effectiveModel.id; effectiveProviderId = effectiveModel.providerId; }
-      } catch (err) { /* older minimal plans keep their slug binding */ }
+      var effectiveModel = findCatalogModel(livePlan, effectiveModelId, agent.providerId);
+      if (effectiveModel) {
+        effectiveModelId = effectiveModel.id || effectiveModelId;
+        effectiveProviderId = effectiveModel.providerId || effectiveProviderId;
+      }
       var body = {
         model: effectiveModelId,
         openbotRequestId: requestId,
         messages: toOpenAIMessages(hostMsgs),
         stream: true,
-        max_tokens: defaultMaxTokens(options2 && options2.maxTokens, agent.maxOutputTokens),
+        max_tokens: defaultMaxTokens(options2 && options2.maxTokens,
+          effectiveModel ? modelOutputCap(effectiveModel) : agent.maxOutputTokens),
       };
       // Conversation identity for the delivery-follow-up gate. Stamped once
       // per hop request, so BOTH upstream calls of one request (the first
@@ -1300,7 +1309,7 @@ function hopFullStream(exec, agent, ctx, invocationId, tools, options2, identity
       log("stream error " + (err && err.message));
       failAll(err);
       recordCustomHost({
-        status: 502,
+        status: Number.isInteger(err && err.hopStatus) ? err.hopStatus : 502,
         error: err && err.message ? String(err.message) : "hop failed",
       });
       yield { type: "error", error: err };
@@ -1477,6 +1486,7 @@ function tapExecutor(exec, meta) {
     get: function (target, prop, receiver) {
       if (prop === "stream") {
         return function (ctx, invocationId, tools, options2) {
+          assertNotPaused();
           var startedMs = Date.now();
           var startedAt = new Date().toISOString();
           var messages = typeof target.getMessages === "function" ? target.getMessages() : [];

@@ -14,8 +14,16 @@ var GLM_BASE_RE = /bigmodel\.cn/;
 var GROK_MODEL_RE = /^grok[-.]/i;
 var ZAI_DIRECT_RE = /^https:\/\/api\.z\.ai\/api\/(?:coding\/)?paas\/v4\/?$/i;
 var ZAI_GLM53_RE = /^glm-5\.3(?:-flash)?$/i;
-var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
-var ALIBABA_TOKEN_PLAN_CHAT_ORIGIN = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+var GLM53_EFFORTS = new Set(["low", "high", "max"]);
+var ALIBABA_TOKEN_PLAN_CHAT_ORIGINS = new Set([
+  "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+  "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+]);
+var ALIBABA_GLM52 = Object.freeze({
+  kind: "alibaba-glm52",
+  levels: Object.freeze(["default", "none", "high", "max"]),
+  aliases: Object.freeze({ minimal: "high", low: "high", medium: "high", xhigh: "max" }),
+});
 var ALIBABA_QWEN_REASONING_RE = /^(?:qwen4-max|qwen3\.8-(?:max(?:-0902)?|flash|2\.4t-a95b|27b))$/i;
 var ALIBABA_QWEN_EFFORT_RE = /^(?:none|minimal|low|medium|high|xhigh|max)$/;
 var DEEPSEEK_ORIGIN = "https://api.deepseek.com";
@@ -37,6 +45,7 @@ var NVIDIA_NEMOTRON_TOGGLE = Object.freeze({
   aliases: Object.freeze({ minimal: "on", low: "on", medium: "on", high: "on", xhigh: "on", max: "on" }),
 });
 var NVIDIA_LIGHTNING = Object.freeze(Object.assign({}, NVIDIA_NEMOTRON_TOGGLE, { maxOutputTokens: 32768 }));
+var NVIDIA_DIRECT = /^https:\/\/integrate\.api\.nvidia\.com(?:\/v1)?\/*$/i;
 var NVIDIA_SUPER_VL = Object.freeze({
   kind: "nvidia-super-vl",
   apiType: "chat-completions",
@@ -54,12 +63,32 @@ function isDirectDeepSeekOrigin(baseUrl) {
   return /^https:\/\/api\.deepseek\.com(?::443)?(?:\/(?:v1(?:\/(?:chat\/completions|responses))?|chat\/completions|responses|anthropic(?:\/v1(?:\/messages)?)?))?\/*$/i.test(baseUrl);
 }
 
+// Source: NVIDIA's retrieval API reference and model cards.
+function nvidiaEmbeddingInputs(modelId, baseUrl) {
+  if (!NVIDIA_DIRECT.test(baseUrl)) return undefined;
+  switch (modelId) {
+    case "nvidia/llama-3.2-nemoretriever-1b-vlm-embed-v1":
+    case "nvidia/llama-nemotron-embed-vl-1b-v2":
+    case "nvidia/nemotron-3.5-embed-1b":
+    case "nvidia/nemotron-3.5-embed-8b":
+    case "nvidia/nvclip":
+      return ["text", "image"];
+    case "nvidia/embed-qa-4":
+    case "nvidia/llama-3.2-nv-embedqa-1b-v1":
+    case "nvidia/nemotron-3-embed-1b":
+    case "nvidia/nv-embedqa-mistral-7b-v2":
+    case "snowflake/arctic-embed-l":
+      return ["text"];
+  }
+}
+
 function documentedReasoningPolicy(modelId, baseUrl) {
   if (isDirectDeepSeekOrigin(baseUrl) && DEEPSEEK_V4_RE.test(modelId)) return DEEPSEEK_V4;
   if (/^https:\/\/api\.kimi\.(?:com|ai)\/coding(?:\/v1)?\/*$/i.test(baseUrl) && /^k3\.1-pro(?:-highspeed)?$/.test(modelId)) {
     return KIMI_CODE_PRO;
   }
-  if (!/^https:\/\/integrate\.api\.nvidia\.com(?:\/v1)?\/*$/i.test(baseUrl)) return undefined;
+  if (modelId === "glm-5.2" && isAlibabaTokenPlanOrigin(baseUrl)) return ALIBABA_GLM52;
+  if (!NVIDIA_DIRECT.test(baseUrl)) return undefined;
   if (modelId === "nvidia/nemotron-3.5-super-vl-120b-a12b") return NVIDIA_SUPER_VL;
   if (modelId === "nvidia/nemotron-3.5-lightning-30b-a3b") return NVIDIA_LIGHTNING;
   if (modelId === "nvidia/nemotron-3.5-bolt-e4b") return NVIDIA_NEMOTRON_TOGGLE;
@@ -71,6 +100,14 @@ function isGlmRoute(modelId, baseUrl) {
 
 function isZaiGlm53Route(modelId, baseUrl) {
   return ZAI_DIRECT_RE.test(String(baseUrl || "")) && ZAI_GLM53_RE.test(String(modelId || ""));
+}
+
+function isAlibabaGlm53Route(modelId, baseUrl) {
+  return /^glm-5\.3$/i.test(modelId) && isAlibabaTokenPlanOrigin(baseUrl);
+}
+
+function isAlibabaTokenPlanOrigin(baseUrl) {
+  return ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(String(baseUrl).toLowerCase().replace(/\/+$/, ""));
 }
 
 function isGrokRoute(modelId, baseUrl) {
@@ -174,10 +211,71 @@ function applyNvidiaNemotron(body, parameters, policy) {
   return policy.kind;
 }
 
+function applyGlm53Effort(body, parameters) {
+  var effort = param(parameters, "effort");
+  if (GLM53_EFFORTS.has(effort)) body.reasoning_effort = effort;
+  if (!GLM53_EFFORTS.has(body.reasoning_effort)) delete body.reasoning_effort;
+}
+
+function clearThinking(body) {
+  return typeof body.clear_thinking === "boolean" ? body.clear_thinking : body.thinking?.clear_thinking;
+}
+
+function applyAlibabaGlm52(body, parameters, apiType) {
+  var responses = apiType === "responses";
+  var thinking = param(parameters, "thinking");
+  var saved = documentedReasoningEffort(ALIBABA_GLM52, param(parameters, "effort"));
+  var selected = String(thinking).toLowerCase() === "false" ? "none" : saved;
+  if (!selected || selected === "default") {
+    selected = String(param(parameters, "fast")).toLowerCase() === "true" ? "none" : undefined;
+  }
+  var enabled = typeof body.enable_thinking === "boolean" ? body.enable_thinking : undefined;
+  if (enabled === undefined) {
+    if (body.thinking?.type === "enabled") enabled = true;
+    if (body.thinking?.type === "disabled") enabled = false;
+  }
+  var effort = selected;
+  if (!effort) {
+    var native = responses ? body.reasoning?.effort : undefined;
+    effort = enabled === false ? "none"
+      : documentedReasoningEffort(ALIBABA_GLM52, native)
+        || documentedReasoningEffort(ALIBABA_GLM52, body.reasoning_effort);
+    if (effort === "default" || (enabled === true && effort === "none")) effort = undefined;
+  }
+
+  var clear = clearThinking(body);
+  delete body.thinking;
+  delete body.enable_thinking;
+  delete body.reasoning;
+  delete body.reasoning_effort;
+  delete body.clear_thinking;
+  if (responses) {
+    delete body.thinking_budget;
+    if (effort) body.reasoning_effort = effort;
+  } else {
+    if (selected || effort === "none") delete body.thinking_budget;
+    if (effort) body.enable_thinking = effort !== "none";
+    else if (enabled !== undefined) body.enable_thinking = enabled;
+    if (effort && effort !== "none") body.reasoning_effort = effort;
+    if (typeof clear === "boolean") body.clear_thinking = clear;
+  }
+  return ALIBABA_GLM52.kind;
+}
+
+function applyAlibabaGlm53(body, parameters) {
+  var clear = clearThinking(body);
+  if (typeof clear === "boolean") body.clear_thinking = clear;
+  else delete body.clear_thinking;
+  delete body.thinking;
+  delete body.thinking_budget;
+  delete body.reasoning;
+  body.enable_thinking = true;
+  applyGlm53Effort(body, parameters);
+  return body.reasoning_effort === undefined ? "alibaba-glm53-default" : "alibaba-glm53-effort";
+}
+
 function applyZaiGlm53(body, parameters) {
-  var effort = String(param(parameters, "effort"));
-  if (ZAI_GLM53_EFFORT_RE.test(effort)) body.reasoning_effort = effort;
-  if (!ZAI_GLM53_EFFORT_RE.test(String(body.reasoning_effort))) delete body.reasoning_effort;
+  applyGlm53Effort(body, parameters);
 
   // GLM-5.3 always thinks on Z.AI. Keep supported thinking options while
   // replacing a disabled flag carried over from another model or a legacy setting.
@@ -279,11 +377,16 @@ function applyProviderReasoningControls(body, ctx) {
   if (documented === KIMI_CODE_PRO) {
     return applyKimiCodePro(body, ctx.parameters);
   }
-  if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
+  if (documented === ALIBABA_GLM52) {
+    if (ctx.apiType !== "anthropic") return applyAlibabaGlm52(body, ctx.parameters, ctx.apiType);
+  } else if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
+  if (ctx.apiType === "chat-completions" && isAlibabaGlm53Route(modelId, baseUrl)) {
+    return applyAlibabaGlm53(body, ctx.parameters);
+  }
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
-  if (baseUrl.replace(/\/$/, "") === ALIBABA_TOKEN_PLAN_CHAT_ORIGIN && ALIBABA_QWEN_REASONING_RE.test(modelId)) {
+  if (ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(baseUrl.replace(/\/$/, "")) && ALIBABA_QWEN_REASONING_RE.test(modelId)) {
     return applyAlibabaQwen(body, ctx.parameters);
   }
   if (isGrokRoute(modelId, baseUrl)) {
@@ -298,9 +401,11 @@ function applyProviderReasoningControls(body, ctx) {
 module.exports = {
   DEEPSEEK_ORIGIN: DEEPSEEK_ORIGIN,
   isDirectDeepSeekOrigin: isDirectDeepSeekOrigin,
+  nvidiaEmbeddingInputs: nvidiaEmbeddingInputs,
   documentedReasoningPolicy: documentedReasoningPolicy,
   documentedReasoningEffort: documentedReasoningEffort,
   applyProviderReasoningControls: applyProviderReasoningControls,
+  isAlibabaGlm53Route: isAlibabaGlm53Route,
   isGlmRoute: isGlmRoute,
   isZaiGlm53Route: isZaiGlm53Route,
   isGrokRoute: isGrokRoute,

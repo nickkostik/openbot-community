@@ -270,6 +270,12 @@ Only boolean false opts out; absent/malformed policy enables six-hour discovery.
 
 Refresh uses at most two direct provider calls concurrently and only existing credentials/accounts. It reads latest authority after awaits, preserves removed/changed accounts, default/bot settings/protocols/parameters and never deletes routes omitted by discovery. Explicit context stays; derived context may refresh. Saved output caps never rise and can fall to a smaller positive published limit. A new effort list excluding a selected bot/model effort is held. Plan merge is serialized and compare-checked; no reconcile or bounce.
 
+### Direct Alibaba Token Plan GLM-5.3 reasoning
+
+For Custom Chat Completions, this map applies to `glm-5.3` on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. The hop sends top-level `enable_thinking: true` and forwards only `low`, `high` or `max` as explicit `reasoning_effort` values. A supported selected effort takes priority over the incoming value.
+
+OpenBot preserves a top-level `clear_thinking` boolean or promotes a boolean from legacy `thinking.clear_thinking` when there is no top-level boolean. This also applies with a saved per-bot effort. When neither field supplies a boolean, OpenBot omits `clear_thinking` and the provider applies its default. Direct Z.AI's GLM-5.3 route uses nested `thinking`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
+
 ### Maximize verified model context
 
 For an authorized largest-window configuration, verify each saved route’s positive published `catalogLimits.contextTokens` against its current provider scope and provenance. Use that route’s exact maximum, including million-token values; honor genuinely narrower provider limits. Missing, null, stale or unmatched limits remain unverified and unchanged until verified; never inflate them or borrow another provider’s same-slug value. A Codex recommended working window is operating guidance, distinct from the published route maximum and the separate output-token limit. [Official GPT-6.1 Sol documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) publishes a 1,050,000-token context window; that fact alone does not prove a configured account accepts a full-window request.

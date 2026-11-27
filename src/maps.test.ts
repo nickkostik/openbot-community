@@ -181,6 +181,26 @@ test("Alibaba Token Plan keeps an explicit Qwen budget at the default setting", 
   assert.deepEqual(body, { model: "qwen3.8-max", thinking_budget: 4096 });
 });
 
+test("Alibaba Token Plan GLM-5.3 uses native thinking and effort fields", () => {
+  for (const baseUrl of [alibabaTokenPlan, legacyAlibabaTokenPlan + "/"]) {
+    for (const [selected, incoming, expected] of [
+      ["low", "max", "low"], ["high", "low", "high"], ["max", "high", "max"],
+      ["default", "high", "high"], ["default", "medium", undefined], ["none", "none", undefined],
+    ] as const) {
+      const body: Record<string, unknown> = {
+        model: "glm-5.3", enable_thinking: false, reasoning_effort: incoming, thinking_budget: 4096,
+        thinking: { type: "disabled", clear_thinking: true }, clear_thinking: false,
+      };
+      maps.applyProviderReasoningControls(body, {
+        modelId: "glm-5.3", baseUrl, apiType: "chat-completions",
+        parameters: [{ id: "fast", value: "true" }, { id: "effort", value: selected }],
+      });
+      assert.deepEqual(body, { model: "glm-5.3", enable_thinking: true, clear_thinking: false,
+        ...(expected ? { reasoning_effort: expected } : {}) });
+    }
+  }
+});
+
 test("Alibaba Token Plan Qwen mapping does not apply to the same slug at another provider", () => {
   const body: Record<string, unknown> = { model: "qwen3.8-flash" };
   maps.applyProviderReasoningControls(body, {

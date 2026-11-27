@@ -309,8 +309,8 @@ test("per-bot GLM reasoning overrides a legacy fast parameter", async () => {
   }, "glm-5.3-flash");
 });
 
-test("a per-bot GLM-5.3 effort preserves the direct Z.AI thinking history choice", async (t) => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-zai-bot-reasoning-"));
+test("per-bot GLM-5.3 effort preserves thinking history on each direct account route", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "openbot-glm53-bot-reasoning-"));
   const upstream = await captureUpstream();
   const originalEnv = process.env;
   process.env = {
@@ -328,32 +328,61 @@ test("a per-bot GLM-5.3 effort preserves the direct Z.AI thinking history choice
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const model = "z2:glm-5.3-flash";
+  const routes = [
+    { id: "z2", slug: "glm-5.3-flash", origin: "https://api.z.ai/api/coding/paas/v4" },
+    { id: "alibaba", slug: "glm-5.3", origin: "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1" },
+    { id: "alibaba-2", slug: "glm-5.3", origin: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" },
+  ];
+  const models = routes.map(({ id, slug }) => ({
+    id: id + ":" + slug, providerId: id, slug, parameters: [],
+    reasoningLevels: ["default", "low", "high", "max"], activeReasoning: "low",
+  }));
   writeFileSync(path.join(dir, "plan.json"), JSON.stringify({ kind: "custom", catalog: {
-    providers: [{ id: "z2", origin: "https://api.z.ai/api/coding/paas/v4", apiType: "chat-completions" }],
-    models: [{ id: model, providerId: "z2", slug: "glm-5.3-flash", parameters: [],
-      reasoningLevels: ["default", "low", "high", "max"], activeReasoning: "low" }],
+    providers: routes.map(({ id, origin }) => ({ id, origin, apiType: "chat-completions" })),
+    models,
     bindings: [],
   } }));
-  writeFileSync(path.join(dir, "secrets.json"), JSON.stringify({ providers: { z2: "fixture-key" } }));
-  writeFileSync(path.join(dir, "bot-models.json"), JSON.stringify({ reasoning: { [botId]: { [model]: "max" } } }));
+  writeFileSync(path.join(dir, "secrets.json"), JSON.stringify({
+    providers: Object.fromEntries(routes.map(({ id }) => [id, "fixture-key-" + id])),
+  }));
+  const settings = path.join(dir, "bot-models.json");
+  writeFileSync(settings, JSON.stringify({
+    reasoning: { [botId]: Object.fromEntries(models.map(({ id }) => [id, "max"])) },
+  }));
 
+  let destination = "";
   t.mock.method(https, "request", (options: http.RequestOptions, onResponse: (response: http.IncomingMessage) => void) => {
-    assert.equal(options.hostname, "api.z.ai");
-    assert.equal(options.path, "/api/coding/paas/v4/chat/completions");
+    destination = "https://" + options.hostname + options.path;
     return http.request({ ...options, protocol: "http:", hostname: "127.0.0.1", port: upstream.port, agent: undefined }, onResponse);
   });
   const { handleHopRequest } = createRequire(import.meta.url)("../../payload/hop-handler.cjs") as { handleHopRequest: http.RequestListener };
   const hop = await listen(handleHopRequest);
   t.after(() => hop.server.close());
 
-  for (const clearThinking of [false, true, "false"]) {
-    const response = await post(hop.port, { model, messages: botMessages,
-      reasoning_effort: "low", thinking: { type: "disabled", clear_thinking: clearThinking } });
-    assert.equal(response.status, 200);
-    assert.equal(upstream.getBody()?.reasoning_effort, "max");
-    assert.deepEqual(upstream.getBody()?.thinking, typeof clearThinking === "boolean"
-      ? { type: "enabled", clear_thinking: clearThinking }
-      : { type: "enabled" });
+  for (const { id, slug, origin } of routes) {
+    for (const clearThinking of [false, true, "false"]) {
+      const response = await post(hop.port, { model: id + ":" + slug, messages: botMessages,
+        reasoning_effort: "low", thinking: { type: "disabled", clear_thinking: clearThinking } });
+      assert.equal(response.status, 200);
+      assert.equal(destination, origin + "/chat/completions");
+      const body = upstream.getBody();
+      assert.equal(body?.model, slug);
+      assert.equal(body?.reasoning_effort, "max");
+      const clear = typeof clearThinking === "boolean" ? clearThinking : undefined;
+      if (id === "z2") {
+        assert.deepEqual(body?.thinking, { type: "enabled", ...(clear === undefined ? {} : { clear_thinking: clear }) });
+        assert.equal(body?.clear_thinking, undefined);
+      } else {
+        assert.equal(body?.enable_thinking, true);
+        assert.equal(body?.clear_thinking, clear);
+        assert.equal(body?.thinking, undefined);
+      }
+    }
+  }
+
+  writeFileSync(settings, JSON.stringify({ reasoning: {} }));
+  for (const model of models) {
+    assert.equal((await post(hop.port, { model: model.id, messages: botMessages })).status, 200);
+    assert.equal(upstream.getBody()?.reasoning_effort, "low");
   }
 });

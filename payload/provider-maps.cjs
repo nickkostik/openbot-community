@@ -14,7 +14,7 @@ var GLM_BASE_RE = /bigmodel\.cn/;
 var GROK_MODEL_RE = /^grok[-.]/i;
 var ZAI_DIRECT_RE = /^https:\/\/api\.z\.ai\/api\/(?:coding\/)?paas\/v4\/?$/i;
 var ZAI_GLM53_RE = /^glm-5\.3(?:-flash)?$/i;
-var ZAI_GLM53_EFFORT_RE = /^(?:low|high|max)$/;
+var GLM53_EFFORTS = new Set(["low", "high", "max"]);
 var ALIBABA_TOKEN_PLAN_CHAT_ORIGINS = new Set([
   "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
   "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
@@ -94,6 +94,11 @@ function isGlmRoute(modelId, baseUrl) {
 
 function isZaiGlm53Route(modelId, baseUrl) {
   return ZAI_DIRECT_RE.test(String(baseUrl || "")) && ZAI_GLM53_RE.test(String(modelId || ""));
+}
+
+function isAlibabaGlm53Route(modelId, baseUrl) {
+  return /^glm-5\.3$/i.test(modelId)
+    && ALIBABA_TOKEN_PLAN_CHAT_ORIGINS.has(String(baseUrl).toLowerCase().replace(/\/+$/, ""));
 }
 
 function isGrokRoute(modelId, baseUrl) {
@@ -197,10 +202,26 @@ function applyNvidiaNemotron(body, parameters, policy) {
   return policy.kind;
 }
 
+function applyGlm53Effort(body, parameters) {
+  var effort = param(parameters, "effort");
+  if (GLM53_EFFORTS.has(effort)) body.reasoning_effort = effort;
+  if (!GLM53_EFFORTS.has(body.reasoning_effort)) delete body.reasoning_effort;
+}
+
+function applyAlibabaGlm53(body, parameters) {
+  var clear = typeof body.clear_thinking === "boolean" ? body.clear_thinking : body.thinking?.clear_thinking;
+  if (typeof clear === "boolean") body.clear_thinking = clear;
+  else delete body.clear_thinking;
+  delete body.thinking;
+  delete body.thinking_budget;
+  delete body.reasoning;
+  body.enable_thinking = true;
+  applyGlm53Effort(body, parameters);
+  return body.reasoning_effort === undefined ? "alibaba-glm53-default" : "alibaba-glm53-effort";
+}
+
 function applyZaiGlm53(body, parameters) {
-  var effort = String(param(parameters, "effort"));
-  if (ZAI_GLM53_EFFORT_RE.test(effort)) body.reasoning_effort = effort;
-  if (!ZAI_GLM53_EFFORT_RE.test(String(body.reasoning_effort))) delete body.reasoning_effort;
+  applyGlm53Effort(body, parameters);
 
   // GLM-5.3 always thinks on Z.AI. Keep supported thinking options while
   // replacing a disabled flag carried over from another model or a legacy setting.
@@ -303,6 +324,9 @@ function applyProviderReasoningControls(body, ctx) {
     return applyKimiCodePro(body, ctx.parameters);
   }
   if (documented) return applyNvidiaNemotron(body, ctx.parameters, documented);
+  if (ctx.apiType === "chat-completions" && isAlibabaGlm53Route(modelId, baseUrl)) {
+    return applyAlibabaGlm53(body, ctx.parameters);
+  }
   if (isZaiGlm53Route(modelId, baseUrl)) {
     return applyZaiGlm53(body, ctx.parameters);
   }
@@ -325,6 +349,7 @@ module.exports = {
   documentedReasoningPolicy: documentedReasoningPolicy,
   documentedReasoningEffort: documentedReasoningEffort,
   applyProviderReasoningControls: applyProviderReasoningControls,
+  isAlibabaGlm53Route: isAlibabaGlm53Route,
   isGlmRoute: isGlmRoute,
   isZaiGlm53Route: isZaiGlm53Route,
   isGrokRoute: isGrokRoute,

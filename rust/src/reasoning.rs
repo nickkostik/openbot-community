@@ -74,6 +74,9 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
     let effort = selection.effort();
     let slug = selection.model.slug.to_ascii_lowercase();
     let origin = selection.provider.origin.to_ascii_lowercase();
+    let alibaba_glm53 = protocol == Protocol::ChatCompletions
+        && slug == "glm-5.3"
+        && is_alibaba_token_plan_origin(&origin);
     let direct_zai = matches!(
         origin.trim_end_matches('/'),
         "https://api.z.ai/api/coding/paas/v4" | "https://api.z.ai/api/paas/v4"
@@ -93,7 +96,9 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
                 "enable_thinking",
             ],
         );
-        if direct_zai && let Some(clear) = clear_thinking {
+        if (direct_zai || alibaba_glm53)
+            && let Some(clear) = clear_thinking
+        {
             body.insert("thinking".into(), json!({"clear_thinking": clear}));
         }
         if body.contains_key("output_config") {
@@ -116,6 +121,7 @@ pub fn apply(body: &mut Body, selection: &Selection<'_>, protocol: Protocol) {
         Some(PolicyKind::NvidiaToggle) => nvidia(body, selection, effort, true),
         Some(PolicyKind::NvidiaSuper) => nvidia(body, selection, effort, false),
         None if direct_zai => zai(body, effort),
+        None if alibaba_glm53 => alibaba_glm53_chat(body, effort),
         None if is_alibaba_token_plan_origin(&origin)
             && matches!(
                 slug.as_str(),
@@ -248,11 +254,41 @@ fn nvidia(body: &mut Body, selection: &Selection<'_>, saved: Effort, toggle: boo
     }
 }
 
-fn zai(body: &mut Body, saved: Effort) {
+fn glm53_effort(body: &Body, saved: Effort) -> Option<Effort> {
     let allowed = |effort: &Effort| matches!(effort, Effort::Low | Effort::High | Effort::Max);
-    let effort = Some(saved)
+    Some(saved)
         .filter(allowed)
-        .or_else(|| incoming(body, "reasoning_effort").filter(allowed));
+        .or_else(|| incoming(body, "reasoning_effort").filter(allowed))
+}
+
+fn alibaba_glm53_chat(body: &mut Body, saved: Effort) {
+    let effort = glm53_effort(body, saved);
+    let clear_thinking = body
+        .get("clear_thinking")
+        .and_then(Value::as_bool)
+        .or_else(|| body.get("thinking")?.get("clear_thinking")?.as_bool());
+    remove(
+        body,
+        &[
+            "thinking",
+            "thinking_budget",
+            "clear_thinking",
+            "reasoning",
+            "reasoning_effort",
+        ],
+    );
+    // The Token Plan Chat Completions schema requires thinking on GLM-5.3.
+    body.insert("enable_thinking".into(), json!(true));
+    if let Some(clear) = clear_thinking {
+        body.insert("clear_thinking".into(), json!(clear));
+    }
+    if let Some(effort) = effort {
+        body.insert("reasoning_effort".into(), json!(effort));
+    }
+}
+
+fn zai(body: &mut Body, saved: Effort) {
+    let effort = glm53_effort(body, saved);
     if let Some(effort) = effort {
         body.insert("reasoning_effort".into(), json!(effort));
     } else {

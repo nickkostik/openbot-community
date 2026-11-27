@@ -991,6 +991,34 @@ async fn direct_provider_efforts_keep_their_native_fields_and_limits() {
 }
 
 #[tokio::test]
+async fn qwencloud_glm53_uses_its_own_controls_after_a_model_switch() {
+    for origin in [
+        "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+    ] {
+        for (saved, expected) in [
+            ("low", Some("low")),
+            ("high", Some("high")),
+            ("max", Some("max")),
+            ("default", None),
+            ("none", None),
+        ] {
+            let mut request = user_request("direct:model", false);
+            request["thinking"] = json!({"type":"disabled", "clear_thinking":false});
+            request["enable_thinking"] = json!(false);
+            request["reasoning_effort"] = json!("medium");
+            request["thinking_budget"] = json!(99);
+            let body = direct_body(origin, "glm-5.3", "chat-completions", saved, request).await;
+            assert_eq!(body["enable_thinking"], true);
+            assert_eq!(body["clear_thinking"], false);
+            assert_eq!(body["reasoning_effort"].as_str(), expected);
+            assert!(!body.as_object().unwrap().contains_key("thinking"));
+            assert!(!body.as_object().unwrap().contains_key("thinking_budget"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn log_capture_applies_policy_redacts_secrets_and_limits_large_bodies() {
     let fixture = Fixture::new().await;
     let mut request = user_request("opencode:synthetic", false);

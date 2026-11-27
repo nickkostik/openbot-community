@@ -597,7 +597,7 @@ The hop applies this reasoning map to `glm-5.3` and `glm-5.3-flash` on the `http
 
 A supported selected effort sets `reasoning_effort` on the outgoing request and takes priority over any incoming value. The map ignores legacy Fast and Off settings on these routes. It preserves a supported incoming effort when no supported effort is selected, and removes an unsupported `reasoning_effort` so the provider default can apply.
 
-If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles GLM-5.2 and other GLM routes.
+If the mapper receives a `thinking` field or keeps a supported effort, it sets `thinking.type` to `enabled` and preserves other options already present in the `thinking` object, including `clear_thinking`. A saved per-bot effort on these routes preserves an explicit boolean `thinking.clear_thinking`, which controls prior reasoning history independently of the selected effort. When both control fields are absent, Z.AI supplies its defaults. The general GLM map handles routes without a dedicated map, including GLM-5.2.
 
 ### Alibaba Token Plan Qwen reasoning
 
@@ -606,6 +606,12 @@ The hop applies this map to the direct Chat Completions bases `https://token-pla
 Off sends `reasoning_effort: "none"`. An explicit effort sends the selected value. Both choices remove the top-level `thinking`, `enable_thinking` and `thinking_budget` fields. Default leaves the caller's reasoning and thinking fields in place at this mapping step.
 
 Alibaba treats `none` as Off for these models and makes `reasoning_effort` and `thinking_budget` mutually exclusive. The provider can map compatible effort values to the same model-specific level. [Alibaba Cloud Chat Completions parameters](https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions).
+
+### Direct Alibaba Token Plan GLM-5.3 reasoning
+
+For Custom Chat Completions, this map applies to `glm-5.3` on the canonical QwenCloud base `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` and the legacy Singapore Token Plan base `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. The hop sends top-level `enable_thinking: true` and forwards only `low`, `high` or `max` as explicit `reasoning_effort` values. A supported selected effort takes priority over the incoming value.
+
+OpenBot preserves a top-level `clear_thinking` boolean or promotes a boolean from legacy `thinking.clear_thinking` when there is no top-level boolean. This also applies with a saved per-bot effort. When neither field supplies a boolean, OpenBot omits `clear_thinking` and the provider applies its default. Direct Z.AI's GLM-5.3 route uses nested `thinking`. [QwenCloud Chat Completions reference](https://docs.qwencloud.com/api-reference/chat/openai-chat).
 
 ### Direct Kimi Code K3.1 Pro reasoning
 
